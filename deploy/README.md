@@ -10,6 +10,20 @@ Cada pasta é um alvo independente e tem seu próprio guia. Os arquivos que a pl
 
 Combinações típicas: **Vercel + Railway** (início/MVP) · **Generic host sozinho** (custo/controle) · Vercel + API no generic host.
 
+## Branches de deploy (repositório `kriptomad/SaaSERP`)
+`main` é a fonte da verdade (monorepo completo). Duas branches espelho, idênticas a `main` no
+momento da criação, existem só para apontar cada plataforma a uma branch dedicada (evita que um
+push qualquer dispare rebuild nas duas plataformas ao mesmo tempo):
+
+| Branch | Plataforma | Configuração |
+|---|---|---|
+| `vercel` | Vercel → Settings → Git → **Production Branch** = `vercel` | Root Directory `apps/web` (ver `vercel/README.md`). |
+| `railway` | Railway → serviço `api`/`worker` → Settings → Source → **Branch** = `railway` | Build via `/railway.toml` na raiz (ver `railway/README.md`). |
+
+**Fluxo de atualização:** desenvolva em `main`; quando for promover para produção, faça
+`git push origin main:vercel` e/ou `git push origin main:railway` (fast-forward, sem merge commit)
+para propagar exatamente o estado testado. Nunca commite direto em `vercel`/`railway`.
+
 Pontos comuns:
 - API: `apps/api/Dockerfile` (distroless; `dist/start.cjs`, `APP_ROLE=worker` para o worker). Web self-host: `apps/web/Dockerfile` + `apps/web/nginx.conf`.
 - Migrations: `packages/db/prisma/migrations` (`npm run db:deploy`).
