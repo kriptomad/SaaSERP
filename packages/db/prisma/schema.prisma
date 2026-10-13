@@ -1,0 +1,3669 @@
+// Gerado a partir de BIBLE_ENGINEERING_V2.md (Capítulo 5 e extensões) — Autor: Bruno Costa
+// NÃO EDITAR MANUALMENTE o bloco gerado automaticamente sem atualizar a Bible correspondente.
+
+enum ReferralStatus {
+  PENDING // indicado se cadastrou, mas ainda não converteu em assinatura paga
+  CONVERTED // indicado assinou um plano pago — recompensa liberada
+  EXPIRED // janela de conversão (90 dias) encerrada sem conversão
+}
+
+model ReferralCode {
+  id        String   @id @default(uuid())
+  tenantId  String   @unique // cada tenant pagante tem exatamente um código próprio
+  code      String   @unique // ex.: "JOAO2025", gerado a partir do nome fantasia + sufixo anti-colisão
+  createdAt DateTime @default(now())
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  referrals Referral[]
+
+  @@map("referral_codes")
+}
+
+model Referral {
+  id               String         @id @default(uuid())
+  referralCodeId   String
+  referredTenantId String         @unique // o tenant indicado só pode ter sido indicado uma vez — nunca dupla contagem
+  status           ReferralStatus @default(PENDING)
+  rewardAppliedAt  DateTime?
+  expiresAt        DateTime // createdAt + 90 dias
+  createdAt        DateTime       @default(now())
+
+  referralCode   ReferralCode @relation(fields: [referralCodeId], references: [id], onDelete: Cascade)
+  referredTenant Tenant       @relation("ReferredTenant", fields: [referredTenantId], references: [id], onDelete: Cascade)
+
+  @@index([status, expiresAt])
+  @@map("referrals")
+}
+
+model LoyaltyProgram {
+  id                      String   @id @default(uuid())
+  tenantId                String   @unique // um programa por tenant — simplicidade deliberada, sem múltiplos programas concorrentes no mesmo CNPJ
+  active                  Boolean  @default(false)
+  pointsPerCurrencyUnit   Decimal  @default(1) @db.Decimal(6, 2) // ex.: 1 ponto a cada R$ 1,00 gasto
+  redemptionValuePerPoint Decimal  @default(0.01) @db.Decimal(6, 4) // ex.: cada ponto vale R$ 0,01 em desconto no resgate
+  minPointsToRedeem       Int      @default(100) // piso para evitar resgates de centavos, custo operacional de processar um resgate trivial
+  pointsExpireAfterDays   Int? // null = pontos nunca expiram; caso contrário, expiração rolante contada a partir de cada lançamento (FIFO de pontos, mesmo princípio do FIFO de lote, Capítulo 6.1)
+  updatedAt               DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("loyalty_programs")
+}
+
+enum LoyaltyTransactionType {
+  EARN // pontos ganhos por uma venda
+  REDEEM // pontos resgatados como desconto em uma venda
+  EXPIRE // pontos expirados automaticamente pelo job de expiração
+  MANUAL_ADJUST // ajuste manual do gerente (ex.: compensação por reclamação)
+}
+
+model LoyaltyAccount {
+  id            String   @id @default(uuid())
+  tenantId      String
+  clientId      String   @unique
+  pointsBalance Int      @default(0)
+  updatedAt     DateTime @updatedAt
+
+  tenant       Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client       Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  transactions LoyaltyTransaction[]
+
+  @@map("loyalty_accounts")
+}
+
+model LoyaltyTransaction {
+  id               String                 @id @default(uuid())
+  loyaltyAccountId String
+  type             LoyaltyTransactionType
+  points           Int // positivo (EARN) ou negativo (REDEEM/EXPIRE)
+  saleId           String? // venda que originou o ganho ou o resgate
+  expiresAt        DateTime? // preenchido apenas em lançamentos EARN quando o programa tem expiração configurada
+  reason           String? // obrigatório em MANUAL_ADJUST, auditado
+  createdAt        DateTime               @default(now())
+
+  loyaltyAccount LoyaltyAccount @relation(fields: [loyaltyAccountId], references: [id], onDelete: Cascade)
+  sale           Sale?          @relation(fields: [saleId], references: [id])
+
+  @@index([loyaltyAccountId, createdAt])
+  @@index([expiresAt])
+  @@map("loyalty_transactions")
+}
+
+// prisma/schema.prisma
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["metrics", "tracing"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// TENANCY, PLANOS E MOTOR DE MÓDULOS (BILLING À LA CARTE)
+// ─────────────────────────────────────────────────────────────────────────
+
+enum TenantStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELLED
+}
+
+/// Capítulo 22.1 — distingue o tenant-empresa (modelo B2B original, nichos de comércio)
+/// do tenant-residência (novo produto B2C "Filitech Pessoal", Capítulo 22): ambos
+/// reaproveitam 100% da infraestrutura multi-tenant (isolamento por tenantId, RBAC,
+/// billing, 2FA) — a diferença está inteiramente nos módulos habilitados e na ausência
+/// de CNPJ/regras fiscais em um tenant PERSONAL.
+enum TenantType {
+  BUSINESS
+  PERSONAL
+  // CORREÇÃO DE AUDITORIA (Capítulo 21.18): um escritório de contabilidade que opera
+  // dentro da plataforma precisa de faturamento, usuários e RBAC próprios — exatamente
+  // a mesma infraestrutura que um tenant BUSINESS já possui (Capítulo 2, Capítulo 6) —
+  // mas NUNCA deve ser confundido com um lojista. Reaproveita-se o backbone `Tenant`
+  // (billing, 2FA, RBAC) em vez de duplicar essa infraestrutura em uma entidade nova,
+  // seguindo o mesmo precedente já usado para PERSONAL (Capítulo 22.1).
+  ACCOUNTING_OFFICE
+}
+
+/// Regime tributário real do tenant (Capítulo 21.1) — determina a fórmula de cálculo
+/// de imposto aplicada em toda venda, nunca uma alíquota fixa hardcoded no código.
+enum TaxRegime {
+  MEI
+  SIMPLES_NACIONAL
+  LUCRO_PRESUMIDO
+  LUCRO_REAL
+}
+
+model Tenant {
+  id                            String       @id @default(uuid())
+  parentTenantId                String? // suporte a hierarquia multi-filial
+  slug                          String       @unique
+  legalName                     String
+  tradeName                     String
+  // CORREÇÃO DE AUDITORIA (Capítulo 22.1): "cnpj" era obrigatório e @unique, o que
+  // tornava estruturalmente impossível criar um tenant PERSONAL (residência/casal não
+  // possui CNPJ). O campo se torna opcional; o Postgres permite múltiplos valores NULL
+  // em uma coluna @unique sem violar a restrição, então nenhum tenant BUSINESS existente
+  // é afetado. A obrigatoriedade condicional (CNPJ obrigatório apenas quando
+  // tenantType = BUSINESS) é validada em código no onboarding (Capítulo 1.2.2/22.1),
+  // nunca apenas prometida em comentário.
+  cnpj                          String?      @unique
+  tenantType                    TenantType   @default(BUSINESS)
+  status                        TenantStatus @default(TRIAL)
+  gracePeriodEndsAt             DateTime?
+  // Perfil fiscal real (Capítulo 21) — determina o motor de cálculo usado em toda venda/NF.
+  // Irrelevante para tenants PERSONAL (Capítulo 22), que nunca emitem documento fiscal.
+  taxRegime                     TaxRegime    @default(SIMPLES_NACIONAL)
+  simplesNacionalAnexo          String? // "I" | "II" | "III" | "IV" | "V" — obrigatório quando taxRegime = SIMPLES_NACIONAL (Capítulo 21.1)
+  // CORREÇÃO DE AUDITORIA (Capítulo 21.11/21.7): `inscricaoEstadual` e `uf` já eram
+  // referenciados em código deste documento (impressão térmica da NFC-e, Capítulo 21.7,
+  // e geração do SPED, Capítulo 21.11) sem nunca terem sido declarados no schema —
+  // adicionados agora como campos reais. `inscricaoEstadual` é opcional porque tenants
+  // PERSONAL (Capítulo 22) e tenants MEI dispensados de IE (nicho de serviço puro) não
+  // o possuem; `uf` é a UF fiscal de origem do próprio tenant (sede/domicílio fiscal),
+  // distinta de `Product.originUf` (Capítulo 21.2, origem fiscal por mercadoria).
+  inscricaoEstadual             String?
+  uf                            String?
+  // Capítulo 11.2 — Ótica: dias de garantia CONTRATUAL adicional configurável pela
+  // loja, somados (nunca substituindo) à garantia legal de 90 dias do CDC — aplicada
+  // automaticamente em `close-sale.service.ts` para toda venda de produto com
+  // `Product.opticsCategory` preenchido (FRAME ou LENS).
+  opticalAdditionalWarrantyDays Int          @default(0)
+  createdAt                     DateTime     @default(now())
+  updatedAt                     DateTime     @updatedAt
+
+  parentTenant                 Tenant?                      @relation("TenantHierarchy", fields: [parentTenantId], references: [id])
+  childTenants                 Tenant[]                     @relation("TenantHierarchy")
+  subscriptions                Subscription[]
+  tenantModules                TenantModule[]
+  // Licença Mestra (Capítulo 2.10) — controle técnico de acesso/offline do app,
+  // DISTINTO da relação `subscriptions` acima (que é cobrança):
+  tenantLicense                TenantLicense?
+  users                        User[]
+  clients                      Client[]
+  suppliers                    Supplier[]
+  products                     Product[]
+  productBatches               ProductBatch[]
+  productSerials               ProductSerial[]
+  productVariants              ProductVariant[]
+  recipes                      Recipe[]
+  productionBatches            ProductionBatch[]
+  workOrders                   WorkOrder[]
+  sales                        Sale[]
+  cashRegisters                CashRegister[]
+  stockMovements               StockMovement[]
+  fiscalDocuments              FiscalDocument[]
+  accountsPayable              AccountPayable[]
+  accountsReceivable           AccountReceivable[]
+  returnableLedgerEntries      ReturnableContainerLedger[]
+  prescriptionRecords          PrescriptionRecord[]
+  healthInsurancePlans         HealthInsurancePlan[] // Capítulo 11.2
+  taxRules                     TaxRule[]
+  ibsCbsRegimeElections        TenantIbsCbsRegimeElection[]
+  chartOfAccounts              ChartOfAccount[]
+  costCenters                  CostCenter[]
+  bankAccounts                 BankAccount[]
+  purchaseOrders               PurchaseOrder[] // Capítulo 17.8
+  fiscalDocumentEvents         FiscalDocumentEvent[] // Capítulo 21.19
+  onlineStoreSettings          OnlineStoreSettings? // Capítulo 8.5
+  inventoryCounts              InventoryCount[] // Capítulo 17.9
+  dataImportJobs               DataImportJob[] // Capítulo 18.5
+  referralCode                 ReferralCode? // Capítulo 2.8 — código próprio deste tenant como indicador
+  referredAs                   Referral?                    @relation("ReferredTenant") // Capítulo 2.8 — registro de que este tenant foi indicado por outro
+  loyaltyProgram               LoyaltyProgram? // Capítulo 4.1.1
+  loyaltyAccounts              LoyaltyAccount[] // Capítulo 4.1.1
+  technicianCommissionRules    TechnicianCommissionRule[] // Capítulo 4.2 — % de comissão por técnico (ou regra padrão do tenant)
+  reportDefinitions            ReportDefinition[]
+  scheduledReports             ScheduledReport[]
+  dashboardLayouts             DashboardLayout[]
+  // Filitech Pessoal (Capítulo 22) — populado apenas quando tenantType = PERSONAL.
+  personalAccounts             PersonalAccount[]
+  personalCategories           PersonalCategory[]
+  personalTransactions         PersonalTransaction[]
+  personalBudgets              PersonalBudget[]
+  personalGoals                PersonalGoal[]
+  personalInvestments          PersonalInvestment[]
+  personalDebts                PersonalDebt[]
+  personalBills                PersonalBill[]
+  netWorthSnapshots            NetWorthSnapshot[]
+  openFinanceConsents          OpenFinanceConsent[]
+  // Módulo Escritório de Contabilidade (Capítulo 21.18). Um tenant com
+  // tenantType = ACCOUNTING_OFFICE possui `accountingFirmProfile` preenchido e aparece
+  // do lado "firma" das relações abaixo; qualquer tenant (BUSINESS ou PERSONAL) pode
+  // aparecer do lado "cliente", inclusive contratando um escritório para fazer seu
+  // IRPF do Carnê-Leão (Capítulo 22.11). Os dois lados reutilizam o mesmo `Tenant`,
+  // mas nunca o mesmo relacionamento — ver nomes de relação distintos a seguir.
+  accountingFirmProfile        AccountingFirmProfile?
+  engagementsAsFirm            AccountingEngagement[]       @relation("EngagementsAsFirm")
+  engagementsAsClient          AccountingEngagement[]       @relation("EngagementsAsClient")
+  accountingTasksAsFirm        AccountingTask[]             @relation("AccountingTasksAsFirm")
+  accountingTasksAsClient      AccountingTask[]             @relation("AccountingTasksAsClient")
+  officialTaxDocuments         OfficialTaxDocument[]        @relation("OfficialTaxDocumentsOfTenant")
+  officialTaxDocumentsIssued   OfficialTaxDocument[]        @relation("OfficialTaxDocumentsGeneratedByFirm")
+  companyPartners              CompanyPartner[] // Capítulo 21.18.12
+  partnerPayouts               PartnerPayout[] // Capítulo 21.18.12
+  // Sistema central de notificações (Capítulo 8.4) — toda notificação multi-canal
+  // (in-app, e-mail, push, WhatsApp/SMS) gerada por qualquer módulo do SaaS passa por
+  // aqui, nunca por um canal paralelo direto.
+  notifications                Notification[]
+  notificationPreferences      NotificationPreference[]
+  pushDeviceTokens             PushDeviceToken[]
+  // Consentimento de Termos de Uso e Política de Privacidade (Capítulo 1.2.2/LGPD
+  // art. 7º, consentimento como base legal para tratamento de dados no cadastro).
+  // `termsVersionAccepted` referencia o identificador de versão publicado (ex.: "2025-01-v3"),
+  // nunca o texto em si — o texto fica versionado em `LegalDocumentVersion` (Capítulo 8.4).
+  termsAcceptedAt              DateTime?
+  termsVersionAccepted         String?
+  privacyPolicyAcceptedAt      DateTime?
+  privacyPolicyVersionAccepted String?
+  PersonalRecurrenceRule       PersonalRecurrenceRule[]
+  Service                      Service[]
+  Appointment                  Appointment[]
+  ClientServicePackage         ClientServicePackage[]
+  RestaurantTable              RestaurantTable[]
+  Comanda                      Comanda[]
+  serviceCommissionEntries     ServiceCommissionEntry[] // Capítulo 11.6 — comissão liberada no fechamento+pagamento da comanda
+  professionalWorkingHours     ProfessionalWorkingHours[] // Capítulo 11.6 — Agenda Online pública
+  OpticalPrescription          OpticalPrescription[]
+  Pet                          Pet[]
+  VaccineRecord                VaccineRecord[]
+  Vehicle                      Vehicle[]
+  VehicleListing               VehicleListing[]
+  ImpersonationSession         ImpersonationSession[]
+  // Capítulo 4.6 — Varejo Geral (crediário/fiado): baixas parciais do saldo utilizado
+  // de crediário do cliente (`Client.creditBalanceUsed`), complementares ao lançamento
+  // em `AccountReceivable` já existente.
+  clientCreditPayments         ClientCreditPayment[]
+  // Capítulo 11.4 — Loja de Roupas/Moda: ledger de crédito de loja gerado por trocas
+  // e o registro das próprias trocas (reentrada de estoque por variante).
+  storeCreditTransactions      StoreCreditTransaction[]
+  productExchanges             ProductExchange[]
+  vehicleConsignmentPayouts    VehicleConsignmentPayout[] // Capítulo 11.12
+  seasonalityWindows           SeasonalityWindow[] // Capítulo 11.5
+
+  @@index([status])
+  @@index([parentTenantId])
+  @@map("tenants")
+}
+
+/// Catálogo global de planos base (Essencial, Profissional) — não é por tenant.
+model Plan {
+  id                   String       @id @default(uuid())
+  code                 String       @unique // BASIC | PRO
+  label                String
+  basePrice            Decimal      @db.Decimal(10, 2)
+  includedModules      String[] // códigos de módulos inclusos por padrão no plano
+  active               Boolean      @default(true)
+  // Filitech Pessoal (Capítulo 22.10) — reaproveita este mesmo modelo de plano/billing
+  // para o produto B2C, sem schema duplicado:
+  audience             PlanAudience @default(BUSINESS)
+  maxConnectedAccounts Int? // teto de OpenFinanceConsent simultâneos no plano gratuito B2C; null = ilimitado (planos pagos e todos os planos BUSINESS)
+  // Cobrança por assento (Capítulo 2.9 — Usuários Adicionais): todo plano BUSINESS
+  // libera `includedUserSeats` usuários ativos sem custo adicional; cada usuário
+  // ativo além desse teto soma `extraUserSeatPrice` ao valor cobrado no próximo
+  // ciclo (nunca bloqueia a criação do usuário — o gatekeeper de módulos já cobre o
+  // caso de bloqueio por inadimplência, Capítulo 2; aqui o excedente é
+  // estritamente uma questão de precificação, não de acesso). Nulo apenas para
+  // planos PERSONAL (B2C, sem conceito de "usuários da empresa").
+  includedUserSeats    Int?         @default(10)
+  extraUserSeatPrice   Decimal?     @default(35.00) @db.Decimal(10, 2)
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+enum PlanAudience {
+  BUSINESS
+  PERSONAL
+  BOTH
+}
+
+/// Catálogo global de módulos à la carte (add-ons de billing).
+model Module {
+  id           String  @id @default(uuid())
+  code         String  @unique // fiscal | whatsapp | multi-filial | work-order | ...
+  label        String
+  monthlyPrice Decimal @db.Decimal(10, 2)
+  description  String
+  active       Boolean @default(true)
+
+  tenantModules TenantModule[]
+
+  @@map("modules")
+}
+
+/// Associação ativa entre Tenant e Module — fonte de verdade do Feature Gating (Capítulo 2.6).
+model TenantModule {
+  id            String    @id @default(uuid())
+  tenantId      String
+  moduleCode    String
+  active        Boolean   @default(true)
+  activatedAt   DateTime  @default(now())
+  deactivatedAt DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  module Module @relation(fields: [moduleCode], references: [code])
+
+  @@unique([tenantId, moduleCode])
+  @@index([tenantId, active])
+  @@map("tenant_modules")
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELLED
+}
+
+model Subscription {
+  id                           String             @id @default(uuid())
+  tenantId                     String
+  planId                       String
+  provider                     String // "stripe" | "asaas"
+  externalSubscriptionId       String             @unique
+  status                       SubscriptionStatus @default(TRIAL)
+  pastDueSince                 DateTime?
+  currentPeriodEnd             DateTime?
+  // Cobrança recorrente real (Capítulo 2.7) — nunca armazena o número do cartão,
+  // apenas o token retornado pelo provedor e metadados de exibição somente-leitura.
+  paymentMethodToken           String? // Stripe PaymentMethod id ("pm_...") ou Asaas creditCardToken
+  paymentMethodBrand           String? // ex.: "VISA", "MASTERCARD" — exibido no autoatendimento (2.7.5)
+  paymentMethodLast4           String? // últimos 4 dígitos, devolvidos pelo próprio provedor
+  // Cobrança por assento (Capítulo 2.9): item de "subscription item" do Stripe
+  // dedicado ao excedente de usuários, cuja `quantity` é sincronizada a cada
+  // criação/desativação de usuário (ver syncSeatQuantityWithProvider). Nulo até
+  // o tenant exceder o primeiro assento incluso pela primeira vez — o item é
+  // criado sob demanda, nunca antecipadamente, para não gerar linha de fatura
+  // com quantidade zero.
+  stripeSeatSubscriptionItemId String?
+  failedPaymentAttempts        Int                @default(0) // alimenta a régua de dunning (2.7.4)
+  nextRetryAt                  DateTime? // próxima tentativa agendada pela régua de dunning
+  // Cancelamento e reembolso (Capítulo 2.7.6):
+  firstChargedAt               DateTime? // data da PRIMEIRA cobrança bem-sucedida desta conta — usada para a janela de arrependimento do Art. 49 CDC (7 dias corridos)
+  cancelRequestedAt            DateTime? // quando o lojista clicou em "Cancelar assinatura"
+  cancelAtPeriodEnd            Boolean            @default(false) // true = não cobrar o próximo ciclo; acesso mantido até currentPeriodEnd
+  // Programa de Indicação (Capítulo 2.8):
+  creditBalanceMonths          Int                @default(0) // meses de crédito acumulados por indicações convertidas — consumidos antes de qualquer débito no cartão
+  firstCycleDiscountPercent    Int? // desconto aplicado apenas ao primeiro ciclo cobrado, quando este tenant foi um indicado
+  createdAt                    DateTime           @default(now())
+  updatedAt                    DateTime           @updatedAt
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan          Plan           @relation(fields: [planId], references: [id])
+  billingEvents BillingEvent[]
+
+  @@index([tenantId, status])
+  @@map("subscriptions")
+}
+
+/// Capítulo 2.10 — Licença Mestra (controle técnico de acesso/offline do app, DISTINTO
+/// de `Subscription`/billing acima, que é cobrança). `TenantLicense` é o que o app
+/// desktop (Electron) e o próprio backend consultam para saber SE o ERP pode logar e
+/// quais módulos de nicho estão liberados — nunca confundir com `User.role` (RBAC
+/// interno do tenant, "licenças de uso na aplicação", Capítulo 7), que é outro conceito.
+enum TenantLicenseStatus {
+  TRIAL // Free/Trial de 15 dias, ERP no modo mais básico (sem módulos de nicho)
+  ACTIVE // assinatura em dia (Subscription.status = ACTIVE/TRIAL com grace period válido)
+  EXPIRED // trial vencido ou assinatura cancelada/suspensa sem regularização
+  SUSPENDED // bloqueio manual pela plataforma (fraude, chargeback etc.), independente do billing
+}
+
+model TenantLicense {
+  id                    String              @id @default(uuid())
+  tenantId              String              @unique // uma licença mestra por tenant, 1:1 com Tenant
+  status                TenantLicenseStatus @default(TRIAL)
+  // Trial de 15 dias (Capítulo 2.4/2.10) — autoexpirável: passado este instante, o
+  // status efetivo vira EXPIRED mesmo sem job rodando, recalculado a cada validação.
+  trialEndsAt           DateTime?
+  // Snapshot dos códigos de `Module` liberados para uso OFFLINE por este tenant no
+  // instante da última ativação — reflete `TenantModule.active = true` no momento da
+  // emissão do token, nunca consultado ao vivo durante a janela offline (ponto central
+  // do requisito "funcionar offline após ativação inicial").
+  licensedModules       String[]
+  // Última vez que `POST /licensing/activate` validou com sucesso contra o
+  // billing/central (sempre online, nunca durante validação offline).
+  lastValidatedAt       DateTime?
+  // Quando o token offline atualmente em uso foi emitido/expira — controla a janela de
+  // uso sem internet (padrão 7 dias, parametrizável por `LICENSE_OFFLINE_TOKEN_DAYS`).
+  offlineTokenIssuedAt  DateTime?
+  offlineTokenExpiresAt DateTime?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  tenant      Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  activations LicenseActivation[]
+
+  @@map("tenant_licenses")
+}
+
+/// Registro de qual dispositivo/instalação (desktop Electron, ou navegador do app web)
+/// ativou a licença mestra deste tenant — permite ao painel admin (Owner) auditar e,
+/// futuramente, revogar um dispositivo específico sem afetar os demais.
+model LicenseActivation {
+  id                String    @id @default(uuid())
+  tenantLicenseId   String
+  deviceFingerprint String // identificador estável gerado pelo cliente (ex.: hash de hardware ids no Electron)
+  deviceLabel       String? // nome amigável opcional informado pelo dispositivo ("Caixa 1 - Balcão")
+  activatedAt       DateTime  @default(now())
+  lastSeenAt        DateTime  @default(now())
+  revokedAt         DateTime?
+
+  tenantLicense TenantLicense @relation(fields: [tenantLicenseId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantLicenseId, deviceFingerprint])
+  @@index([tenantLicenseId])
+  @@map("license_activations")
+}
+
+model BillingEvent {
+  id               String   @id @default(uuid())
+  subscriptionId   String
+  provider         String
+  externalEventKey String
+  type             String
+  payload          Json
+  createdAt        DateTime @default(now())
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, externalEventKey])
+  @@index([subscriptionId, createdAt])
+  @@map("billing_events")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// IDENTITY & RBAC
+// ─────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  OWNER
+  MANAGER
+  TECHNICIAN
+  CASHIER
+  // Papel somente-leitura financeiro do "Portal do Contador" (Capítulo 20.9) — sem
+  // acesso a PDV/estoque/CRM; permissões padrão restritas via RoleDefaultPermission
+  // a "financial:*:read" e "fiscal:document:read".
+  ACCOUNTANT
+  // Capítulo 22.1 — único papel válido em um tenant PERSONAL além de OWNER (que,
+  // num tenant PERSONAL, é quem criou a residência no onboarding). HOUSEHOLD_MEMBER
+  // é o cônjuge/parceiro(a) convidado: lê e lança transações e contas normalmente,
+  // mas não pode excluir o workspace nem remover o OWNER original (RoleDefaultPermission
+  // específica do Capítulo 22.1 nega "household:workspace:delete" e
+  // "household:members:remove-owner" a este papel, mesmo com convite aceito).
+  HOUSEHOLD_MEMBER
+}
+
+model User {
+  id                  String    @id @default(uuid())
+  tenantId            String
+  name                String
+  email               String
+  passwordHash        String
+  role                UserRole
+  active              Boolean   @default(true)
+  // Preferência de modo claro/escuro do app operacional (Capítulo 8.4.3) — sincronizada
+  // entre dispositivos do mesmo usuário, nunca apenas em localStorage local.
+  preferredThemeMode  String    @default("light") // "light" | "dark"
+  // GAP DE AUDITORIA CORRIGIDO (Capítulo 14.1/14.1.1): a prosa da seção 14.1.1 já prometia
+  // que "User ganha os mesmos campos" de 2FA do PlatformAdminUser, mas os campos e relações
+  // nunca tinham sido de fato declarados aqui — eram só texto solto sem lastro no schema.
+  totpSecretEncrypted String? // nulo até o Passo 1 do enrollment (Capítulo 14.2) gerar o segredo
+  totpConfirmedAt     DateTime? // nulo até o Passo 2 confirmar o primeiro código válido (Capítulo 14.2); obrigatório por papel via SystemParameter ENFORCE_2FA_FOR_ROLES
+  managerPinHash      String? // Capítulo 6.8 — argon2id do PIN de 4-6 dígitos para aprovações rápidas em campo (estorno de venda, etc.); nulo até o Owner/Manager configurar. Correção de auditoria: o snippet original do Capítulo 6.8 citava bcrypt, inconsistente com o padrão de hashing argon2id já adotado em todo o restante do sistema (Capítulo 3.5) — a implementação real usa argon2id, nunca um segundo algoritmo de hash isolado.
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  tenant                      Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  rolePermissions             RolePermission[]
+  backupCodes                 TwoFactorBackupCode[] // Capítulo 14.1.1
+  passwordResetTokens         PasswordResetToken[] // Capítulo 14.3
+  activeSessions              ActiveSession[] // Capítulo 14.4
+  salesRefundRequested        Sale[]                       @relation("SaleRefundRequestedBy") // Capítulo 6.8
+  salesRefundAuthorized       Sale[]                       @relation("SaleRefundAuthorizedBy") // Capítulo 6.8
+  sales                       Sale[]
+  workOrders                  WorkOrder[]                  @relation("AssignedTechnician")
+  technicianCommissionRule    TechnicianCommissionRule?    @relation("TechnicianCommissionRuleTechnician")
+  cashRegisters               CashRegister[]
+  osPhotos                    OsPhoto[]
+  // Par obrigatório da relação nomeada Appointment.professional (Capítulo 12) — relações
+  // nomeadas (@relation("Nome")) exigem o campo inverso declarado manualmente dos dois
+  // lados; "prisma format" não resolve esse caso de forma confiável (ver nota abaixo).
+  appointmentsAsProfessional  Appointment[]                @relation("AppointmentProfessional")
+  // Capítulo 11.6 — profissional que de fato executou o serviço lançado na comanda
+  // (pode ser diferente de quem abriu/fechou a comanda); base da comissão liberada
+  // apenas no fechamento+pagamento, nunca no agendamento.
+  comandaItemsAsProfessional  ComandaItem[]                @relation("ComandaItemProfessional")
+  serviceCommissionsEarned    ServiceCommissionEntry[]     @relation("ServiceCommissionProfessional")
+  // Capítulo 11.6 — expediente cadastrado do profissional (por dia da semana),
+  // usado para gerar os horários livres da Agenda Online pública.
+  workingHours                ProfessionalWorkingHours[]   @relation("ProfessionalWorkingHoursProfessional")
+  reportDefinitionsCreated    ReportDefinition[]
+  dashboardLayout             DashboardLayout?
+  // Catálogo fiscal global (Capítulo 21.15/21.16) — só populado em SUPER_ADMIN do painel do dono.
+  ibsCbsRegimeElectionsSigned TenantIbsCbsRegimeElection[]
+  // fiscalCodeCatalogImports removido daqui (CORREÇÃO DE AUDITORIA): o catálogo fiscal
+  // é global de PLATAFORMA, importado por um PlatformAdminUser (painel do dono,
+  // Capítulo 13), nunca por um User de tenant — ver FiscalCodeCatalogImport abaixo.
+  // Filitech Pessoal (Capítulo 22) — só populado em usuários de tenants PERSONAL.
+  personalAccountsOwned       PersonalAccount[]
+  personalTransactionsCreated PersonalTransaction[]
+  personalTransactionSplits   PersonalTransactionSplit[]
+  // Sistema central de notificações (Capítulo 8.4.5):
+  notifications               Notification[]
+  notificationPreferences     NotificationPreference[]
+  pushDeviceTokens            PushDeviceToken[]
+  purchaseOrdersCreated       PurchaseOrder[] // Capítulo 17.8 — usuário que criou o pedido
+  inventoryCountsStarted      InventoryCount[]             @relation("InventoryCountStartedBy") // Capítulo 17.9
+  inventoryCountsApproved     InventoryCount[]             @relation("InventoryCountApprovedBy") // Capítulo 17.9
+  inventoryCountItemsCounted  InventoryCountItem[] // Capítulo 17.9 — contagem individual em campo
+  dataImportJobsCreated       DataImportJob[] // Capítulo 18.5
+  cashRegisterMovements       CashRegisterMovement[] // Capítulo 6.7 — sangrias/suprimentos realizados por este usuário
+
+  @@unique([tenantId, email])
+  @@index([tenantId, role])
+  @@map("users")
+}
+
+/// Matriz padrão de permissões por papel (Owner, Manager, Technician, Cashier) — catálogo
+/// GLOBAL, não tenant-scoped (idêntica para todos os tenants, como Plan/Module), e por isso
+/// fica fora da lista TENANT_SCOPED_MODELS da extensão multi-tenant (Capítulo 7). É a fonte de
+/// verdade consultada pelo gatekeeper (Capítulo 6.1) antes de olhar qualquer override por usuário.
+model RoleDefaultPermission {
+  id             String   @id @default(uuid())
+  role           UserRole
+  permissionCode String
+
+  @@unique([role, permissionCode])
+  @@map("role_default_permissions")
+}
+
+/// Permite overrides finos de permissão por usuário, acima da matriz padrão por papel
+/// (RoleDefaultPermission, acima) — usado tanto para conceder uma exceção pontual
+/// (ex.: um Cashier específico que também fecha o caixa de outra unidade) quanto para
+/// revogar (`granted = false`) algo que o papel teria por padrão.
+model RolePermission {
+  id         String  @id @default(uuid())
+  tenantId   String
+  userId     String
+  permission String
+  granted    Boolean @default(true)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, permission])
+  @@index([tenantId, userId])
+  @@map("role_permissions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PARTIES — CLIENTS & SUPPLIERS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Client {
+  id                          String    @id @default(uuid())
+  tenantId                    String
+  name                        String
+  document                    String?
+  phone                       String?
+  email                       String?
+  creditLimit                 Decimal   @default(0) @db.Decimal(12, 2)
+  creditBalanceUsed           Decimal   @default(0) @db.Decimal(12, 2)
+  whatsappOptInAt             DateTime? // Capítulo 20.2.1 — opt-in explícito para mensagens MARKETING
+  whatsappOptOutAt            DateTime? // Capítulo 20.2.1 — bloqueia qualquer novo envio até novo opt-in
+  isReseller                  Boolean   @default(false) // Capítulo 4.3 — precificação em cascata: seleciona Preço Revenda
+  // Capítulo 11.4 — Loja de Roupas/Moda: saldo de crédito de loja a favor do cliente,
+  // emitido por trocas (ProductExchange/StoreCreditTransaction ISSUED) e consumido
+  // manualmente pelo caixa como desconto numa venda nova (StoreCreditTransaction
+  // REDEEMED) — ledger imutável é a fonte da verdade; este campo é só o saldo
+  // materializado (mesmo padrão de `creditBalanceUsed`/`ClientCreditPayment`).
+  storeCreditBalance          Decimal   @default(0) @db.Decimal(12, 2)
+  // Capítulo 11.8 — Material de Construção/Ferragens: cliente profissional
+  // (construtora/empreiteiro) com faturamento mensal consolidado em vez de
+  // cobrança por venda individual. Reaproveita creditLimit/creditBalanceUsed
+  // já existentes (Capítulo 4.6); este flag só habilita limites mais altos e o
+  // endpoint de fatura consolidada (ver business-accounts.routes.ts).
+  isBusinessAccount           Boolean   @default(false)
+  // Capítulo 11.2 — Ótica (convênios/planos de saúde): vínculo opcional do cliente a
+  // um `HealthInsurancePlan` — vendas com `paymentMethod = HEALTH_INSURANCE`
+  // exigem que o cliente tenha um plano vinculado (close-sale.service.ts).
+  healthInsurancePlanId       String?
+  healthInsurancePlanMemberId String? // número de carteirinha/matrícula do convênio
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
+
+  tenant                  Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  healthInsurancePlan     HealthInsurancePlan?        @relation(fields: [healthInsurancePlanId], references: [id])
+  sales                   Sale[]
+  workOrders              WorkOrder[]
+  containerLedgerEntries  ReturnableContainerLedger[]
+  accountsReceivable      AccountReceivable[]
+  loyaltyAccount          LoyaltyAccount? // Capítulo 4.1.1
+  Appointment             Appointment[]
+  ClientServicePackage    ClientServicePackage[]
+  Comanda                 Comanda[]
+  OpticalPrescription     OpticalPrescription[]
+  Pet                     Pet[]
+  Vehicle                 Vehicle[]
+  VehicleListing          VehicleListing[]
+  creditPayments          ClientCreditPayment[] // Capítulo 4.6 — baixas de crediário/fiado
+  storeCreditTransactions StoreCreditTransaction[] // Capítulo 11.4 — extrato de crédito de loja (trocas)
+  consignmentPayouts      VehicleConsignmentPayout[] // Capítulo 11.12 — repasses de veículo consignado
+
+  @@unique([tenantId, document])
+  @@index([tenantId, name])
+  @@map("clients")
+}
+
+// Capítulo 11.2 — Ótica: convênio/plano de saúde que fatura em lote. A venda
+// individual é lançada normalmente no PDV (`Sale.paymentMethod = HEALTH_INSURANCE`,
+// `Sale.healthInsurancePlanId`); o recebimento efetivo vira uma ÚNICA
+// `AccountReceivable` consolidada por plano/competência (ver
+// `health-insurance-billing.routes.ts`), batendo com a fatura mensal da operadora.
+model HealthInsurancePlan {
+  id            String   @id @default(uuid())
+  tenantId      String
+  name          String
+  billingDueDay Int // dia do mês de vencimento da fatura consolidada (1-28, para caber em todos os meses)
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  clients            Client[]
+  sales              Sale[]
+  accountsReceivable AccountReceivable[]
+
+  @@unique([tenantId, name])
+  @@map("health_insurance_plans")
+}
+
+// Capítulo 4.6 — Varejo Geral (Crediário/Fiado): histórico de baixas (pagamentos,
+// totais ou parciais) do saldo utilizado de crediário (`Client.creditBalanceUsed`).
+// GAP DE AUDITORIA ENCONTRADO E CORRIGIDO: antes deste model, `creditBalanceUsed` só
+// era incrementado por uma venda STORE_CREDIT e nunca tinha nenhum caminho de baixa —
+// o crediário era uma via de mão única que travava o cliente para sempre.
+model ClientCreditPayment {
+  id                 String   @id @default(uuid())
+  tenantId           String
+  clientId           String
+  amount             Decimal  @db.Decimal(12, 2)
+  note               String?
+  registeredByUserId String
+  createdAt          DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, clientId, createdAt])
+  @@map("client_credit_payments")
+}
+
+enum StoreCreditDirection {
+  ISSUED
+  REDEEMED
+}
+
+// Capítulo 11.4 — Loja de Roupas/Moda: ledger imutável do crédito de loja gerado por
+// trocas (ProductExchange, resolutionType STORE_CREDIT ou a diferença a favor do
+// cliente em NEW_ITEM). `Client.storeCreditBalance` é o saldo materializado,
+// atualizado atomicamente a cada lançamento (mesmo padrão de `ClientCreditPayment`/
+// `ReturnableContainerLedger`). Resgate (REDEEMED) hoje é lançado manualmente pelo
+// caixa, vinculando a `Sale` que consumiu o crédito como desconto — nenhuma UI de
+// PDV aplica o crédito automaticamente ainda (gap documentado no fechamento desta
+// rodada, mesmo precedente de "fluxo real pós-venda" usado em farmácia/Rodada 5).
+model StoreCreditTransaction {
+  id               String               @id @default(uuid())
+  tenantId         String
+  clientId         String
+  direction        StoreCreditDirection
+  amount           Decimal              @db.Decimal(12, 2)
+  exchangeId       String? // preenchido quando direction = ISSUED, originado de uma troca
+  redeemedInSaleId String? // preenchido quando direction = REDEEMED, venda que consumiu o crédito
+  note             String?
+  createdByUserId  String
+  createdAt        DateTime             @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, clientId, createdAt])
+  @@map("store_credit_transactions")
+}
+
+enum ExchangeResolutionType {
+  NEW_ITEM
+  STORE_CREDIT
+}
+
+// Capítulo 11.4/11.7 — Troca por tamanho/numeração/defeito: reentrada automática no
+// estoque da VARIANTE correta (nunca do produto genérico agregado) + resolução por
+// nova venda vinculada (NEW_ITEM, com rastreabilidade fiscal via `resultingSaleId`)
+// ou crédito de loja (STORE_CREDIT, via `StoreCreditTransaction`). Mantém
+// `originalSaleItemId` sempre, ligando a troca à nota fiscal/venda de origem.
+model ProductExchange {
+  id                 String                 @id @default(uuid())
+  tenantId           String
+  originalSaleItemId String
+  returnedVariantId  String? // null quando o produto original não usa grade (trackingType NONE)
+  returnedQuantity   Decimal                @db.Decimal(12, 3)
+  reasonCode         String // ex.: "WRONG_SIZE", "DEFECT", "CUSTOMER_REGRET", "WRONG_NUMBERING"
+  resolutionType     ExchangeResolutionType
+  newVariantId       String? // variante entregue na troca (NEW_ITEM)
+  newQuantity        Decimal?               @db.Decimal(12, 3)
+  refundValue        Decimal                @db.Decimal(12, 2) // unitPrice histórico da venda original x quantidade devolvida
+  priceDifference    Decimal?               @db.Decimal(12, 2) // valor do item novo − refundValue (NEW_ITEM); positivo = cliente paga diferença, negativo = vira crédito de loja
+  storeCreditIssued  Decimal?               @db.Decimal(12, 2)
+  resultingSaleId    String? // Sale emitida para cobrar diferença de preço positiva (NEW_ITEM)
+  processedByUserId  String
+  createdAt          DateTime               @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, originalSaleItemId])
+  @@map("product_exchanges")
+}
+
+model Supplier {
+  id                    String   @id @default(uuid())
+  tenantId              String
+  name                  String
+  document              String?
+  phone                 String?
+  email                 String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  // Capítulo 11.2 — Ótica (armações em consignação): metadado informativo do
+  // fornecedor (a regra efetiva de "sem AccountPayable imediato" é aplicada por
+  // `Product.isConsignment`, pois um mesmo fornecedor pode vender parte do
+  // catálogo em consignação e parte à vista/faturado).
+  isConsignmentSupplier Boolean  @default(false)
+
+  tenant              Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  products            Product[]
+  accountsPayable     AccountPayable[]
+  purchaseOrders      PurchaseOrder[] // Capítulo 17.8
+  preferredByProducts Product[]        @relation("PreferredSupplier") // Capítulo 17.8.3
+
+  @@unique([tenantId, document])
+  @@map("suppliers")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PRODUCT CATALOG
+// ─────────────────────────────────────────────────────────────────────────
+
+enum ProductTrackingType {
+  NONE
+  BATCH
+  SERIAL
+  VARIANT
+}
+
+// Capítulo 11.2 — Ótica.
+enum OpticsCategory {
+  FRAME
+  LENS
+}
+
+enum LensDeliveryType {
+  STOCK // lente de prateleira — 1-2 dias úteis
+  CUSTOM // lente personalizada/multifocal sob encomenda — 3-10+ dias úteis
+}
+
+model Product {
+  id                            String              @id @default(uuid())
+  tenantId                      String
+  supplierId                    String?
+  sku                           String
+  barcode                       String?
+  name                          String
+  description                   String?
+  category                      String?
+  trackingType                  ProductTrackingType @default(NONE)
+  ncm                           String?             @default("00000000") // Nomenclatura Comum do Mercosul — resolve a TaxRule (Capítulo 21.6) por produto
+  originUf                      String? // UF de origem fiscal do produto/tenant, usada no cálculo de ICMS-ST interestadual (Capítulo 21.2)
+  nicheCode                     String? // ex.: "PHARMACY", "MARKET" — herda o nicho do Tenant no cadastro, mas pode ser sobrescrito por produto (ex.: farmácia que também vende conveniência)
+  collectionTag                 String? // Capítulo 11.4 — Loja de Roupas/Moda: tag de coleção/estação (ex.: "Verão 2026"), usada no relatório de giro por coleção e na sinalização de liquidação
+  unitPrice                     Decimal             @db.Decimal(12, 2)
+  wholesalePrice                Decimal?            @db.Decimal(12, 2)
+  resalePrice                   Decimal?            @db.Decimal(12, 2)
+  wholesaleMinQty               Int?
+  stockQuantity                 Decimal             @default(0) @db.Decimal(12, 3)
+  minStockThreshold             Decimal?            @db.Decimal(12, 3)
+  // Compras e custeio (Capítulo 17.8) — gap de auditoria: o schema original definia
+  // apenas preços de VENDA (unitPrice/wholesalePrice/resalePrice), nunca o custo de
+  // aquisição, inviabilizando o cálculo real de margem por produto (Capítulo 1.2.4,
+  // 17.2 DRE). `costPrice` é mantido por custo médio ponderado móvel, recalculado a
+  // cada recebimento de Pedido de Compra (17.8.2), nunca sobrescrito pelo último preço.
+  costPrice                     Decimal?            @db.Decimal(12, 4)
+  reorderTargetQuantity         Decimal?            @db.Decimal(12, 3) // até quanto repor quando minStockThreshold é cruzado (17.8.3)
+  preferredSupplierId           String? // fornecedor padrão sugerido na geração automática de Pedido de Compra (17.8.3)
+  isWeighted                    Boolean             @default(false)
+  isReturnableContainer         Boolean             @default(false)
+  isReturnable                  Boolean             @default(true) // controla devolução de venda (varejo geral)
+  requiresPrescriptionRetention Boolean             @default(false) // farmácia — Lista B / tarja preta
+  isControlledSubstance         Boolean             @default(false) // farmácia — escrituração SNGPC
+  // Capítulo 11.2 — Ótica: armação/peça recebida em consignação do fornecedor —
+  // entra em estoque sem gerar `AccountPayable` imediato (purchase-orders receive);
+  // a obrigação financeira só nasce na baixa de estoque por venda efetiva
+  // (close-sale.service.ts).
+  isConsignment                 Boolean             @default(false)
+  // Capítulo 11.2 — Ótica: classifica o produto como armação ou lente de grau, para
+  // aplicar automaticamente (1) a garantia legal de 90 dias CDC + garantia contratual
+  // adicional configurável (`Tenant.opticalAdditionalWarrantyDays`) na venda, e (2) no
+  // caso de LENS, abrir o pedido de laboratório óptico (`WorkOrder.workOrderType`
+  // OPTICAL_LAB) no fechamento da venda.
+  opticsCategory                OpticsCategory?
+  // Prazo de entrega do laboratório (11.2): estoque = 1-2 dias úteis; personalizada
+  // (multifocal/antirreflexo sob encomenda) = 3-10+ dias úteis. Só relevante quando
+  // opticsCategory = LENS.
+  lensDeliveryType              LensDeliveryType?   @default(STOCK)
+  // Capítulo 11.8 (Material de Construção/Ferragens) e 11.2/11.3 (Petshop — ração a
+  // granel): unidade de compra (fechada) vs. unidade de venda (fracionada), com fator
+  // de conversão entre as duas. GAP DE AUDITORIA FECHADO — só existia como comentário.
+  saleUnit                      ProductSaleUnit     @default(UNIT)
+  purchaseUnit                  String? // ex.: "Rolo 100m", "Fardo 25kg", "Caixa 2,5m²"
+  unitConversionFactor          Decimal?            @db.Decimal(12, 4) // 1 unidade de compra = N unidades de venda
+  // Capítulo 11.5 (Papelaria/Presentes) — kit escolar montado como composição de
+  // outros produtos via `Recipe`/`RecipeItem` (mesma ficha técnica da padaria);
+  // a venda de um produto com isKitComposition=true baixa cada componente
+  // individualmente em vez do próprio estoque do kit (ver close-sale.service.ts).
+  isKitComposition              Boolean             @default(false)
+  active                        Boolean             @default(true)
+  createdAt                     DateTime            @default(now())
+  updatedAt                     DateTime            @updatedAt
+
+  tenant                 Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  supplier               Supplier?            @relation(fields: [supplierId], references: [id])
+  preferredSupplier      Supplier?            @relation("PreferredSupplier", fields: [preferredSupplierId], references: [id])
+  batches                ProductBatch[]
+  serials                ProductSerial[]
+  variantAxes            ProductVariantAxis[]
+  variants               ProductVariant[]
+  recipe                 Recipe?
+  recipeUsages           RecipeItem[]         @relation("RecipeIngredient")
+  saleItems              SaleItem[]
+  workOrderItems         WorkOrderItem[]
+  stockMovements         StockMovement[]
+  productionBatchOutputs ProductionBatch[]    @relation("ProductionOutput")
+  purchaseOrderItems     PurchaseOrderItem[] // Capítulo 17.8
+  inventoryCountItems    InventoryCountItem[] // Capítulo 17.9
+  comandaItems           ComandaItem[]
+
+  @@unique([tenantId, sku])
+  @@unique([tenantId, barcode])
+  @@index([tenantId, category])
+  @@index([tenantId, active])
+  @@index([tenantId, collectionTag])
+  @@map("products")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SAZONALIDADE PLANEJADA (Capítulo 11.5 — Papelaria/Presentes)
+// ─────────────────────────────────────────────────────────────────────────
+// Janela de sazonalidade (ex.: "Volta às Aulas" out-fev, "Natal" out-dez)
+// associada a uma categoria de produto (Product.category é string livre,
+// mesma convenção já usada em todo o catálogo — nenhuma FK nova). Usada para
+// (1) ajustar a sugestão automática de compra (GET /purchase-orders/reorder-suggestions)
+// antecipando estoque antes do pico com base no histórico do mesmo período do
+// ano anterior, e (2) sinalizar sobras pós-pico para liquidação
+// (GET /seasonality-windows/clearance-report). Datas representadas como
+// mês/dia (não ano completo) porque a janela se repete todo ano.
+model SeasonalityWindow {
+  id         String   @id @default(uuid())
+  tenantId   String
+  name       String // ex.: "Volta às Aulas", "Natal"
+  category   String // casa com Product.category
+  startMonth Int // 1-12
+  startDay   Int // 1-31
+  endMonth   Int // 1-12
+  endDay     Int // 1-31
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, category])
+  @@map("seasonality_windows")
+}
+
+model ProductBatch {
+  id                         String    @id @default(uuid())
+  tenantId                   String
+  productId                  String
+  batchNumber                String
+  manufacturingDate          DateTime?
+  expirationDate             DateTime
+  quantity                   Decimal   @db.Decimal(12, 3)
+  costPrice                  Decimal?  @db.Decimal(12, 4) // custo de aquisição deste lote específico (Capítulo 17.8.2) — permite FIFO de custo real, não apenas de quantidade/validade
+  // Capítulo 11.10 — Loja de Pneus: reaproveita ProductBatch como lote de
+  // FABRICAÇÃO (não de validade) para fins de acionamento de garantia do
+  // fabricante. `expirationDate` continua obrigatório (FEFO de farmácia/mercado
+  // depende dele); para pneus, que não vencem, é preenchido com uma data
+  // sentinela distante (receivedAt + 50 anos) — decisão documentada em
+  // tire-warranty.routes.ts, nunca interpretada como validade real.
+  manufacturerWarrantyMonths Int?
+  receivedAt                 DateTime  @default(now())
+
+  tenant             Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product            Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  stockMovements     StockMovement[]
+  InventoryCountItem InventoryCountItem[]
+
+  @@unique([tenantId, productId, batchNumber])
+  @@index([tenantId, productId, expirationDate])
+  @@map("product_batches")
+}
+
+model ProductSerial {
+  id           String   @id @default(uuid())
+  tenantId     String
+  productId    String
+  serialNumber String
+  imei         String?
+  status       String   @default("IN_STOCK")
+  workOrderId  String?
+  createdAt    DateTime @default(now())
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product   Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  workOrder WorkOrder? @relation(fields: [workOrderId], references: [id])
+
+  @@unique([tenantId, serialNumber])
+  @@index([tenantId, imei])
+  @@map("product_serials")
+}
+
+model ProductVariantAxis {
+  id        String @id @default(uuid())
+  tenantId  String
+  productId String
+  name      String
+
+  product  Product          @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variants ProductVariant[]
+
+  @@unique([tenantId, productId, name])
+  @@map("product_variant_axes")
+}
+
+model ProductVariant {
+  id            String   @id @default(uuid())
+  tenantId      String
+  productId     String
+  axisId        String
+  axisValue     String
+  barcode       String?
+  stockQuantity Decimal  @default(0) @db.Decimal(12, 3)
+  priceOverride Decimal? @db.Decimal(12, 2)
+
+  tenant    Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product   Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
+  axis      ProductVariantAxis @relation(fields: [axisId], references: [id], onDelete: Cascade)
+  saleItems SaleItem[]
+
+  @@unique([tenantId, productId, axisValue])
+  @@unique([tenantId, barcode])
+  @@map("product_variants")
+}
+
+/// Registro da receita de uma retenção de medicamento controlado (SNGPC / SNCR).
+model PrescriptionRecord {
+  id                           String   @id @default(uuid())
+  tenantId                     String
+  saleItemId                   String   @unique
+  prescriptionType             String // "NOTIFICACAO_B_AZUL" | "RECEITA_A_AMARELA" | "RECEITA_ELETRONICA_SNCR"
+  electronicPrescriptionNumber String? // numeração única exigida pela RDC 1.000/2025 (SNCR)
+  retainedDocumentStorageKey   String? // referência do documento digitalizado no R2
+  patientDocument              String // CPF do paciente — exigência regulatória a partir de 2026
+  validatedByUserId            String
+  createdAt                    DateTime @default(now())
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  saleItem SaleItem @relation(fields: [saleItemId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@map("prescription_records")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FICHA TÉCNICA / BOM E PRODUÇÃO — PADARIA
+// ─────────────────────────────────────────────────────────────────────────
+
+model Recipe {
+  id            String   @id @default(uuid())
+  tenantId      String
+  productId     String   @unique
+  yieldQuantity Decimal  @db.Decimal(12, 3)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant  Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  items   RecipeItem[]
+
+  @@map("recipes")
+}
+
+model RecipeItem {
+  id               String  @id @default(uuid())
+  tenantId         String
+  recipeId         String
+  ingredientId     String
+  quantityPerYield Decimal @db.Decimal(12, 4)
+
+  recipe     Recipe  @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  ingredient Product @relation("RecipeIngredient", fields: [ingredientId], references: [id])
+
+  @@unique([recipeId, ingredientId])
+  @@map("recipe_items")
+}
+
+enum ProductionBatchStatus {
+  PLANNED
+  PRODUCED
+  PARTIALLY_LOST
+}
+
+/// Representa uma fornada/lote de produção — dispara a baixa de insumos no momento
+/// da produção, independentemente de quando (ou se) o item será vendido.
+model ProductionBatch {
+  id                String                @id @default(uuid())
+  tenantId          String
+  finishedProductId String
+  quantityProduced  Decimal               @db.Decimal(12, 3)
+  quantityLost      Decimal               @default(0) @db.Decimal(12, 3)
+  status            ProductionBatchStatus @default(PLANNED)
+  producedByUserId  String
+  producedAt        DateTime              @default(now())
+
+  tenant          Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  finishedProduct Product @relation("ProductionOutput", fields: [finishedProductId], references: [id])
+
+  @@index([tenantId, finishedProductId, producedAt])
+  @@map("production_batches")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ADEGA — CASCOS/VASILHAMES RETORNÁVEIS
+// ─────────────────────────────────────────────────────────────────────────
+
+enum ContainerLedgerDirection {
+  BORROWED
+  RETURNED
+}
+
+model ReturnableContainerLedger {
+  id        String                   @id @default(uuid())
+  tenantId  String
+  clientId  String
+  productId String
+  direction ContainerLedgerDirection
+  quantity  Int
+  saleId    String?
+  createdAt DateTime                 @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, clientId, productId])
+  @@map("returnable_container_ledger")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ASSISTÊNCIA TÉCNICA — ORDENS DE SERVIÇO
+// ─────────────────────────────────────────────────────────────────────────
+
+enum WorkOrderStatus {
+  RECEIVED
+  DIAGNOSING
+  AWAITING_APPROVAL
+  IN_REPAIR
+  READY
+  DELIVERED
+  CANCELLED
+}
+
+// Capítulo 11.2 — Ótica: distingue a O.S. de reparo tradicional (Capítulo 4.2) da
+// O.S. de laboratório óptico (pedido de confecção de lente de grau), que segue um
+// subconjunto mais simples do mesmo ciclo de vida (RECEIVED→IN_REPAIR→READY→DELIVERED,
+// sem diagnóstico/orçamento).
+enum WorkOrderType {
+  GENERAL_REPAIR
+  OPTICAL_LAB
+}
+
+model WorkOrder {
+  id                    String          @id @default(uuid())
+  tenantId              String
+  clientId              String
+  assignedTechnicianId  String?
+  equipmentDescription  String
+  reportedIssue         String
+  status                WorkOrderStatus @default(RECEIVED)
+  diagnosisNotes        String?
+  budgetValidUntil      DateTime? // validade do orçamento, protege contra reajuste tardio
+  budgetApprovalToken   String?         @unique // token assinado de uso único para aprovação via WhatsApp
+  budgetApprovedAt      DateTime?
+  warrantyDays          Int?
+  warrantyExclusions    String?
+  deliveredAt           DateTime?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  // Capítulo 11.2 — Ótica: pedido de laboratório aberto automaticamente no
+  // fechamento de uma venda de lente de grau (close-sale.service.ts). `workOrderType`
+  // default GENERAL_REPAIR preserva 100% do comportamento/queries existentes de
+  // Assistência Técnica (Capítulo 4.2) — nenhuma O.S. hoje precisa ser migrada.
+  workOrderType         WorkOrderType   @default(GENERAL_REPAIR)
+  estimatedReadyAt      DateTime? // prazo do laboratório (11.2): estoque 1-2 dias úteis, personalizada 3-10+ dias úteis
+  opticalPrescriptionId String?
+  saleId                String? // venda que originou o pedido de laboratório (OPTICAL_LAB)
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  assignedTechnician  User?                @relation("AssignedTechnician", fields: [assignedTechnicianId], references: [id])
+  opticalPrescription OpticalPrescription? @relation(fields: [opticalPrescriptionId], references: [id])
+  sale                Sale?                @relation(fields: [saleId], references: [id])
+  items               WorkOrderItem[]
+  checklist           OsChecklist[]
+  photos              OsPhoto[]
+  productSerials      ProductSerial[]
+  Vehicle             Vehicle?             @relation(fields: [vehicleId], references: [id])
+  vehicleId           String?
+
+  @@index([tenantId, status])
+  @@index([tenantId, assignedTechnicianId])
+  @@index([tenantId, workOrderType, status])
+  @@map("work_orders")
+}
+
+model WorkOrderItem {
+  id              String    @id @default(uuid())
+  tenantId        String
+  workOrderId     String
+  productId       String?
+  description     String
+  itemType        String // "PART" | "LABOR"
+  quantity        Decimal   @db.Decimal(12, 3)
+  unitPrice       Decimal   @db.Decimal(12, 2)
+  commissionable  Boolean   @default(false) // apenas mão de obra gera comissão ao técnico
+  // Capítulo 11.5 — Papelaria/Presentes: personalização (bordado/sublimação)
+  // vinculada à venda que a originou, com prazo de produção e aprovação de arte
+  // do cliente antes da confecção (ver personalization.routes.ts — não edita
+  // work-orders.routes.ts, que é arquivo restrito nesta rodada).
+  saleItemId      String?   @unique
+  productionDueAt DateTime?
+  artApprovedAt   DateTime?
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  product   Product?  @relation(fields: [productId], references: [id])
+  saleItem  SaleItem? @relation(fields: [saleItemId], references: [id])
+
+  @@index([tenantId, workOrderId])
+  @@index([tenantId, saleItemId])
+  @@map("work_order_items")
+}
+
+/// Capítulo 4.2 — comissionamento do técnico sobre mão de obra, liberado só na entrega (DELIVERED).
+/// `technicianId = null` representa a regra padrão do tenant, aplicada a técnicos sem regra própria.
+model TechnicianCommissionRule {
+  id                String   @id @default(uuid())
+  tenantId          String
+  technicianId      String?  @unique
+  commissionPercent Decimal  @db.Decimal(5, 2)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  technician User?  @relation("TechnicianCommissionRuleTechnician", fields: [technicianId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("technician_commission_rules")
+}
+
+enum ChecklistStage {
+  ENTRY
+  DIAGNOSIS
+  DELIVERY
+}
+
+model OsChecklist {
+  id                 String         @id @default(uuid())
+  tenantId           String
+  workOrderId        String
+  stage              ChecklistStage
+  items              Json
+  clientSignatureUrl String?
+  createdAt          DateTime       @default(now())
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, workOrderId, stage])
+  @@map("os_checklists")
+}
+
+model OsPhoto {
+  id           String   @id @default(uuid())
+  tenantId     String
+  workOrderId  String
+  uploadedById String
+  storageKey   String
+  caption      String?
+  createdAt    DateTime @default(now())
+
+  workOrder  WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  uploadedBy User      @relation(fields: [uploadedById], references: [id])
+
+  @@index([tenantId, workOrderId])
+  @@map("os_photos")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// VENDAS, CAIXA E ESTOQUE
+// ─────────────────────────────────────────────────────────────────────────
+
+enum SaleStatus {
+  OPEN
+  PAID
+  CANCELLED
+  REFUNDED
+}
+
+enum SalePaymentMethod {
+  CASH
+  DEBIT_CARD
+  CREDIT_CARD
+  PIX
+  BOLETO
+  STORE_CREDIT // crediário/fiado — varejo geral
+  MARKETPLACE // Capítulo 11.1/20 — pedido de marketplace (iFood) já pago ao consumidor final na própria plataforma; o lojista recebe em repasse consolidado do marketplace, nunca em espécie/maquineta própria
+  HEALTH_INSURANCE // Capítulo 11.2 — Ótica: venda com convênio/plano de saúde; recebimento consolidado em lote (AccountReceivable por HealthInsurancePlan), nunca por venda individual
+}
+
+// Gap de auditoria: o Capítulo 12 (nicho Restaurante) já descrevia vendas nascendo em
+// "um de três canais" (DINE_IN/COUNTER/DELIVERY) e o Capítulo 17.8/21.19 agora também
+// precisa distinguir venda física de venda online — mas nenhum campo real materializava
+// essa distinção no model `Sale`. Corrigido abaixo como enum real, nunca mais uma
+// referência de prosa sem schema por trás.
+enum SaleChannel {
+  COUNTER // balcão/PDV físico — canal padrão de todos os nichos
+  DINE_IN // comanda de mesa (restaurante, Capítulo 12)
+  DELIVERY_IFOOD // pedido injetado via marketplace iFood (Capítulo 20)
+  ONLINE_STORE // vitrine virtual própria do tenant (Capítulo 8.5)
+}
+
+model Sale {
+  id                       String            @id @default(uuid())
+  tenantId                 String
+  clientId                 String?
+  cashierId                String
+  cashRegisterId           String
+  status                   SaleStatus        @default(OPEN)
+  channel                  SaleChannel       @default(COUNTER)
+  idempotencyKey           String
+  paymentMethod            SalePaymentMethod
+  totalAmount              Decimal           @db.Decimal(12, 2)
+  discountAmount           Decimal           @default(0) @db.Decimal(12, 2)
+  chartOfAccountId         String? // preenchido automaticamente por regra padrão do nicho (Capítulo 17.1), editável manualmente
+  fiscalStatus             String? // preenchido apenas quando o documento fiscal vinculado sofre evento pós-emissão (Capítulo 21.19) — ex.: "CANCELLED_AFTER_AUTHORIZATION"; nulo em operação normal
+  // Pré-existente (Capítulo 11.2 — Ótica): faltava o campo inverso de
+  // HealthInsurancePlan.sales (bug de schema anterior a esta rodada); corrigido
+  // apenas para destravar `prisma generate`, que falha globalmente sem ele.
+  healthInsurancePlanId    String?
+  // Capítulo 11.2 — Ótica: preenchido quando esta venda já foi incluída na fatura
+  // consolidada de convênio (AccountReceivable.healthInsurancePlanId) — garante que
+  // o endpoint de faturamento (health-insurance-billing.routes.ts) nunca cobra a
+  // mesma venda duas vezes em competências diferentes.
+  healthInsuranceReceivableId String?
+  refundReason             String?           @db.Text // Capítulo 6.8 — obrigatório no momento do estorno
+  refundedByUserId         String? // Capítulo 6.8 — operador que solicitou
+  refundAuthorizedByUserId String? // Capítulo 6.8 — Owner/Manager que autorizou com PIN
+  refundedAt               DateTime? // Capítulo 6.8
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+
+  tenant                   Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client                   Client?                  @relation(fields: [clientId], references: [id])
+  cashier                  User                     @relation(fields: [cashierId], references: [id])
+  cashRegister             CashRegister             @relation(fields: [cashRegisterId], references: [id])
+  chartOfAccount           ChartOfAccount?          @relation(fields: [chartOfAccountId], references: [id])
+  healthInsurancePlan      HealthInsurancePlan?     @relation(fields: [healthInsurancePlanId], references: [id])
+  healthInsuranceReceivable AccountReceivable?      @relation("HealthInsuranceBilledSale", fields: [healthInsuranceReceivableId], references: [id])
+  refundedByUser           User?                    @relation("SaleRefundRequestedBy", fields: [refundedByUserId], references: [id])
+  refundAuthorizedByUser   User?                    @relation("SaleRefundAuthorizedBy", fields: [refundAuthorizedByUserId], references: [id])
+  items                    SaleItem[]
+  payments                 Payment[]
+  fiscalDocuments          FiscalDocument[]
+  accountsReceivable       AccountReceivable[]
+  loyaltyTransactions      LoyaltyTransaction[] // Capítulo 4.1.1 — ganho ou resgate de pontos originado por esta venda
+  Comanda                  Comanda?
+  marketplaceExpenses      AccountPayable[] // Capítulo 11.1 — comissão de marketplace (iFood) vinculada à venda de origem, para margem líquida por canal
+  serviceCommissionEntries ServiceCommissionEntry[] // Capítulo 11.6
+  workOrders               WorkOrder[] // Capítulo 11.2 — Ótica: O.S. de laboratório óptico aberta a partir desta venda
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, status, createdAt])
+  @@index([tenantId, cashRegisterId])
+  @@map("sales")
+}
+
+// Gap de auditoria (Capítulo 4.6/17.9 — Comanda Eletrônica): o model original só
+// permitia `productId` obrigatório, impossibilitando fechar uma Comanda com itens
+// de serviço (corte de cabelo, lava-rápido — `ComandaItem.serviceId`) como uma
+// Sale real. `productId` passou a ser opcional e `serviceId` foi adicionado;
+// invariante aplicada em código (nunca via `@@check`, não suportado nesta
+// versão do Prisma): exatamente um entre `productId`/`serviceId` deve estar
+// preenchido por linha.
+model SaleItem {
+  id                String    @id @default(uuid())
+  tenantId          String
+  saleId            String
+  productId         String?
+  serviceId         String?
+  productVariantId  String?
+  quantity          Decimal   @db.Decimal(12, 3)
+  unitPrice         Decimal   @db.Decimal(12, 2)
+  totalPrice        Decimal   @db.Decimal(12, 2)
+  // Capítulo 11.2 — Ótica: garantia legal de 90 dias (CDC art. 26, II) + dias de
+  // garantia CONTRATUAL adicional configurável pela loja (`Tenant.opticalAdditionalWarrantyDays`),
+  // calculada e congelada no fechamento da venda para qualquer item de produto com
+  // `Product.opticsCategory` preenchido (FRAME ou LENS). Nula para os demais itens.
+  warrantyExpiresAt DateTime?
+
+  sale                Sale                @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product             Product?            @relation(fields: [productId], references: [id])
+  service             Service?            @relation(fields: [serviceId], references: [id])
+  productVariant      ProductVariant?     @relation(fields: [productVariantId], references: [id])
+  prescriptionRecord  PrescriptionRecord?
+  personalizationItem WorkOrderItem? // Capítulo 11.5 — item de personalização vinculado a esta venda
+
+  @@index([tenantId, saleId])
+  @@index([tenantId, productId])
+  @@map("sale_items")
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id                   String            @id @default(uuid())
+  tenantId             String
+  saleId               String
+  method               SalePaymentMethod
+  status               PaymentStatus     @default(PENDING)
+  amount               Decimal           @db.Decimal(12, 2)
+  changeDue            Decimal           @default(0) @db.Decimal(12, 2) // troco devolvido em espécie (Capítulo 6.6/8.3); 0 para métodos eletrônicos
+  tefAuthorizationCode String?
+  externalProviderId   String? // NSU retornado pela maquininha de TEF (Capítulo 20.7) — nunca o dado de cartão em si
+  idempotencyKey       String
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  sale Sale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, saleId, status])
+  @@map("payments")
+}
+
+enum CashRegisterStatus {
+  OPEN
+  CLOSED
+}
+
+model CashRegister {
+  id               String             @id @default(uuid())
+  tenantId         String
+  openedById       String
+  status           CashRegisterStatus @default(OPEN)
+  openingAmount    Decimal            @db.Decimal(12, 2)
+  // closingAmount só é preenchido após a contagem física confirmada pelo operador
+  // (gaveta cega — ver Capítulo 4.1); expectedAmount é calculado pelo sistema mas
+  // nunca exibido antes da confirmação da contagem.
+  closingAmount    Decimal?           @db.Decimal(12, 2)
+  expectedAmount   Decimal?           @db.Decimal(12, 2)
+  divergenceAmount Decimal?           @db.Decimal(12, 2)
+  openedAt         DateTime           @default(now())
+  closedAt         DateTime?
+
+  tenant    Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  openedBy  User                   @relation(fields: [openedById], references: [id])
+  sales     Sale[]
+  movements CashRegisterMovement[] // Capítulo 6.7 — sangria/suprimento
+
+  @@index([tenantId, status])
+  @@map("cash_registers")
+}
+
+enum StockMovementType {
+  PURCHASE_IN
+  SALE_OUT
+  ADJUSTMENT
+  RECIPE_CONSUMPTION
+  PRODUCTION_CONSUMPTION
+  LOSS
+  RETURN
+}
+
+model StockMovement {
+  id             String            @id @default(uuid())
+  tenantId       String
+  productId      String
+  productBatchId String?
+  type           StockMovementType
+  quantity       Decimal           @db.Decimal(12, 3)
+  reasonCode     String? // obrigatório para ADJUSTMENT e LOSS
+  referenceId    String?
+  createdAt      DateTime          @default(now())
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  product      Product       @relation(fields: [productId], references: [id])
+  productBatch ProductBatch? @relation(fields: [productBatchId], references: [id])
+
+  @@index([tenantId, productId, createdAt])
+  @@index([tenantId, type])
+  @@map("stock_movements")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FINANCEIRO — CONTAS A PAGAR E A RECEBER
+// ─────────────────────────────────────────────────────────────────────────
+
+enum PayableStatus {
+  PENDING
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+/// Alimentado tanto manualmente quanto automaticamente pela entrada de NF-e (Capítulo 6.3).
+model AccountPayable {
+  id               String        @id @default(uuid())
+  tenantId         String
+  supplierId       String
+  description      String
+  amount           Decimal       @db.Decimal(12, 2)
+  dueDate          DateTime
+  status           PayableStatus @default(PENDING)
+  paidAt           DateTime?
+  sourceNfeKey     String? // chave de acesso da NF-e de entrada que originou esta conta
+  chartOfAccountId String? // classificação contábil (Capítulo 17.1/17.2), editável manualmente
+  costCenterId     String? // ex.: lançamento de folha de pagamento classificado no centro de custo "FOLHA_PAGAMENTO" (Capítulo 21.8, Fator "r")
+  purchaseOrderId  String? // Capítulo 17.8.2 — preenchido quando a conta nasce de um recebimento de Pedido de Compra; nulo para despesas avulsas
+  saleId           String? // Capítulo 11.1 — preenchido quando a conta nasce de uma comissão de marketplace (iFood) descontada de uma venda DELIVERY_IFOOD específica; permite calcular margem líquida real por canal
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  supplier       Supplier        @relation(fields: [supplierId], references: [id])
+  chartOfAccount ChartOfAccount? @relation(fields: [chartOfAccountId], references: [id])
+  costCenter     CostCenter?     @relation(fields: [costCenterId], references: [id])
+  purchaseOrder  PurchaseOrder?  @relation(fields: [purchaseOrderId], references: [id])
+  sale           Sale?           @relation(fields: [saleId], references: [id])
+
+  @@index([tenantId, status, dueDate])
+  @@index([tenantId, costCenterId])
+  @@index([tenantId, saleId])
+  @@map("accounts_payable")
+}
+
+enum ReceivableStatus {
+  PENDING
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+/// Alimentado por vendas STORE_CREDIT (crediário/fiado, varejo geral).
+model AccountReceivable {
+  id                    String           @id @default(uuid())
+  tenantId              String
+  // Capítulo 11.2 — Ótica: tornado opcional para suportar a fatura CONSOLIDADA de
+  // convênio (uma única AccountReceivable cobrindo N vendas de N clientes
+  // diferentes, agrupada por HealthInsurancePlan). Toda query/tela pré-existente já
+  // tratava `client` com optional-chaining (`client?.name ?? "—"`), então nenhum
+  // outro ponto do código quebra com este campo virando nullable.
+  clientId              String?
+  saleId                String?
+  description           String
+  amount                Decimal          @db.Decimal(12, 2)
+  dueDate               DateTime
+  status                ReceivableStatus @default(PENDING)
+  paidAt                DateTime?
+  chartOfAccountId      String? // classificação contábil (Capítulo 17.1/17.2)
+  // Capítulo 11.2 — Ótica: preenchido quando esta AccountReceivable é a fatura
+  // consolidada de um convênio (ver `healthInsurancePlan.sales`/`Sale.healthInsurancePlanId`).
+  healthInsurancePlanId String?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client              Client?              @relation(fields: [clientId], references: [id])
+  sale                Sale?                @relation(fields: [saleId], references: [id])
+  chartOfAccount      ChartOfAccount?      @relation(fields: [chartOfAccountId], references: [id])
+  healthInsurancePlan HealthInsurancePlan? @relation(fields: [healthInsurancePlanId], references: [id])
+  // Capítulo 11.2 — Ótica: vendas HEALTH_INSURANCE individuais consolidadas nesta
+  // fatura (distinto de `sale`/`saleId` acima, que é o vínculo 1:1 genérico de
+  // crediário/fiado — aqui é 1 fatura : N vendas).
+  healthInsuranceBilledSales Sale[] @relation("HealthInsuranceBilledSale")
+
+  @@index([tenantId, status, dueDate])
+  @@index([tenantId, clientId])
+  @@map("accounts_receivable")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// DOCUMENTOS FISCAIS
+// ─────────────────────────────────────────────────────────────────────────
+
+enum FiscalDocumentType {
+  NFCE
+  NFE_SAIDA
+  NFE_ENTRADA
+}
+
+enum FiscalDocumentStatus {
+  PENDING
+  AUTHORIZED
+  REJECTED
+  CANCELLED
+}
+
+model FiscalDocument {
+  id                           String                @id @default(uuid())
+  tenantId                     String
+  saleId                       String?
+  type                         FiscalDocumentType
+  status                       FiscalDocumentStatus  @default(PENDING)
+  accessKey                    String?               @unique
+  xmlStorageKey                String?
+  rejectionReason              String?
+  // Campos da Reforma Tributária (Capítulo 21.3) — convivem com os tributos legados
+  // durante toda a transição 2026-2033; nulos fora da janela em que o tributo se aplica.
+  legacyIcmsAmount             Decimal?              @db.Decimal(12, 2) // ICMS "antigo", calculado enquanto vigente
+  legacyPisCofinsAmount        Decimal?              @db.Decimal(12, 2) // PIS/COFINS, extintos a partir de 2027
+  cbsAmount                    Decimal?              @db.Decimal(12, 2) // Contribuição sobre Bens e Serviços (federal, IVA dual)
+  ibsAmount                    Decimal?              @db.Decimal(12, 2) // Imposto sobre Bens e Serviços (estadual+municipal, IVA dual)
+  selectiveTaxAmount           Decimal?              @db.Decimal(12, 2) // Imposto Seletivo — apenas itens do Capítulo 21.3 (bebidas, cigarros, etc.)
+  totalTaxesApprox             Decimal?              @db.Decimal(12, 2) // Total aproximado de tributos (Lei 12.741/2012), exibido na notinha térmica (Capítulo 21.7)
+  taxRegimeSnapshot            TaxRegime // regime do tenant no momento da emissão — nunca recalculado retroativamente se o tenant trocar de regime depois
+  // CORREÇÃO DE AUDITORIA: o Capítulo 21.15 já descrevia este campo em prosa/comentário
+  // ("FiscalDocument ganha: faseReformaTributaria...") mas nunca o declarava de fato —
+  // um gap real entre documentação e schema. Adicionado aqui, resolvido por data de
+  // emissão (nunca escolhido manualmente) e gravado de forma imutável, pelo mesmo
+  // princípio de `taxRegimeSnapshot` acima.
+  faseReformaTributaria        FaseReformaTributaria @default(TESTE_COMPENSAVEL)
+  federalIrrfWithheld          Decimal?              @db.Decimal(12, 2) // retenção de IRRF esperada do tomador PJ (Capítulo 21.17) — nulo quando o prestador é Simples/MEI (dispensa legal)
+  federalPisCofinsCsllWithheld Decimal?              @db.Decimal(12, 2) // retenção unificada PIS/COFINS/CSLL (Capítulo 21.17)
+  federalInssWithheld          Decimal?              @db.Decimal(12, 2) // retenção de INSS quando o serviço é cessão de mão de obra/empreitada (Capítulo 21.17)
+  createdAt                    DateTime              @default(now())
+  updatedAt                    DateTime              @updatedAt
+
+  tenant Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale   Sale?                 @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  events FiscalDocumentEvent[] // Capítulo 21.19 — cancelamento, CC-e e manifestação do destinatário
+
+  @@index([tenantId, status])
+  @@index([tenantId, saleId])
+  @@map("fiscal_documents")
+}
+
+/// Motor de regras fiscais central (Capítulo 21.6) — uma única fonte de verdade
+/// consultada pelo TaxEngine em vez de percentuais hardcoded espalhados pelo código.
+/// `tenantId` nulo = regra padrão nacional/por nicho (mantida pela equipe Filitech,
+/// atualizada a cada mudança de legislação); `tenantId` preenchido = override local
+/// de um tenant específico (ex.: benefício fiscal estadual próprio, regime especial).
+model TaxRule {
+  id                        String          @id @default(uuid())
+  tenantId                  String?
+  nicheCode                 String? // ex.: "PHARMACY", "MARKET" — nulo = regra genérica de qualquer nicho
+  uf                        String? // UF a que a regra se aplica; nulo = regra nacional
+  ncm                       String? // Nomenclatura Comum do Mercosul do produto/categoria; nulo = regra por nicho inteiro
+  nbs                       String? // Nomenclatura Brasileira de Serviços (mantida pelo MDIC) — equivalente do NCM para itens de serviço (WorkOrderItem/mão de obra, Capítulo 21.8); nulo para regras de mercadoria
+  cfop                      String? // Código Fiscal de Operações e Prestações aplicável
+  cest                      String? // Código Especificador da Substituição Tributária (Convênio 142/2018) — usado em conjunto com o NCM nas regras de ICMS-ST (Capítulo 21.2)
+  cstCsosn                  String? // CST (Lucro Presumido/Real) ou CSOSN (Simples Nacional) — Capítulo 21.13
+  icmsAliquota              Decimal?        @db.Decimal(5, 2) // alíquota INTERNA da UF (uf = UF de destino); usada tanto na venda local quanto no cálculo de DIFAL (Capítulo 21.10)
+  icmsInterestadualAliquota Decimal?        @db.Decimal(5, 2) // alíquota interestadual (Resolução do Senado 22/89: 4%, 7% ou 12% conforme UF de origem/destino) — usada apenas quando a venda cruza fronteira estadual
+  icmsStMva                 Decimal?        @db.Decimal(5, 2) // Margem de Valor Agregado da Substituição Tributária (Convênio 142/2018 e específicos, ex.: 76/94 farmácia)
+  icmsBaseReductionPercent  Decimal?        @db.Decimal(5, 2) // redução de base de cálculo do ICMS (ex.: revenda de veículos usados, Capítulo 21.12) — percentual da base ORIGINAL que efetivamente compõe a base tributável
+  issAliquota               Decimal?        @db.Decimal(5, 2) // ISS municipal (serviço) — Capítulo 21.8; varia de 2% a 5% (teto/piso constitucional, LC 116/2003)
+  issRetidoNaFonte          Boolean         @default(false) // true quando o tomador do serviço (não o prestador) é o responsável legal pelo recolhimento do ISS
+  pisCofinsRegime           PisCofinsRegime @default(ISENTO_SIMPLES)
+  pisAliquotaConcentrada    Decimal?        @db.Decimal(5, 4) // alíquota concentrada na fonte (fabricante/importador) do regime monofásico — Capítulo 21.9
+  cofinsAliquotaConcentrada Decimal?        @db.Decimal(5, 4)
+  ibsAliquota               Decimal?        @db.Decimal(5, 2)
+  cbsAliquota               Decimal?        @db.Decimal(5, 2)
+  selectiveTaxAliquota      Decimal?        @db.Decimal(5, 2)
+  legalReference            String // ex.: "Convênio ICMS 76/94", "LC 214/2025, Art. 1º" — nunca uma regra sem base legal citada
+  effectiveFrom             DateTime
+  effectiveTo               DateTime?
+  createdAt                 DateTime        @default(now())
+  updatedAt                 DateTime        @updatedAt
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([nicheCode, uf, effectiveFrom])
+  @@index([tenantId])
+  @@map("tax_rules")
+}
+
+/// Regime real de PIS/COFINS da mercadoria/serviço (Capítulo 21.9) — independe do
+/// regime tributário do TENANT (Simples/Presumido/Real): um produto monofásico
+/// permanece monofásico mesmo vendido por uma empresa do Simples Nacional, que
+/// apenas segrega essa receita do cálculo do DAS (ela já foi tributada na origem).
+enum PisCofinsRegime {
+  ISENTO_SIMPLES // Simples Nacional: PIS/COFINS embutido no DAS, não destacado (regra padrão da maioria dos nichos Filitech)
+  CUMULATIVO // Lucro Presumido: 0,65% PIS + 3,00% COFINS sobre a receita bruta, sem direito a crédito
+  NAO_CUMULATIVO // Lucro Real: 1,65% PIS + 7,60% COFINS, com direito a crédito sobre insumos/custos
+  MONOFASICO_CONCENTRADO // Fabricante/importador: alíquota concentrada majorada (pisAliquotaConcentrada/cofinsAliquotaConcentrada)
+  MONOFASICO_ALIQUOTA_ZERO // Distribuidor/varejista revendendo produto monofásico: 0% — o tributo já foi recolhido a montante
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FILITECH PESSOAL (B2C) — GESTÃO FINANCEIRA DOMÉSTICA (Capítulo 22)
+// Populado apenas em tenants com tenantType = PERSONAL. Reaproveita tenantId,
+// isolamento multi-tenant (Capítulo 7) e autenticação/2FA (Capítulo 14) inteiros —
+// nenhum destes modelos tem lógica de isolamento própria.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum PersonalAccountType {
+  CHECKING // conta corrente
+  SAVINGS // poupança
+  WALLET_CASH // dinheiro físico/carteira
+  CREDIT_CARD
+  INVESTMENT_BROKERAGE
+}
+
+model PersonalAccount {
+  id                   String              @id @default(uuid())
+  tenantId             String
+  ownerId              String? // User que cadastrou; null = conta explicitamente do casal (sem dono único)
+  name                 String
+  type                 PersonalAccountType
+  institutionName      String? // "Nubank", "Itaú", "Carteira" etc.
+  currentBalance       Decimal             @default(0) @db.Decimal(14, 2)
+  creditLimit          Decimal?            @db.Decimal(14, 2) // obrigatório em uso quando type = CREDIT_CARD
+  invoiceClosingDay    Int? // dia do mês em que a fatura fecha (type = CREDIT_CARD)
+  invoiceDueDay        Int? // dia do mês de vencimento da fatura (type = CREDIT_CARD)
+  isShared             Boolean             @default(true) // visível para todos os membros da residência (Capítulo 22.3)
+  openFinanceConsentId String? // preenchido quando a conta é sincronizada automaticamente (Capítulo 22.5)
+  archivedAt           DateTime?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  owner              User?                 @relation(fields: [ownerId], references: [id])
+  openFinanceConsent OpenFinanceConsent?   @relation(fields: [openFinanceConsentId], references: [id])
+  transactions       PersonalTransaction[]
+  investments        PersonalInvestment[]
+  goals              PersonalGoal[]
+  billsAutoDebit     PersonalBill[]
+
+  // Identidade lógica da conta externa sincronizada via Open Finance (Capítulo 22.5)
+  // — evita criar uma PersonalAccount duplicada a cada novo "item/updated" da Pluggy
+  // para a mesma instituição dentro do mesmo consentimento.
+  @@unique([openFinanceConsentId, institutionName])
+  @@index([tenantId, type])
+  @@map("personal_accounts")
+}
+
+enum PersonalCategoryType {
+  INCOME
+  EXPENSE
+}
+
+model PersonalCategory {
+  id                String               @id @default(uuid())
+  tenantId          String
+  parentCategoryId  String?
+  name              String
+  icon              String? // nome do ícone MUI (Capítulo 8) — ex.: "LocalGroceryStore"
+  type              PersonalCategoryType
+  isSystemDefault   Boolean              @default(false) // categorias seedadas no onboarding (Moradia, Alimentação, Transporte, Lazer, Saúde, Educação, Investimentos) — não podem ser excluídas, apenas desativadas
+  isCarneLeaoIncome Boolean              @default(false) // marca rendimento tributável sujeito a Carnê-Leão (aluguel/autônomo recebido de PF) — Capítulo 22.11
+  active            Boolean              @default(true)
+
+  tenant         Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  parentCategory PersonalCategory?     @relation("PersonalCategoryHierarchy", fields: [parentCategoryId], references: [id])
+  subcategories  PersonalCategory[]    @relation("PersonalCategoryHierarchy")
+  transactions   PersonalTransaction[]
+  budgets        PersonalBudget[]
+  bills          PersonalBill[]
+
+  @@index([tenantId, type])
+  @@map("personal_categories")
+}
+
+enum PersonalTransactionType {
+  INCOME
+  EXPENSE
+  TRANSFER
+}
+
+model PersonalTransaction {
+  id                    String                  @id @default(uuid())
+  tenantId              String
+  accountId             String
+  categoryId            String?
+  createdByUserId       String
+  recurrenceRuleId      String?
+  description           String
+  merchantName          String? // nome do estabelecimento (extraído do extrato ou do Open Finance), usado no motor de categorização automática (Capítulo 22.4)
+  type                  PersonalTransactionType
+  amount                Decimal                 @db.Decimal(14, 2) // sempre positivo; o "type" define o sinal no cálculo de saldo, nunca um valor negativo armazenado
+  transactionDate       DateTime
+  isPrivate             Boolean                 @default(false) // Capítulo 22.3 — visível apenas para createdByUserId dentro da residência
+  attachmentStorageKey  String? // foto do recibo, R2 (Capítulo 20.5)
+  openFinanceExternalId String?                 @unique // idempotência: evita duplicar a mesma transação em cada sincronização do Open Finance (Capítulo 22.5)
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
+
+  tenant         Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  account        PersonalAccount            @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  category       PersonalCategory?          @relation(fields: [categoryId], references: [id])
+  createdBy      User                       @relation(fields: [createdByUserId], references: [id])
+  recurrenceRule PersonalRecurrenceRule?    @relation(fields: [recurrenceRuleId], references: [id])
+  splits         PersonalTransactionSplit[]
+
+  @@index([tenantId, accountId, transactionDate])
+  @@index([tenantId, categoryId, transactionDate])
+  @@map("personal_transactions")
+}
+
+/// Divisão de despesa do casal (Capítulo 22.3) — uma PersonalTransaction do tipo
+/// EXPENSE pode ter N splits, cada um atribuindo uma fração do valor a um membro da
+/// residência; a soma dos splits de uma transação é validada em código (nunca no
+/// banco) para ser sempre igual a 100%/ao valor total da transação.
+model PersonalTransactionSplit {
+  id            String  @id @default(uuid())
+  transactionId String
+  userId        String
+  percentage    Decimal @db.Decimal(5, 2)
+  amount        Decimal @db.Decimal(14, 2)
+
+  transaction PersonalTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  user        User                @relation(fields: [userId], references: [id])
+
+  @@unique([transactionId, userId])
+  @@map("personal_transaction_splits")
+}
+
+enum PersonalRecurrenceFrequency {
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+/// Motor de recorrência (Capítulo 22.4) — gera automaticamente a próxima
+/// PersonalTransaction do template (salário, aluguel, assinatura de streaming) sem
+/// qualquer intervenção manual do usuário.
+model PersonalRecurrenceRule {
+  id                  String                      @id @default(uuid())
+  tenantId            String
+  frequency           PersonalRecurrenceFrequency
+  dayOfMonth          Int? // obrigatório quando frequency = MONTHLY/YEARLY
+  templateDescription String
+  templateAmount      Decimal                     @db.Decimal(14, 2)
+  templateAccountId   String
+  templateCategoryId  String?
+  nextOccurrenceAt    DateTime
+  endDate             DateTime?
+  active              Boolean                     @default(true)
+  createdAt           DateTime                    @default(now())
+
+  tenant                Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  generatedTransactions PersonalTransaction[]
+
+  @@index([tenantId, active, nextOccurrenceAt])
+  @@map("personal_recurrence_rules")
+}
+
+model PersonalBudget {
+  id              String   @id @default(uuid())
+  tenantId        String
+  categoryId      String
+  monthReference  DateTime // sempre normalizado para o dia 01 do mês de referência
+  limitAmount     Decimal  @db.Decimal(14, 2)
+  rolloverEnabled Boolean  @default(false) // se true, saldo não gasto do mês anterior soma ao limite do mês seguinte
+
+  tenant   Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  category PersonalCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, categoryId, monthReference])
+  @@map("personal_budgets")
+}
+
+enum PersonalGoalType {
+  SAVINGS
+  DEBT_PAYOFF
+  EMERGENCY_FUND
+  PURCHASE
+}
+
+enum PersonalGoalStatus {
+  ACTIVE
+  COMPLETED
+  ABANDONED
+}
+
+model PersonalGoal {
+  id              String             @id @default(uuid())
+  tenantId        String
+  linkedAccountId String? // conta-poupança dedicada à meta, se existir
+  name            String
+  type            PersonalGoalType
+  targetAmount    Decimal            @db.Decimal(14, 2)
+  currentAmount   Decimal            @default(0) @db.Decimal(14, 2)
+  targetDate      DateTime?
+  status          PersonalGoalStatus @default(ACTIVE)
+  createdAt       DateTime           @default(now())
+
+  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  linkedAccount PersonalAccount? @relation(fields: [linkedAccountId], references: [id])
+
+  @@index([tenantId, status])
+  @@map("personal_goals")
+}
+
+enum PersonalInvestmentAssetType {
+  TESOURO_DIRETO
+  CDB
+  LCI_LCA
+  ACOES
+  FII
+  CRIPTO
+  PREVIDENCIA_PRIVADA
+  POUPANCA
+}
+
+model PersonalInvestment {
+  id                    String                      @id @default(uuid())
+  tenantId              String
+  accountId             String
+  assetType             PersonalInvestmentAssetType
+  assetName             String
+  ticker                String?
+  quantity              Decimal                     @db.Decimal(18, 8) // precisão alta — necessária para frações de cripto
+  averagePrice          Decimal                     @db.Decimal(14, 2)
+  currentPrice          Decimal                     @db.Decimal(14, 2)
+  openFinanceExternalId String?                     @unique // idempotência de sincronização (Capítulo 22.5)
+  updatedAt             DateTime                    @updatedAt
+
+  tenant       Tenant                           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  account      PersonalAccount                  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  priceHistory PersonalInvestmentPriceHistory[]
+
+  @@index([tenantId, assetType])
+  @@map("personal_investments")
+}
+
+model PersonalInvestmentPriceHistory {
+  id           String   @id @default(uuid())
+  investmentId String
+  priceDate    DateTime
+  closingPrice Decimal  @db.Decimal(14, 2)
+
+  investment PersonalInvestment @relation(fields: [investmentId], references: [id], onDelete: Cascade)
+
+  @@unique([investmentId, priceDate])
+  @@map("personal_investment_price_history")
+}
+
+enum PersonalDebtType {
+  FINANCIAMENTO_IMOVEL
+  FINANCIAMENTO_VEICULO
+  EMPRESTIMO_PESSOAL
+  CARTAO_PARCELADO
+  CHEQUE_ESPECIAL
+}
+
+enum PersonalDebtStatus {
+  ACTIVE
+  PAID_OFF
+}
+
+model PersonalDebt {
+  id                  String             @id @default(uuid())
+  tenantId            String
+  name                String
+  type                PersonalDebtType
+  originalAmount      Decimal            @db.Decimal(14, 2)
+  remainingAmount     Decimal            @db.Decimal(14, 2)
+  interestRateMonthly Decimal            @db.Decimal(6, 4) // ex.: 1.99 = 1,99% a.m., usado no calculador de quitação (Capítulo 22.6)
+  installmentsTotal   Int
+  installmentsPaid    Int                @default(0)
+  dueDay              Int
+  status              PersonalDebtStatus @default(ACTIVE)
+  createdAt           DateTime           @default(now())
+
+  tenant       Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  installments PersonalDebtInstallment[]
+
+  @@index([tenantId, status])
+  @@map("personal_debts")
+}
+
+enum PersonalDebtInstallmentStatus {
+  PENDING
+  PAID
+  OVERDUE
+}
+
+model PersonalDebtInstallment {
+  id                String                        @id @default(uuid())
+  debtId            String
+  installmentNumber Int
+  dueDate           DateTime
+  amount            Decimal                       @db.Decimal(14, 2)
+  paidAt            DateTime?
+  status            PersonalDebtInstallmentStatus @default(PENDING)
+
+  debt PersonalDebt @relation(fields: [debtId], references: [id], onDelete: Cascade)
+
+  @@unique([debtId, installmentNumber])
+  @@map("personal_debt_installments")
+}
+
+enum PersonalBillStatus {
+  PENDING
+  PAID
+  OVERDUE
+}
+
+/// Contas recorrentes do mês (aluguel, luz, água, internet, streaming) — distinta de
+/// PersonalDebt (que é uma dívida com valor total e fim definidos). Dispara lembrete
+/// (Capítulo 22.8) `reminderDaysBefore` dias antes do vencimento.
+model PersonalBill {
+  id                 String             @id @default(uuid())
+  tenantId           String
+  categoryId         String?
+  autoDebitAccountId String?
+  name               String
+  amount             Decimal            @db.Decimal(14, 2) // estimado para contas de valor variável (luz/água); ajustado manualmente a cada lançamento real
+  dueDay             Int
+  isRecurring        Boolean            @default(true)
+  reminderDaysBefore Int                @default(3)
+  lastPaidAt         DateTime?
+  status             PersonalBillStatus @default(PENDING)
+  createdAt          DateTime           @default(now())
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  category         PersonalCategory? @relation(fields: [categoryId], references: [id])
+  autoDebitAccount PersonalAccount?  @relation(fields: [autoDebitAccountId], references: [id])
+
+  @@index([tenantId, status, dueDay])
+  @@map("personal_bills")
+}
+
+/// Patrimônio líquido consolidado (Capítulo 22.6) — fotografia mensal calculada por
+/// job agendado (BullMQ, Capítulo 3), nunca recalculada silenciosamente de forma
+/// retroativa, para que o histórico de evolução patrimonial seja estável e auditável.
+model NetWorthSnapshot {
+  id               String   @id @default(uuid())
+  tenantId         String
+  snapshotDate     DateTime
+  totalAssets      Decimal  @db.Decimal(16, 2) // soma de PersonalAccount.currentBalance (exceto CREDIT_CARD) + PersonalInvestment (quantity * currentPrice)
+  totalLiabilities Decimal  @db.Decimal(16, 2) // soma de PersonalDebt.remainingAmount + faturas de cartão em aberto
+  netWorth         Decimal  @db.Decimal(16, 2) // totalAssets - totalLiabilities, nunca recebido do cliente — sempre recalculado no servidor
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, snapshotDate])
+  @@map("net_worth_snapshots")
+}
+
+enum OpenFinanceConsentStatus {
+  UPDATING
+  UPDATED
+  LOGIN_ERROR
+  OUTDATED
+  WAITING_USER_INPUT
+}
+
+/// Consentimento real de Open Finance (Capítulo 22.5) — um registro por instituição
+/// conectada via agregador (Pluggy). `itemId` é o identificador do agregador, nunca
+/// as credenciais bancárias do usuário (que nunca transitam nem são persistidas pelo
+/// Filitech — o fluxo de login acontece inteiramente dentro do widget do agregador).
+model OpenFinanceConsent {
+  id               String                   @id @default(uuid())
+  tenantId         String
+  provider         String                   @default("PLUGGY")
+  itemId           String                   @unique
+  institutionName  String
+  status           OpenFinanceConsentStatus @default(UPDATING)
+  consentExpiresAt DateTime
+  lastSyncedAt     DateTime?
+  createdAt        DateTime                 @default(now())
+
+  tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  accounts     PersonalAccount[] // preenchido quando o tenant é PERSONAL (Capítulo 22.5)
+  bankAccounts BankAccount[] // preenchido quando o tenant é BUSINESS (Capítulo 17.4.1) — mutuamente exclusivo com `accounts` na prática, pois um tenant tem um único `Plan.audience`
+
+  @@index([tenantId, status])
+  @@map("open_finance_consents")
+}
+
+enum CashRegisterMovementType {
+  WITHDRAWAL // sangria — dinheiro retirado do caixa (depósito bancário, segurança)
+  INJECTION // suprimento — dinheiro inserido no caixa (reforço de troco)
+}
+
+model CashRegisterMovement {
+  id                String                   @id @default(uuid())
+  cashRegisterId    String
+  type              CashRegisterMovementType
+  amount            Decimal                  @db.Decimal(12, 2)
+  reason            String // obrigatório — ex.: "Depósito bancário das 14h", "Reforço de troco"
+  performedByUserId String
+  createdAt         DateTime                 @default(now())
+
+  cashRegister CashRegister @relation(fields: [cashRegisterId], references: [id], onDelete: Cascade)
+  performedBy  User         @relation(fields: [performedByUserId], references: [id])
+
+  @@index([cashRegisterId, createdAt])
+  @@map("cash_register_movements")
+}
+
+model Notification {
+  id         String               @id @default(uuid())
+  tenantId   String
+  userId     String? // null = notificação dirigida a todos os usuários do tenant com a role certa (ex.: alerta de caixa visto por qualquer OWNER/MANAGER)
+  category   NotificationCategory
+  title      String
+  body       String
+  severity   String // "INFO" | "WARNING" | "CRITICAL"
+  linkRoute  String? // rota do app para onde o clique na notificação navega (ex.: "/os/123")
+  sourceType String // "WORK_ORDER" | "SUPPORT_TICKET" | "CASH_FLOW_PROJECTION" | "SUBSCRIPTION" | "ACCOUNTING_TASK" | ...
+  sourceId   String?
+  readAt     DateTime?
+  createdAt  DateTime             @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId, readAt])
+  @@index([tenantId, createdAt])
+  @@map("notifications")
+}
+
+enum NotificationCategory {
+  WORK_ORDER_STATUS
+  SUPPORT_TICKET_UPDATE
+  CASH_FLOW_ALERT
+  BILLING_DUNNING
+  ACCOUNTING_TASK_REMINDER
+  STOCK_LOW
+  FISCAL_DOCUMENT_REJECTED
+  SYSTEM_ANNOUNCEMENT
+  // Capítulo 11.3 — Petshop/Veterinária: lembrete de reforço de vacina próximo do
+  // vencimento (`VaccineRecord.nextDoseDueAt`), disparado via POST
+  // /vaccine-records/notify-due-soon (client-records.routes.ts).
+  VACCINE_REMINDER
+}
+
+model NotificationPreference {
+  id       String               @id @default(uuid())
+  tenantId String
+  userId   String
+  category NotificationCategory
+  inApp    Boolean              @default(true)
+  email    Boolean              @default(true)
+  push     Boolean              @default(false) // exige PushDeviceToken ativo (abaixo)
+  whatsapp Boolean              @default(false) // reaproveita a integração real do Capítulo 20, nunca um canal paralelo
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, category])
+  @@map("notification_preferences")
+}
+
+model PushDeviceToken {
+  id            String    @id @default(uuid())
+  tenantId      String
+  userId        String
+  platform      String // "IOS" | "ANDROID" | "WEB"
+  expoPushToken String    @unique // token real do Expo Push Service (Capítulo 16.1, app mobile)
+  createdAt     DateTime  @default(now())
+  revokedAt     DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+  @@map("push_device_tokens")
+}
+
+/// Catálogo global de plataforma (sem `tenantId`, cadastrado apenas pelo painel admin do
+/// dono, mesmo padrão de `Plan`/`Module`/`OfficialDocumentLayoutVersion`) — versiona o
+/// texto publicado de Termos de Uso e Política de Privacidade. `Tenant.termsVersionAccepted`
+/// e `Tenant.privacyPolicyVersionAccepted` (Capítulo 5) referenciam o campo `version` aqui,
+/// nunca o texto em si, permitindo auditar exatamente qual redação o lojista aceitou mesmo
+/// após o documento ser atualizado.
+model LegalDocumentVersion {
+  id           String   @id @default(uuid())
+  documentType String // "TERMS_OF_USE" | "PRIVACY_POLICY"
+  version      String // ex.: "2025-01-v3"
+  contentUrl   String // URL do documento publicado (Cloudflare R2, Capítulo 3)
+  publishedAt  DateTime @default(now())
+
+  @@unique([documentType, version])
+  @@map("legal_document_versions")
+}
+
+model OnlineStoreSettings {
+  id              String   @id @default(uuid())
+  tenantId        String   @unique
+  isActive        Boolean  @default(false)
+  customSlug      String   @unique // subdomínio público
+  primaryColorHex String   @default("#4F46E5") // dentro da paleta de tokens (8.4.1), nunca uma cor livre que quebre contraste WCAG
+  logoStorageKey  String?
+  deliveryEnabled Boolean  @default(false)
+  deliveryFee     Decimal? @db.Decimal(10, 2)
+  minOrderAmount  Decimal? @db.Decimal(10, 2)
+  updatedAt       DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("online_store_settings")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// EXPANSÃO: CAMPOS ADICIONAIS EM PRODUCT (venda fracionada — Material de
+// Construção/Ferragens e ração a granel de Petshop)
+// ─────────────────────────────────────────────────────────────────────────
+
+enum ProductSaleUnit {
+  UNIT
+  KG
+  METER
+  SQUARE_METER
+  CUBIC_METER
+  LITER
+}
+
+// GAP DE AUDITORIA FECHADO (Rodada 6, Capítulo 11.8 Material de Construção/Ferragens
+// e Capítulo 11.2/11.3 Petshop — ração fracionada): os 4 campos abaixo existiam
+// apenas como comentário/pseudocódigo neste arquivo, nunca como coluna real do
+// model `Product`. Adicionados diretamente ao `model Product` (ver acima):
+//   saleUnit                  ProductSaleUnit @default(UNIT)
+//   purchaseUnit              String?          // ex.: "Rolo 100m", "Caixa 2,5m²"
+//   unitConversionFactor      Decimal?         @db.Decimal(12, 4) // 1 unidade de compra = N unidades de venda
+//   isKitComposition          Boolean          @default(false)    // kits escolares (papelaria) reaproveitam Recipe/RecipeItem como BOM do kit
+// `SaleItem.quantity` já era `Decimal` desde o Capítulo 5 — venda fracionada
+// (2,4m, 8,7m²) não exigiu nenhuma migração de schema, apenas suporte de UI (PosPage.tsx).
+
+// ─────────────────────────────────────────────────────────────────────────
+// SERVIÇOS E AGENDAMENTO (Petshop, Salão/Barbearia, Estética Automotiva)
+// ─────────────────────────────────────────────────────────────────────────
+
+model Service {
+  id                       String  @id @default(uuid())
+  tenantId                 String
+  name                     String
+  nicheTag                 String // "PETSHOP" | "BEAUTY_SALON" | "CAR_DETAILING" | "AUTOMOTIVE_WORKSHOP"
+  basePrice                Decimal @db.Decimal(12, 2)
+  estimatedDurationMinutes Int
+  commissionPercentage     Decimal @default(0) @db.Decimal(5, 2)
+  active                   Boolean @default(true)
+
+  tenant               Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  appointments         Appointment[]
+  ClientServicePackage ClientServicePackage[]
+  saleItems            SaleItem[]
+  comandaItems         ComandaItem[]
+  commissionEntries    ServiceCommissionEntry[]
+
+  @@index([tenantId, nicheTag])
+  @@map("services")
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum AppointmentSource {
+  INTERNAL // agendado por um usuário do tenant (balcão/telefone)
+  PUBLIC_BOOKING // agendado pelo próprio cliente via agenda online (Capítulo 11.6)
+}
+
+model Appointment {
+  id              String            @id @default(uuid())
+  tenantId        String
+  clientId        String
+  serviceId       String
+  professionalId  String
+  petId           String?
+  vehicleId       String?
+  scheduledAt     DateTime
+  durationMinutes Int
+  status          AppointmentStatus @default(SCHEDULED)
+  source          AppointmentSource @default(INTERNAL)
+  comandaId       String?
+  createdAt       DateTime          @default(now())
+
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client       Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  service      Service  @relation(fields: [serviceId], references: [id])
+  professional User     @relation("AppointmentProfessional", fields: [professionalId], references: [id])
+  pet          Pet?     @relation(fields: [petId], references: [id])
+  vehicle      Vehicle? @relation(fields: [vehicleId], references: [id])
+
+  // Impede duplo agendamento do mesmo profissional no mesmo horário exato.
+  @@unique([tenantId, professionalId, scheduledAt])
+  @@index([tenantId, clientId])
+  @@map("appointments")
+}
+
+// Capítulo 11.6 — "Agenda Online" pública: o pseudocódigo do Bible referencia
+// `getProfessionalWorkingHours(professionalId, date)` ("cadastro em
+// /configuracoes/agenda, por profissional e dia da semana") como pré-requisito para
+// gerar os horários livres — este model não existia (gap de auditoria explícito,
+// já adiado na Rodada 4 por este mesmo motivo). `dayOfWeek` segue a convenção
+// JS/Postgres (0=domingo .. 6=sábado). Sem nenhuma linha cadastrada para um
+// profissional/dia, a agenda pública simplesmente não oferece horários livres
+// naquele dia (fail-closed, nunca inventa um expediente padrão).
+model ProfessionalWorkingHours {
+  id             String @id @default(uuid())
+  tenantId       String
+  professionalId String
+  dayOfWeek      Int // 0 (domingo) a 6 (sábado)
+  startTime      String // "HH:mm", ex. "09:00"
+  endTime        String // "HH:mm", ex. "18:00"
+
+  tenant       Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  professional User   @relation("ProfessionalWorkingHoursProfessional", fields: [professionalId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, professionalId, dayOfWeek])
+  @@map("professional_working_hours")
+}
+
+/// Pacote pré-pago de sessões (Salão de Beleza, Estética Automotiva/Lava-Rápido).
+model ClientServicePackage {
+  id            String    @id @default(uuid())
+  tenantId      String
+  clientId      String
+  serviceId     String
+  totalSessions Int
+  sessionsUsed  Int       @default(0)
+  purchasedAt   DateTime  @default(now())
+  expiresAt     DateTime?
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client  Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  service Service @relation(fields: [serviceId], references: [id])
+
+  @@index([tenantId, clientId, serviceId])
+  @@map("client_service_packages")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// COMANDA ELETRÔNICA (Lanchonete/Restaurante, Salão de Beleza)
+// ─────────────────────────────────────────────────────────────────────────
+
+model RestaurantTable {
+  id        String  @id @default(uuid())
+  tenantId  String
+  label     String // ex.: "Mesa 12", "Balcão 3"
+  seatCount Int
+  active    Boolean @default(true)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  comandas Comanda[]
+
+  @@unique([tenantId, label])
+  @@map("restaurant_tables")
+}
+
+enum ComandaStatus {
+  OPEN
+  CLOSED
+  CANCELLED
+}
+
+model Comanda {
+  id       String        @id @default(uuid())
+  tenantId String
+  tableId  String?
+  clientId String?
+  status   ComandaStatus @default(OPEN)
+  saleId   String?       @unique // preenchido somente no fechamento, quando vira uma Sale efetiva
+  openedAt DateTime      @default(now())
+  closedAt DateTime?
+
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  table  RestaurantTable? @relation(fields: [tableId], references: [id])
+  client Client?          @relation(fields: [clientId], references: [id])
+  sale   Sale?            @relation(fields: [saleId], references: [id])
+  items  ComandaItem[]
+
+  @@index([tenantId, status])
+  @@map("comandas")
+}
+
+model ComandaItem {
+  id               String    @id @default(uuid())
+  tenantId         String
+  comandaId        String
+  productId        String?
+  serviceId        String?
+  // Capítulo 11.6 — profissional que executou o serviço (corte, coloração, manicure
+  // etc.), necessário para apurar a comissão por profissional/serviço no fechamento
+  // da comanda; sempre nulo para itens de produto.
+  professionalId   String?
+  quantity         Decimal   @db.Decimal(12, 3)
+  unitPrice        Decimal   @db.Decimal(12, 2)
+  sentToKdsAt      DateTime? // momento em que o item foi enviado à cozinha (KDS) via SSE
+  recipeConsumedAt DateTime? // Capítulo 11.1 — momento em que a ficha técnica (Recipe/RecipeItem) deste item foi baixada; preenchido no LANÇAMENTO do item, nunca no fechamento (o insumo é consumido na produção do prato, não na baixa fiscal)
+
+  comanda         Comanda                 @relation(fields: [comandaId], references: [id], onDelete: Cascade)
+  // Gap de auditoria: `productId`/`serviceId` existiam como colunas soltas sem
+  // relação declarada — corrigido para permitir `include: { product, service }`
+  // nas rotas de comanda.
+  product         Product?                @relation(fields: [productId], references: [id])
+  service         Service?                @relation(fields: [serviceId], references: [id])
+  professional    User?                   @relation("ComandaItemProfessional", fields: [professionalId], references: [id])
+  commissionEntry ServiceCommissionEntry?
+
+  @@index([tenantId, comandaId])
+  @@map("comanda_items")
+}
+
+/// Comissão de serviço (Capítulo 11.6) — calculada a partir de `Service.commissionPercentage`
+/// mas somente MATERIALIZADA (criada) no fechamento+pagamento da `Comanda` (quando ela vira
+/// uma `Sale` real), nunca no agendamento nem no simples lançamento do item: liberar a
+/// comissão antes do cliente efetivamente pagar permitiria comissionar atendimento não pago.
+model ServiceCommissionEntry {
+  id                   String   @id @default(uuid())
+  tenantId             String
+  saleId               String
+  comandaItemId        String   @unique
+  professionalId       String
+  serviceId            String
+  baseAmount           Decimal  @db.Decimal(12, 2) // valor bruto do item de serviço (quantity * unitPrice)
+  commissionPercentage Decimal  @db.Decimal(5, 2) // snapshot de Service.commissionPercentage no momento do fechamento — nunca recalculado retroativamente se o % do serviço mudar depois
+  commissionAmount     Decimal  @db.Decimal(12, 2)
+  createdAt            DateTime @default(now())
+
+  tenant       Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale         Sale        @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  comandaItem  ComandaItem @relation(fields: [comandaItemId], references: [id], onDelete: Cascade)
+  professional User        @relation("ServiceCommissionProfessional", fields: [professionalId], references: [id])
+  service      Service     @relation(fields: [serviceId], references: [id])
+
+  @@index([tenantId, professionalId, createdAt])
+  @@index([tenantId, saleId])
+  @@map("service_commission_entries")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ÓTICA — RECEITA DE GRAU
+// ─────────────────────────────────────────────────────────────────────────
+
+// Capítulo 11.2 — Ótica (Decreto 24.492/1934, "livro de registro de receitas"):
+// GAP DE AUDITORIA FECHADO (Rodada 6) — o model já tinha os campos ópticos
+// (esférico/cilíndrico/eixo por olho + adição), mas faltavam os 3 campos que o
+// Decreto exige no registro (número de ordem sequencial do livro, nome/CRM do
+// profissional prescritor — distinto de `prescribingDoctor`, que é só o nome em
+// texto livre — e endereço do cliente no momento do registro). `prescriptionNumber`
+// é sequencial POR TENANT (mesmo padrão de retry em P2002 já usado no código de
+// inventário `INV-AAAA-NNN`, Rodada 3 item 7), nunca um UUID — o livro de receituário
+// exige numeração legível e ordenada.
+model OpticalPrescription {
+  id                       String   @id @default(uuid())
+  tenantId                 String
+  clientId                 String
+  prescriptionNumber       Int
+  prescribingDoctor        String
+  doctorRegistrationNumber String? // CRM (oftalmologista) ou CRO/registro de optometrista
+  clientAddressSnapshot    String? // endereço do cliente no momento do registro (Decreto 24.492/1934); Client não possui campo de endereço próprio
+  rightEyeSphere           Decimal  @db.Decimal(4, 2)
+  rightEyeCylinder         Decimal  @db.Decimal(4, 2)
+  rightEyeAxis             Int
+  leftEyeSphere            Decimal  @db.Decimal(4, 2)
+  leftEyeCylinder          Decimal  @db.Decimal(4, 2)
+  leftEyeAxis              Int
+  addition                 Decimal? @db.Decimal(4, 2) // lentes multifocais
+  pupillaryDistance        Decimal? @db.Decimal(4, 1)
+  registeredAt             DateTime @default(now())
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client     Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  workOrders WorkOrder[]
+
+  @@unique([tenantId, prescriptionNumber])
+  @@index([tenantId, clientId])
+  @@map("optical_prescriptions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PETSHOP/VETERINÁRIA — PRONTUÁRIO
+// ─────────────────────────────────────────────────────────────────────────
+
+model Pet {
+  id        String    @id @default(uuid())
+  tenantId  String
+  ownerId   String
+  name      String
+  species   String // "DOG" | "CAT" | outros
+  breed     String?
+  birthDate DateTime?
+  weightKg  Decimal?  @db.Decimal(6, 2)
+  createdAt DateTime  @default(now())
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  owner          Client          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  vaccineRecords VaccineRecord[]
+  appointments   Appointment[]
+
+  @@index([tenantId, ownerId])
+  @@map("pets")
+}
+
+model VaccineRecord {
+  id              String    @id @default(uuid())
+  tenantId        String
+  petId           String
+  vaccineName     String
+  appliedAt       DateTime
+  nextDoseDueAt   DateTime?
+  appliedByUserId String
+  // Capítulo 11.3 — Petshop/Veterinária: timestamp do último lembrete automático
+  // disparado para esta dose (POST /vaccine-records/notify-due-soon), evitando
+  // reenvio a cada execução do job/consulta manual enquanto a data não muda.
+  reminderSentAt  DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  pet    Pet    @relation(fields: [petId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, petId, nextDoseDueAt])
+  @@map("vaccine_records")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SETOR AUTOMOTIVO — VEÍCULO (Oficina, Autoelétrica, Pneus, Estética)
+// ─────────────────────────────────────────────────────────────────────────
+
+model Vehicle {
+  id              String   @id @default(uuid())
+  tenantId        String
+  ownerId         String
+  licensePlate    String
+  chassisNumber   String?
+  model           String
+  manufactureYear Int?
+  mileageKm       Int?
+  createdAt       DateTime @default(now())
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  owner        Client        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  workOrders   WorkOrder[]
+  appointments Appointment[]
+
+  @@unique([tenantId, licensePlate])
+  @@index([tenantId, ownerId])
+  @@map("vehicles")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SETOR AUTOMOTIVO — LOJA DE VEÍCULOS SEMINOVOS (ESTOQUE POR CHASSI)
+// ─────────────────────────────────────────────────────────────────────────
+
+enum VehicleListingStatus {
+  AVAILABLE
+  RESERVED
+  SOLD
+  CONSIGNED
+}
+
+model VehicleListing {
+  id                              String               @id @default(uuid())
+  tenantId                        String
+  chassisNumber                   String
+  licensePlate                    String?
+  model                           String
+  manufactureYear                 Int
+  mileageKm                       Int
+  askingPrice                     Decimal              @db.Decimal(12, 2)
+  status                          VehicleListingStatus @default(AVAILABLE)
+  consignorClientId               String? // preenchido somente se o veículo for consignado
+  consignmentCommissionPercentage Decimal?             @db.Decimal(5, 2)
+  // Capítulo 11.12 — valor de repasse combinado com o consignante (o que a loja
+  // paga ao dono original) e o preço efetivo de venda (pode divergir do
+  // askingPrice por negociação); a comissão da loja = actualSalePrice -
+  // consignorPayoutAmount, calculada em markVehicleListingSold() e NUNCA
+  // armazenada separadamente — é sempre recalculada a partir destes dois campos.
+  consignorPayoutAmount           Decimal?             @db.Decimal(12, 2)
+  actualSalePrice                 Decimal?             @db.Decimal(12, 2)
+  atpveDocumentStorageKey         String? // Autorização para Transferência de Propriedade de Veículo Eletrônica
+  atpveIssuedAt                   DateTime? // data de emissão da ATPV-e
+  detranCommunicationProtocol     String? // protocolo de comunicação de venda ao Detran
+  soldAt                          DateTime?
+  createdAt                       DateTime             @default(now())
+
+  tenant            Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  consignorClient   Client?                   @relation(fields: [consignorClientId], references: [id])
+  consignmentPayout VehicleConsignmentPayout?
+
+  @@unique([tenantId, chassisNumber])
+  @@index([tenantId, status])
+  @@map("vehicle_listings")
+}
+
+enum VehicleConsignmentPayoutStatus {
+  PENDING
+  PAID
+}
+
+// Capítulo 11.12 — "nenhuma conta a pagar é gerada até a venda efetiva": o
+// consignante é um `Client`, não um `Supplier`, e `AccountPayable.supplierId`
+// é obrigatório (Capítulo 17.8) — reaproveitar AccountPayable exigiria uma
+// migração de FK arriscada fora do escopo desta rodada. Este model dedicado,
+// leve e auditável, nasce SOMENTE no momento da venda efetiva (mark-sold),
+// nunca antes (o veículo consignado não entra no contas a pagar da loja
+// enquanto está apenas CONSIGNED/AVAILABLE).
+model VehicleConsignmentPayout {
+  id                String                         @id @default(uuid())
+  tenantId          String
+  vehicleListingId  String                         @unique
+  consignorClientId String
+  payoutAmount      Decimal                        @db.Decimal(12, 2)
+  status            VehicleConsignmentPayoutStatus @default(PENDING)
+  paidAt            DateTime?
+  createdAt         DateTime                       @default(now())
+
+  tenant          Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  vehicleListing  VehicleListing @relation(fields: [vehicleListingId], references: [id], onDelete: Cascade)
+  consignorClient Client         @relation(fields: [consignorClientId], references: [id])
+
+  @@index([tenantId, status])
+  @@map("vehicle_consignment_payouts")
+}
+
+enum PlatformAdminRole {
+  SUPER_ADMIN
+  SUPPORT_AGENT
+  FINANCE_ANALYST
+}
+
+model PlatformAdminUser {
+  id                  String            @id @default(uuid())
+  name                String
+  email               String            @unique
+  passwordHash        String
+  role                PlatformAdminRole
+  totpSecretEncrypted String? // nulo até o Passo 1 do enrollment (Capítulo 14.2) gerar o segredo
+  totpConfirmedAt     DateTime? // nulo até o Passo 2 confirmar o primeiro código válido — 2FA é obrigatório (Cap. 14.2)
+  active              Boolean           @default(true)
+  lastLoginAt         DateTime?
+  createdAt           DateTime          @default(now())
+
+  auditLogs                AuditLog[]
+  impersonationSessions    ImpersonationSession[]
+  backupCodes              TwoFactorBackupCode[] // definido no Capítulo 14.1.1, junto ao fluxo de 2FA que o consome
+  passwordResetTokens      PasswordResetToken[] // definido no Capítulo 14.3
+  activeSessions           ActiveSession[] // definido no Capítulo 14.4
+  ipAllowlistEntries       AdminIpAllowlistEntry[] // definido no Capítulo 14.5
+  // CORREÇÃO DE AUDITORIA: catálogo fiscal global (NCM/NBS/CEST, Capítulo 21.15/21.16)
+  // pertence ao painel do dono — a FK de FiscalCodeCatalogImport originalmente
+  // apontava, por engano, para `User` (tenant), contradizendo o próprio comentário
+  // do campo ("SUPER_ADMIN do painel do dono"). Corrigido para apontar para cá.
+  fiscalCodeCatalogImports FiscalCodeCatalogImport[]
+
+  @@map("platform_admin_users")
+}
+
+/// Registro imutável — a aplicação nunca executa UPDATE ou DELETE nesta tabela,
+/// apenas INSERT. Qualquer tentativa de alteração deve ser bloqueada também a
+/// nível de permissão de banco de dados (GRANT apenas INSERT, SELECT para o role
+/// de aplicação).
+model AuditLog {
+  id                  String   @id @default(uuid())
+  platformAdminUserId String
+  action              String // ex.: "TENANT_SUSPENDED", "MODULE_TOGGLED", "PARAMETER_UPDATED"
+  targetType          String // ex.: "Tenant", "SystemParameter"
+  targetId            String?
+  isImpersonated      Boolean  @default(false)
+  metadata            Json
+  createdAt           DateTime @default(now())
+
+  platformAdminUser PlatformAdminUser @relation(fields: [platformAdminUserId], references: [id])
+
+  @@index([targetType, targetId])
+  @@index([platformAdminUserId, createdAt])
+  @@map("audit_logs")
+}
+
+model ImpersonationSession {
+  id                  String    @id @default(uuid())
+  platformAdminUserId String
+  tenantId            String
+  reason              String // justificativa obrigatória — exigida antes de iniciar a sessão
+  startedAt           DateTime  @default(now())
+  expiresAt           DateTime
+  endedAt             DateTime?
+
+  platformAdminUser PlatformAdminUser @relation(fields: [platformAdminUserId], references: [id])
+  tenant            Tenant            @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, startedAt])
+  @@map("impersonation_sessions")
+}
+
+model SystemParameter {
+  key                          String   @id // ex.: "FREE_TIER_MAX_SALES_PER_MONTH"
+  value                        String // armazenado como string, convertido/validado pelo consumidor conforme o tipo esperado
+  description                  String
+  updatedByPlatformAdminUserId String?
+  updatedAt                    DateTime @updatedAt
+
+  @@map("system_parameters")
+}
+
+model DiscountCoupon {
+  id               String   @id @default(uuid())
+  code             String   @unique
+  discountType     String // "PERCENTAGE" | "FIXED_AMOUNT"
+  discountValue    Decimal  @db.Decimal(12, 2)
+  scopeType        String // "PLAN" | "MODULE" | "GLOBAL"
+  scopeReferenceId String?
+  maxRedemptions   Int?
+  redemptionCount  Int      @default(0)
+  validFrom        DateTime
+  validUntil       DateTime
+  active           Boolean  @default(true)
+
+  @@map("discount_coupons")
+}
+
+model ReleaseNote {
+  id         String   @id @default(uuid())
+  version    String   @unique
+  summary    String
+  isPublic   Boolean  @default(false) // controla exibição no changelog público do lojista
+  deployedAt DateTime @default(now())
+
+  @@map("release_notes")
+}
+
+/// Códigos de recuperação de uso único — nunca persistidos em texto puro (apenas o hash bcrypt).
+/// GAP DE AUDITORIA CORRIGIDO: a redação original só tinha `platformAdminUserId` obrigatório,
+/// mas a seção 14.2 promete "Extensão para tenants" reaproveitando este mesmo modelo — sem um
+/// `userId` nulável, um `User` (tenant) jamais conseguiria gravar um backup code real. Corrigido
+/// para o mesmo padrão dual-ator, nunca ambos preenchidos, já usado por `PasswordResetToken`/`ActiveSession`.
+model TwoFactorBackupCode {
+  id                  String    @id @default(uuid())
+  platformAdminUserId String?
+  userId              String?
+  codeHash            String
+  usedAt              DateTime?
+  createdAt           DateTime  @default(now())
+
+  platformAdminUser PlatformAdminUser? @relation(fields: [platformAdminUserId], references: [id], onDelete: Cascade)
+  user              User?              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([platformAdminUserId, usedAt])
+  @@index([userId, usedAt])
+  @@map("two_factor_backup_codes")
+}
+
+model PasswordResetToken {
+  id                  String    @id @default(uuid())
+  // Exatamente um dos dois é preenchido — nunca ambos — reforçando a separação de identidade do Cap. 13.1.
+  platformAdminUserId String?
+  userId              String?
+  tokenHash           String    @unique // SHA-256 do token; o token em claro nunca é persistido
+  expiresAt           DateTime // emitido com validade de 15 minutos
+  usedAt              DateTime?
+  requestedFromIp     String
+  createdAt           DateTime  @default(now())
+
+  platformAdminUser PlatformAdminUser? @relation(fields: [platformAdminUserId], references: [id])
+  user              User?              @relation(fields: [userId], references: [id])
+
+  @@index([tokenHash])
+  @@map("password_reset_tokens")
+}
+
+model ActiveSession {
+  id                  String             @id @default(uuid())
+  platformAdminUserId String?
+  userId              String?
+  refreshTokenHash    String             @unique
+  ipAddress           String
+  userAgent           String
+  createdAt           DateTime           @default(now())
+  lastSeenAt          DateTime           @default(now())
+  revokedAt           DateTime?
+  User                User?              @relation(fields: [userId], references: [id])
+  PlatformAdminUser   PlatformAdminUser? @relation(fields: [platformAdminUserId], references: [id])
+
+  @@index([platformAdminUserId])
+  @@index([userId])
+  @@map("active_sessions")
+}
+
+model AdminIpAllowlistEntry {
+  id                  String   @id @default(uuid())
+  platformAdminUserId String
+  cidrRange           String // ex.: "203.0.113.0/24" ou IP único "203.0.113.5/32"
+  label               String // ex.: "Escritório SP", "VPN corporativa"
+  createdAt           DateTime @default(now())
+
+  platformAdminUser PlatformAdminUser @relation(fields: [platformAdminUserId], references: [id])
+
+  @@map("admin_ip_allowlist_entries")
+}
+
+model IncidentEvent {
+  id          String    @id @default(uuid())
+  component   String // "POSTGRES" | "REDIS" | "QUEUE_WHATSAPP" | "CIRCUIT_SEFAZ" | ...
+  severity    String // "WARNING" | "CRITICAL"
+  description String
+  startedAt   DateTime  @default(now())
+  resolvedAt  DateTime?
+
+  @@index([component, startedAt])
+  @@map("incident_events")
+}
+
+model FeatureFlag {
+  id                  String   @id @default(uuid())
+  key                 String   @unique // ex.: "NEW_POS_LAYOUT"
+  description         String
+  rolloutPercent      Int      @default(0) // 0-100, ajustável em tempo real
+  enabledForTenantIds String[] // overrides explícitos (ex.: tenants beta-testers), somam-se ao percentual
+  active              Boolean  @default(true)
+  updatedAt           DateTime @updatedAt
+
+  @@map("feature_flags")
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model SupportTicket {
+  id                            String         @id @default(uuid())
+  tenantId                      String
+  openedByUserId                String // User (tenant) que abriu o chamado
+  assignedToPlatformAdminUserId String?
+  subject                       String
+  category                      String // "BILLING" | "BUG" | "HOW_TO" | "INTEGRATION" | "OUTAGE"
+  priority                      TicketPriority @default(NORMAL)
+  status                        TicketStatus   @default(OPEN)
+  createdAt                     DateTime       @default(now())
+  resolvedAt                    DateTime?
+
+  messages SupportTicketMessage[]
+
+  @@index([tenantId, status])
+  @@index([assignedToPlatformAdminUserId, status])
+  @@map("support_tickets")
+}
+
+model SupportTicketMessage {
+  id             String   @id @default(uuid())
+  ticketId       String
+  authorType     String // "TENANT_USER" | "PLATFORM_ADMIN"
+  authorId       String
+  body           String
+  attachmentUrls String[] // URLs assinadas do Cloudflare R2 (Capítulo 3)
+  createdAt      DateTime @default(now())
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id])
+
+  @@index([ticketId, createdAt])
+  @@map("support_ticket_messages")
+}
+
+model TenantApiKey {
+  id         String    @id @default(uuid())
+  tenantId   String
+  label      String // ex.: "Integração contábil XPTO"
+  keyHash    String    @unique // SHA-256; a chave em claro só é exibida uma vez, na criação
+  keyPrefix  String // ex.: "fltk_live_8f2a" — exibido na UI para identificação sem expor a chave inteira
+  scopes     String[] // ex.: ["sales:read", "stock:write"]
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([tenantId, revokedAt])
+  @@map("tenant_api_keys")
+}
+
+model TenantWebhookEndpoint {
+  id                     String   @id @default(uuid())
+  tenantId               String
+  url                    String
+  eventTypes             String[] // ex.: ["sale.completed", "work_order.approved"]
+  signingSecretEncrypted String // usado para assinar o payload (HMAC-SHA256), permitindo ao tenant validar autenticidade
+  active                 Boolean  @default(true)
+  createdAt              DateTime @default(now())
+
+  deliveries WebhookDelivery[]
+
+  @@index([tenantId, active])
+  @@map("tenant_webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id           String   @id @default(uuid())
+  endpointId   String
+  eventType    String
+  statusCode   Int?
+  success      Boolean
+  attemptCount Int      @default(1)
+  payload      Json // payload enviado, para fins de replay/depuração
+  deliveredAt  DateTime @default(now())
+
+  endpoint TenantWebhookEndpoint @relation(fields: [endpointId], references: [id])
+
+  @@index([endpointId, deliveredAt])
+  @@map("webhook_deliveries")
+}
+
+enum AccountNature {
+  REVENUE
+  EXPENSE
+}
+
+model ChartOfAccount {
+  id       String        @id @default(uuid())
+  tenantId String
+  code     String // ex.: "3.1.01" — estrutura hierárquica por código
+  name     String // ex.: "Receita de Vendas de Mercadorias"
+  nature   AccountNature
+  parentId String?
+
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  parent             ChartOfAccount?     @relation("AccountHierarchy", fields: [parentId], references: [id])
+  children           ChartOfAccount[]    @relation("AccountHierarchy")
+  costCenters        CostCenter[]
+  sales              Sale[]
+  accountsPayable    AccountPayable[]
+  accountsReceivable AccountReceivable[]
+
+  @@unique([tenantId, code])
+  @@map("chart_of_accounts")
+}
+
+model CostCenter {
+  id        String  @id @default(uuid())
+  tenantId  String
+  accountId String
+  code      String? // identificador técnico estável (ex.: "FOLHA_PAGAMENTO"), distinto de `name` (rótulo de exibição) — consumido por integrações automáticas como o cálculo do Fator "r" (Capítulo 21.8), que nunca deve depender de um texto de exibição editável pelo lojista
+  name      String // ex.: "Filial Centro", "Delivery"
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  account         ChartOfAccount   @relation(fields: [accountId], references: [id])
+  accountsPayable AccountPayable[]
+
+  @@unique([tenantId, code])
+  @@map("cost_centers")
+}
+
+// Campos adicionados a AccountPayable, AccountReceivable (Capítulo 5) e Sale (Capítulo 5):
+//   chartOfAccountId   String?
+//   costCenterId       String?  (apenas AccountPayable — Sale e AccountReceivable usam apenas chartOfAccountId)
+// Todos os campos acima e suas relações já estão declarados explicitamente nos models
+// `AccountPayable`/`AccountReceivable`/`Sale` do Capítulo 5 (incluindo os relation-arrays
+// correspondentes aqui em `ChartOfAccount.accountsPayable/accountsReceivable` e
+// `CostCenter.accountsPayable`), pois são consumidos diretamente por `generateDre`
+// (Capítulo 17.2) via `prisma.sale.groupBy({ by: ["chartOfAccountId"] })` e pelo
+// cálculo do Fator "r" (Capítulo 21.8) via `prisma.accountPayable.aggregate({ where: { costCenter: { code: ... } } } })`.
+
+model BankAccount {
+  id                           String  @id @default(uuid())
+  tenantId                     String
+  bankName                     String
+  agencyNumber                 String
+  accountNumber                String
+  currentBalance               Decimal @default(0) @db.Decimal(12, 2)
+  // GAP DE AUDITORIA CORRIGIDO: a prosa logo abaixo (17.4) já prometia integração direta via
+  // Open Finance para o lado BUSINESS, mas `OpenFinanceConsent` só linkava com `PersonalAccount`
+  // (Capítulo 22.5, B2C) — o lojista nunca teria, de fato, como conectar o banco da empresa.
+  openFinanceConsentId         String? // preenchido quando a conta é sincronizada automaticamente, mesmo padrão de PersonalAccount
+  openFinanceExternalAccountId String? // id lógico da conta no agregador — evita duplicar a mesma conta a cada reconexão
+
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  openFinanceConsent OpenFinanceConsent? @relation(fields: [openFinanceConsentId], references: [id])
+  transactions       BankTransaction[]
+
+  @@unique([openFinanceConsentId, openFinanceExternalAccountId])
+  @@map("bank_accounts")
+}
+
+enum BankTransactionReconciliationStatus {
+  UNMATCHED
+  SUGGESTED
+  MATCHED
+  IGNORED
+}
+
+model BankTransaction {
+  id                         String                              @id @default(uuid())
+  tenantId                   String
+  bankAccountId              String
+  externalFitId              String // FITID do OFX (importação manual) OU id da transação no agregador Open Finance (sincronização automática, Capítulo 17.4.1) — em ambos os casos, a chave de idempotência real do banco/agregador, nunca um id interno
+  description                String
+  amount                     Decimal                             @db.Decimal(12, 2)
+  transactionDate            DateTime
+  reconciliationStatus       BankTransactionReconciliationStatus @default(UNMATCHED)
+  matchedAccountPayableId    String?
+  matchedAccountReceivableId String?
+  importedAt                 DateTime                            @default(now())
+
+  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, bankAccountId, externalFitId])
+  @@map("bank_transactions")
+}
+
+enum ChargeType {
+  BOLETO
+  PIX
+}
+
+enum ChargeStatus {
+  PENDING
+  PAID
+  EXPIRED
+  CANCELLED
+}
+
+model PaymentCharge {
+  id                  String       @id @default(uuid())
+  tenantId            String
+  accountReceivableId String       @unique
+  type                ChargeType
+  status              ChargeStatus @default(PENDING)
+  pixQrCodePayload    String? // payload EMV do QR Code Pix dinâmico
+  boletoDigitableLine String? // linha digitável, quando aplicável
+  boletoPdfStorageKey String?
+  expiresAt           DateTime
+  paidAt              DateTime?
+  externalProviderId  String? // ID da cobrança no PSP (ex.: Asaas, Efí, Mercado Pago)
+  createdAt           DateTime     @default(now())
+
+  @@index([tenantId, status])
+  @@map("payment_charges")
+}
+
+enum PurchaseOrderStatus {
+  DRAFT // em elaboração, ainda editável livremente
+  SENT // enviado ao fornecedor (e-mail/WhatsApp, Capítulo 20), aguardando entrega
+  PARTIALLY_RECEIVED // parte dos itens já deu entrada em estoque
+  RECEIVED // 100% dos itens recebidos — imutável a partir daqui
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id          String              @id @default(uuid())
+  tenantId    String
+  supplierId  String
+  status      PurchaseOrderStatus @default(DRAFT)
+  orderNumber Int // sequencial por tenant, exibido ao fornecedor (ex.: "Pedido #142")
+  expectedAt  DateTime?
+  notes       String?
+  createdById String
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  supplier        Supplier            @relation(fields: [supplierId], references: [id])
+  createdBy       User                @relation(fields: [createdById], references: [id])
+  items           PurchaseOrderItem[]
+  accountsPayable AccountPayable[] // gerado automaticamente no recebimento (17.8.2)
+
+  @@unique([tenantId, orderNumber])
+  @@index([tenantId, status])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id               String    @id @default(uuid())
+  tenantId         String
+  purchaseOrderId  String
+  productId        String
+  quantityOrdered  Decimal   @db.Decimal(12, 3)
+  quantityReceived Decimal   @default(0) @db.Decimal(12, 3) // incrementado a cada recebimento parcial
+  unitCost         Decimal   @db.Decimal(12, 4) // custo negociado nesta compra, pode diferir de Product.costPrice até o recebimento
+  batchNumber      String? // quando Product.trackingType = BATCH (Capítulo 5) — obrigatório na API de recebimento (farmácia/padaria)
+  expirationDate   DateTime? // idem, obrigatório junto com batchNumber para itens rastreados por lote/validade
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product       Product       @relation(fields: [productId], references: [id])
+
+  @@index([tenantId, purchaseOrderId])
+  @@map("purchase_order_items")
+}
+
+enum InventoryCountStatus {
+  OPEN // contagem em andamento, estoque ainda não foi ajustado
+  RECONCILING // todas as contagens lançadas, aguardando aprovação do responsável
+  APPROVED // divergências aprovadas e já aplicadas como StockMovement(ADJUSTMENT)
+  CANCELLED
+}
+
+model InventoryCount {
+  id               String               @id @default(uuid())
+  tenantId         String
+  code             String // sequencial amigável, ex.: "INV-2025-014"
+  status           InventoryCountStatus @default(OPEN)
+  scope            String // "FULL" (balanço geral) ou "CATEGORY:{categoryId}" ou "LOCATION:{storageLocationId}" — permite contagem parcial por setor, sem travar o PDV da loja inteira
+  startedAt        DateTime             @default(now())
+  startedByUserId  String
+  approvedAt       DateTime?
+  approvedByUserId String?
+  notes            String?
+
+  tenant     Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  startedBy  User                 @relation("InventoryCountStartedBy", fields: [startedByUserId], references: [id])
+  approvedBy User?                @relation("InventoryCountApprovedBy", fields: [approvedByUserId], references: [id])
+  items      InventoryCountItem[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, status])
+  @@map("inventory_counts")
+}
+
+model InventoryCountItem {
+  id               String    @id @default(uuid())
+  inventoryCountId String
+  productId        String
+  productBatchId   String? // em produtos com lote (Farmácia, Padaria), a contagem é por lote, nunca só pelo total do produto — senão a divergência de validade fica invisível
+  expectedQuantity Decimal   @db.Decimal(14, 3) // saldo teórico no momento em que a contagem deste item foi iniciada (snapshot, nunca recalculado depois — senão uma venda concorrente mascararia a divergência real)
+  countedQuantity  Decimal?  @db.Decimal(14, 3) // preenchido pelo operador com leitor de código de barras em campo
+  countedAt        DateTime?
+  countedByUserId  String?
+  divergenceReason String? // obrigatório quando |counted - expected| > 0, nunca opcional (auditoria exige motivo: quebra, furto, erro de lançamento, vencimento)
+
+  inventoryCount InventoryCount @relation(fields: [inventoryCountId], references: [id], onDelete: Cascade)
+  product        Product        @relation(fields: [productId], references: [id])
+  productBatch   ProductBatch?  @relation(fields: [productBatchId], references: [id])
+  countedBy      User?          @relation(fields: [countedByUserId], references: [id])
+
+  @@unique([inventoryCountId, productId, productBatchId])
+  @@index([inventoryCountId])
+  @@map("inventory_count_items")
+}
+
+model ReportDefinition {
+  id                  String   @id @default(uuid())
+  tenantId            String
+  createdByUserId     String
+  name                String
+  datasetKey          String // ex.: "sales", "stock_movements", "work_orders" — fonte pré-aprovada, nunca SQL livre do usuário
+  dimensions          Json // ex.: ["product.category", "createdAt.month"]
+  metrics             Json // ex.: ["sum(totalAmount)", "count(*)"]
+  filters             Json
+  chartType           String // "TABLE" | "BAR" | "LINE" | "PIE"
+  isPinnedToDashboard Boolean  @default(false)
+  createdAt           DateTime @default(now())
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy        User              @relation(fields: [createdByUserId], references: [id])
+  scheduledReports ScheduledReport[]
+
+  @@index([tenantId, isPinnedToDashboard])
+  @@map("report_definitions")
+}
+
+model ScheduledReport {
+  id                 String    @id @default(uuid())
+  tenantId           String
+  reportDefinitionId String
+  cronExpression     String // ex.: "0 8 * * 1" (toda segunda às 8h)
+  recipientEmails    String[]
+  format             String // "PDF" | "XLSX"
+  active             Boolean   @default(true)
+  lastRunAt          DateTime?
+
+  tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reportDefinition ReportDefinition @relation(fields: [reportDefinitionId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, active])
+  @@map("scheduled_reports")
+}
+
+model DashboardLayout {
+  id        String   @id @default(uuid())
+  tenantId  String
+  userId    String   @unique // um layout por usuário — não compartilhado entre papéis
+  widgets   Json // array ordenado de { reportDefinitionId, x, y, w, h }
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("dashboard_layouts")
+}
+
+enum DataImportStatus {
+  UPLOADED
+  VALIDATING
+  VALIDATED_WITH_ERRORS
+  VALIDATED_CLEAN
+  IMPORTING
+  COMPLETED
+  FAILED
+}
+
+model DataImportJob {
+  id              String           @id @default(uuid())
+  tenantId        String
+  targetEntity    String // "PRODUCT" | "CLIENT" | "SUPPLIER" — extensível para outras entidades sem alterar o schema
+  status          DataImportStatus @default(UPLOADED)
+  sourceFileKey   String // chave do arquivo original no Cloudflare R2
+  columnMapping   Json // { "Preço Venda": "unitPrice", "Cod Barras": "barcodeEan13", ... }
+  totalRows       Int              @default(0)
+  processedRows   Int              @default(0)
+  errorReportKey  String? // CSV de erros gerado pela etapa de validação, também em R2
+  createdByUserId String
+  createdAt       DateTime         @default(now())
+  completedAt     DateTime?
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy User   @relation(fields: [createdByUserId], references: [id])
+
+  @@index([tenantId, status])
+  @@map("data_import_jobs")
+}
+
+enum IntegrationProvider {
+  WHATSAPP_META_CLOUD
+  FISCAL_FOCUS_NFE
+  BILLING_ASAAS
+  BILLING_STRIPE
+  STORAGE_CLOUDFLARE_R2
+  EMAIL_RESEND
+  SMS_ZENVIA
+  TEF_CLISITEF
+  VEHICLE_DATA_FIPE_PLACA // Capítulo 11.9 — consulta de veículo por placa
+  BANK_OPEN_FINANCE_PLUGGY // Capítulo 17.4.1/22.5 — agregador homologado Banco Central, credencial única de plataforma
+  MARKETPLACE_IFOOD // Capítulo 11.1 — recebimento de pedidos via webhook + credenciais OAuth (clientId/clientSecret) do app do lojista no Portal do Parceiro iFood
+}
+
+enum IntegrationEnvironment {
+  SANDBOX
+  PRODUCTION
+}
+
+/// tenantId nulo = credencial de plataforma (ex.: app Meta própria da Filitech, conta mestra Focus NFe);
+/// tenantId preenchido = credencial própria do lojista (ex.: token Asaas da conta bancária dele).
+model IntegrationCredential {
+  id               String                 @id @default(uuid())
+  tenantId         String?
+  provider         IntegrationProvider
+  environment      IntegrationEnvironment @default(PRODUCTION)
+  // Payload cifrado com AES-256-GCM (chave de envelope via KMS — nunca a credencial em texto puro no banco).
+  // Estrutura por provedor documentada em 20.2-20.9 (ex.: { accessToken, phoneNumberId } para WhatsApp).
+  encryptedPayload Bytes
+  encryptionKeyId  String // referência à chave de envelope ativa no momento da gravação (rotação sem reprocessar tudo)
+  active           Boolean                @default(true)
+  lastTestedAt     DateTime?
+  lastTestSuccess  Boolean?
+  lastTestMessage  String?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+
+  @@unique([tenantId, provider, environment])
+  @@index([provider, active])
+  @@map("integration_credentials")
+}
+
+/// Histórico completo de cada teste/chamada real de verificação de saúde — nunca apenas o último resultado.
+model IntegrationHealthCheckLog {
+  id           String   @id @default(uuid())
+  credentialId String
+  success      Boolean
+  httpStatus   Int?
+  latencyMs    Int
+  responseBody String?  @db.Text // corpo truncado da resposta real do provedor, nunca um valor fixo simulado
+  createdAt    DateTime @default(now())
+
+  @@index([credentialId, createdAt])
+  @@map("integration_health_check_logs")
+}
+
+// Campo adicionado a FiscalDocument (Capítulo 5/21.6) — registra, por nota emitida,
+// se o CBS/IBS daquele documento específico era teste-compensável ou cobrança plena,
+// pois isso muda o tratamento contábil/SPED do valor (Capítulo 21.11) mesmo com a
+// MESMA alíquota nominal gravada em `TaxRule`.
+enum FaseReformaTributaria {
+  TESTE_COMPENSAVEL // 2026: CBS/IBS destacados mas integralmente recuperáveis, sem custo real
+  TRANSICAO_PLENA // 2027-2032: CBS cobrança real (substitui PIS/COFINS); ICMS/ISS em redução gradual
+  REGIME_PLENO // 2033+: ICMS/ISS extintos, apenas IBS/CBS/Imposto Seletivo
+}
+
+// FiscalDocument ganha: faseReformaTributaria FaseReformaTributaria — resolvida automaticamente
+// por data no momento da emissão (nunca escolhida manualmente), e gravada de forma imutável
+// no documento fiscal já emitido, pelo mesmo motivo que `taxRegimeSnapshot` (Capítulo 21.6)
+// nunca é recalculado retroativamente.
+
+enum IbsCbsRegimeOptante {
+  EMBUTIDO_NO_DAS // padrão: IBS/CBS recolhidos dentro do DAS unificado — sem crédito pleno
+  REGULAR_COM_CREDITO // opção: apuração fora do Simples, com direito a crédito pleno (e repasse de crédito ao cliente)
+}
+
+/// Histórico de eleições do "Simples Híbrido" — nunca sobrescrito, pois a opção é
+/// irrevogável dentro do semestre e precisa de rastro auditável (mesmo princípio de
+/// imutabilidade do AuditLog, Capítulo 13.4). Aplica-se SOMENTE a tenant.taxRegime =
+/// SIMPLES_NACIONAL — Lucro Presumido/Real já apuram IBS/CBS no regime regular por
+/// definição, sem necessidade de eleição.
+model TenantIbsCbsRegimeElection {
+  id                 String              @id @default(uuid())
+  tenantId           String
+  regime             IbsCbsRegimeOptante
+  semestreReferencia String // ex.: "2027-S1" — semestre a partir do qual a eleição passa a valer
+  janelaAbreEm       DateTime // ex.: 2026-09-01 para a janela excepcional do 1º semestre de 2027
+  janelaFechaEm      DateTime // ex.: 2026-10-30 — fora da janela, a eleição é rejeitada pela API (Capítulo 9)
+  eleitoEm           DateTime            @default(now())
+  eleitoPorUserId    String // Owner/Manager (RBAC, Capítulo 2) — nunca um Cashier/Technician
+  createdAt          DateTime            @default(now())
+
+  tenant        Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  eleitoPorUser User   @relation(fields: [eleitoPorUserId], references: [id])
+
+  @@unique([tenantId, semestreReferencia])
+  @@index([tenantId, eleitoEm])
+  @@map("tenant_ibs_cbs_regime_elections")
+}
+
+enum FiscalCodeType {
+  NCM // Nomenclatura Comum do Mercosul — mercadorias (Receita Federal/Siscomex)
+  NBS // Nomenclatura Brasileira de Serviços — serviços (MDIC)
+  CEST // Código Especificador da Substituição Tributária — usado junto ao NCM no ICMS-ST (Convênio 142/2018)
+}
+
+enum CatalogImportStatus {
+  PROCESSING
+  COMPLETED
+  COMPLETED_WITH_WARNINGS // ex.: códigos novos sem TaxRule correspondente ainda cadastrada
+  FAILED
+}
+
+/// Cada linha é uma IMPORTAÇÃO (lote), nunca uma sobrescrita silenciosa da tabela anterior —
+/// os códigos antigos permanecem no histórico (effectiveTo preenchido), permitindo auditar
+/// qual tabela estava vigente em qualquer venda passada.
+model FiscalCodeCatalogImport {
+  id                            String              @id @default(uuid())
+  catalogType                   FiscalCodeType
+  sourceDescription             String // ex.: "Resolução Camex nº 468/2025 (NCM)", "MDIC Painel NBS v2.1", "Upload manual"
+  fileName                      String?
+  importedByPlatformAdminUserId String // SUPER_ADMIN do painel do dono (Capítulo 13) — catálogo é global da plataforma, nunca de um tenant
+  totalCodesProcessed           Int
+  status                        CatalogImportStatus @default(PROCESSING)
+  errorLog                      String?             @db.Text
+  createdAt                     DateTime            @default(now())
+
+  codes                       FiscalCode[]
+  importedByPlatformAdminUser PlatformAdminUser @relation(fields: [importedByPlatformAdminUserId], references: [id])
+
+  @@index([catalogType, createdAt])
+  @@map("fiscal_code_catalog_imports")
+}
+
+model FiscalCode {
+  id              String         @id @default(uuid())
+  catalogImportId String
+  type            FiscalCodeType
+  code            String // ex.: "2203.00.00" (NCM de cerveja) ou "1.0902" (NBS)
+  description     String         @db.Text
+  effectiveFrom   DateTime
+  effectiveTo     DateTime? // preenchido quando uma Resolução Camex/MDIC posterior substitui/extingue o código
+  createdAt       DateTime       @default(now())
+
+  catalogImport FiscalCodeCatalogImport @relation(fields: [catalogImportId], references: [id])
+
+  @@unique([type, code, effectiveFrom])
+  @@index([type, code, effectiveTo])
+  @@map("fiscal_codes")
+}
+
+enum AccountingEngagementScope {
+  FULL_BOOKKEEPING // escrituração contábil completa (ECD/ECF)
+  TAX_FILING // apuração e transmissão de guias (DAS, DARF, DCTFWeb, DEFIS)
+  PAYROLL_ESOCIAL // folha de pagamento e eventos do eSocial
+  PERSONAL_INCOME_TAX // IRPF do lojista/sócio ou do tenant PERSONAL (Capítulo 22.11)
+  DOCUMENT_EXPORT_ONLY // apenas exportação de arquivos — sem geração/transmissão ativa
+}
+
+enum AccountingEngagementStatus {
+  PENDING_ACCOUNTANT_ACCEPTANCE // espelha o prazo real de 30 dias do e-CAC (dez/2025)
+  ACTIVE
+  REVOKED_BY_CLIENT
+  REVOKED_BY_ACCOUNTANT
+  EXPIRED // aceite não confirmado dentro do prazo — cancelamento automático, igual ao e-CAC real
+}
+
+enum AccountingEngagementEventType {
+  GRANTED
+  ACCEPTED
+  REVOKED_BY_CLIENT
+  REVOKED_BY_ACCOUNTANT
+  EXPIRED
+  SCOPE_CHANGED
+  CROSS_TENANT_ACCESS // registrado toda vez que `assertAccountingAccess()` concede uma leitura real (Capítulo 21.18.3)
+}
+
+enum AccountingTaskType {
+  ECD_GERACAO
+  ECF_GERACAO
+  EFD_REINF_ENVIO
+  DCTFWEB_GERACAO
+  DEFIS_ENVIO
+  FOLHA_FECHAMENTO
+  DAS_GERACAO
+  DARF_GERACAO
+  IRPF_DECLARACAO
+}
+
+enum AccountingTaskStatus {
+  PENDING
+  IN_PROGRESS
+  DONE
+  LATE
+  BLOCKED
+}
+
+enum OfficialTaxDocumentType {
+  ECD
+  ECF
+  EFD_REINF
+  DCTFWEB
+  DEFIS
+  DARF
+  DAS
+  IRPF_DECLARACAO
+  INFORME_RENDIMENTOS_SOCIO // Capítulo 21.18.12 — documento declaratório interno (sem leiaute SPED formal), entregue ao sócio para sua própria DIRPF
+}
+
+enum OfficialTaxDocumentStatus {
+  DRAFT // gerado localmente, ainda não assinado/transmitido
+  GENERATED // arquivo final pronto para assinatura digital e transmissão
+  TRANSMITTED // recibo de transmissão (protocolo) já emitido pelo órgão competente
+  REJECTED // órgão competente rejeitou — `rejectionReason` preenchido
+}
+
+/// Perfil público de um tenant ACCOUNTING_OFFICE no marketplace de contadores
+/// (Capítulo 21.18.6). 1:1 com Tenant — só faz sentido quando tenantType = ACCOUNTING_OFFICE,
+/// validado em código no onboarding (mesmo padrão de obrigatoriedade condicional do CNPJ
+/// no Capítulo 22.1).
+model AccountingFirmProfile {
+  id                        String                      @id @default(uuid())
+  tenantId                  String                      @unique
+  crcNumber                 String // registro no Conselho Regional de Contabilidade — obrigatório por lei para atuar
+  responsibleAccountantName String
+  responsibleAccountantCrc  String // CRC da pessoa física responsável técnica, distinto do CRC da firma (que pode ser PJ)
+  bio                       String?                     @db.Text
+  servicesOffered           AccountingEngagementScope[]
+  baseMonthlyFee            Decimal?                    @db.Decimal(10, 2) // ponto de partida informativo — o honorário real é fechado por AccountingEngagementFee
+  isListedInMarketplace     Boolean                     @default(false)
+  marketplaceRatingAverage  Decimal                     @default(0) @db.Decimal(2, 1)
+  marketplaceRatingCount    Int                         @default(0)
+  createdAt                 DateTime                    @default(now())
+  updatedAt                 DateTime                    @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("accounting_firm_profiles")
+}
+
+/// Espelho da procuração eletrônica do e-CAC: concessão → aceite pendente com prazo →
+/// ativo → revogável por qualquer lado. NUNCA um booleano "contratado = true/false" —
+/// o histórico de estado é auditável via `auditEvents` (Capítulo 21.18.3).
+model AccountingEngagement {
+  id                     String                      @id @default(uuid())
+  accountingFirmTenantId String
+  clientTenantId         String
+  scopes                 AccountingEngagementScope[]
+  status                 AccountingEngagementStatus  @default(PENDING_ACCOUNTANT_ACCEPTANCE)
+  grantedByUserId        String // usuário do tenant-cliente que concedeu a procuração
+  grantedAt              DateTime                    @default(now())
+  acceptanceDeadlineAt   DateTime // grantedAt + 30 dias corridos, igual à regra real do e-CAC
+  acceptedByUserId       String?
+  acceptedAt             DateTime?
+  revokedByUserId        String?
+  revokedAt              DateTime?
+  revokedReason          String?
+
+  firmTenant   Tenant                           @relation("EngagementsAsFirm", fields: [accountingFirmTenantId], references: [id], onDelete: Cascade)
+  clientTenant Tenant                           @relation("EngagementsAsClient", fields: [clientTenantId], references: [id], onDelete: Cascade)
+  auditEvents  AccountingEngagementAuditEvent[]
+  fees         AccountingEngagementFee[]
+  tasks        AccountingTask[]
+  reviews      AccountingMarketplaceReview[] // Capítulo 21.18.9
+
+  @@index([accountingFirmTenantId, status])
+  @@index([clientTenantId, status])
+  @@map("accounting_engagements")
+}
+
+/// Trilha de auditoria obrigatória do vínculo — toda transição de estado e todo acesso
+/// cross-tenant concedido por `assertAccountingAccess()` (Capítulo 21.18.3/7.4) gera uma linha aqui.
+model AccountingEngagementAuditEvent {
+  id           String                        @id @default(uuid())
+  engagementId String
+  eventType    AccountingEngagementEventType
+  actorUserId  String?
+  occurredAt   DateTime                      @default(now())
+  metadata     Json?
+
+  engagement AccountingEngagement @relation(fields: [engagementId], references: [id], onDelete: Cascade)
+
+  @@index([engagementId, occurredAt])
+  @@map("accounting_engagement_audit_events")
+}
+
+/// Cobrança de honorário contábil entre escritório e cliente. Reaproveita o backbone
+/// financeiro já existente (Capítulo 17) em vez de inventar um motor de cobrança
+/// paralelo: ao gerar a cobrança mensal, o serviço cria simultaneamente um
+/// `AccountReceivable` no tenant do escritório e um `AccountPayable` no tenant do
+/// cliente, apontando para o mesmo `accountReceivableId`/`accountPayableId` aqui.
+model AccountingEngagementFee {
+  id                  String   @id @default(uuid())
+  engagementId        String
+  amount              Decimal  @db.Decimal(10, 2)
+  periodicity         String // "MONTHLY" | "ONE_TIME" — mesmo padrão de string controlada já usado em `Subscription.billingCycle` (Capítulo 2)
+  dueDay              Int? // dia do mês de vencimento, quando periodicity = MONTHLY
+  accountReceivableId String? // lançamento espelhado no tenant do escritório
+  accountPayableId    String? // lançamento espelhado no tenant do cliente
+  createdAt           DateTime @default(now())
+
+  engagement AccountingEngagement @relation(fields: [engagementId], references: [id], onDelete: Cascade)
+
+  @@map("accounting_engagement_fees")
+}
+
+/// Motor de tarefas recorrentes por competência — o equivalente real ao "Domínio
+/// Processos"/"ONVIO Processos" pesquisado nesta auditoria. Gerado automaticamente por
+/// um cron mensal (Capítulo 21.18.4) a partir do `taxRegime` e dos `scopes` ativos do
+/// vínculo, nunca cadastrado manualmente tarefa por tarefa.
+model AccountingTask {
+  id                     String               @id @default(uuid())
+  accountingFirmTenantId String
+  clientTenantId         String
+  engagementId           String?
+  taskType               AccountingTaskType
+  competencia            String // "AAAA-MM", ex.: "2025-12"
+  dueDate                DateTime
+  status                 AccountingTaskStatus @default(PENDING)
+  assignedUserId         String?
+  completedAt            DateTime?
+  resultingDocumentId    String? // preenchido quando a tarefa gera um OfficialTaxDocument
+
+  firmTenant   Tenant                @relation("AccountingTasksAsFirm", fields: [accountingFirmTenantId], references: [id], onDelete: Cascade)
+  clientTenant Tenant                @relation("AccountingTasksAsClient", fields: [clientTenantId], references: [id], onDelete: Cascade)
+  engagement   AccountingEngagement? @relation(fields: [engagementId], references: [id])
+
+  @@index([accountingFirmTenantId, status, dueDate])
+  @@index([clientTenantId, competencia])
+  @@map("accounting_tasks")
+}
+
+/// Documento oficial real gerado para fins fiscais/contábeis — arquivo SPED binário/XML
+/// armazenado no Cloudflare R2 (Capítulo 3), nunca um registro apenas descritivo sem
+/// arquivo anexo. `layoutVersion` nunca é um literal mágico no código gerador — é lido de
+/// `FiscalCodeCatalogImport` (Capítulo 21.16), o mesmo mecanismo de catálogo versionável
+/// já usado para NCM/NBS/CEST, porque o leiaute do ECD/ECF muda a cada ano-calendário.
+model OfficialTaxDocument {
+  id                                String                    @id @default(uuid())
+  tenantId                          String // tenant-cliente dono do documento (sempre, mesmo no Caminho B sem escritório contratado)
+  generatedByAccountingFirmTenantId String? // nulo no Caminho B (autogerado pelo próprio lojista)
+  documentType                      OfficialTaxDocumentType
+  layoutVersion                     String // ex.: "Leiaute 12" (ECF, ano-calendário 2025) — lido do catálogo versionado, nunca hardcoded
+  competenciaInicio                 DateTime
+  competenciaFim                    DateTime
+  fileUrl                           String // objeto no Cloudflare R2 (Capítulo 3.3)
+  transmissionProtocol              String? // recibo de transmissão do SPED/e-CAC, preenchido apenas quando status = TRANSMITTED
+  rejectionReason                   String?
+  status                            OfficialTaxDocumentStatus @default(DRAFT)
+  generatedAt                       DateTime                  @default(now())
+
+  tenant          Tenant  @relation("OfficialTaxDocumentsOfTenant", fields: [tenantId], references: [id], onDelete: Cascade)
+  generatedByFirm Tenant? @relation("OfficialTaxDocumentsGeneratedByFirm", fields: [generatedByAccountingFirmTenantId], references: [id])
+
+  @@index([tenantId, documentType, competenciaInicio])
+  @@map("official_tax_documents")
+}
+
+/// Um leiaute oficial por tipo de documento e ano-calendário. Nunca um literal mágico
+/// ("Leiaute 12") espalhado pelo código gerador — sempre lido daqui, com histórico
+/// completo preservado (`effectiveTo` preenchido quando um novo leiaute substitui o
+/// anterior), permitindo auditar qual leiaute estava vigente em qualquer documento já
+/// gerado no passado.
+model OfficialDocumentLayoutVersion {
+  id                String                  @id @default(uuid())
+  documentType      OfficialTaxDocumentType
+  layoutVersion     String // ex.: "Leiaute 12" (ECF, ano-calendário 2025), "Leiaute 2.1.2" (EFD-Reinf)
+  sourceDescription String // ex.: "Ato Declaratório Executivo Cofis nº 68/2025 (ECF)"
+  effectiveFrom     DateTime
+  effectiveTo       DateTime?
+  createdAt         DateTime                @default(now())
+
+  @@index([documentType, effectiveFrom])
+  @@map("official_document_layout_versions")
+}
+
+model AccountingMarketplaceReview {
+  id                     String   @id @default(uuid())
+  accountingFirmTenantId String
+  clientTenantId         String
+  engagementId           String // exige vínculo real — nunca uma avaliação sem relação comprovada
+  authorUserId           String
+  rating                 Int // 1 a 5, validado em código (Capítulo 6)
+  comment                String?  @db.Text
+  createdAt              DateTime @default(now())
+
+  engagement AccountingEngagement @relation(fields: [engagementId], references: [id], onDelete: Cascade)
+
+  @@unique([engagementId, authorUserId]) // um usuário avalia uma vez por vínculo, pode editar, nunca duplicar
+  @@index([accountingFirmTenantId])
+  @@map("accounting_marketplace_reviews")
+}
+
+model CompanyPartner {
+  id                      String   @id @default(uuid())
+  tenantId                String
+  name                    String
+  cpf                     String
+  participationPercentage Decimal  @db.Decimal(5, 2) // percentual de participação societária, usado na apuração proporcional de lucro distribuído
+  createdAt               DateTime @default(now())
+
+  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  payouts PartnerPayout[]
+
+  @@unique([tenantId, cpf])
+  @@map("company_partners")
+}
+
+enum PartnerPayoutType {
+  PRO_LABORE // rendimento tributável — sujeito a INSS e IRRF
+  PROFIT_DISTRIBUTION // rendimento isento (código 09 do IRPF), dentro do limite legal
+}
+
+model PartnerPayout {
+  id           String            @id @default(uuid())
+  tenantId     String
+  partnerId    String
+  type         PartnerPayoutType
+  competencia  String // "AAAA-MM"
+  grossAmount  Decimal           @db.Decimal(12, 2)
+  inssWithheld Decimal           @default(0) @db.Decimal(12, 2) // sempre 0 quando type = PROFIT_DISTRIBUTION
+  irrfWithheld Decimal           @default(0) @db.Decimal(12, 2) // sempre 0 quando type = PROFIT_DISTRIBUTION
+  netAmount    Decimal           @db.Decimal(12, 2)
+  paidAt       DateTime
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  partner CompanyPartner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, partnerId, competencia])
+  @@map("partner_payouts")
+}
+
+enum FiscalDocumentEventType {
+  CANCELLATION // Evento de Cancelamento (prazo legal: até 24h após autorização para NFC-e; 10 dias para NF-e modelo 55)
+  CORRECTION_LETTER // Carta de Correção Eletrônica (CC-e) — corrige erros que NÃO alterem valores/tributos/destinatário
+  RECIPIENT_MANIFESTATION // Manifestação do Destinatário — quando o Filitech é o TOMADOR de uma NF-e de compra (Capítulo 17.8), não o emitente
+}
+
+enum RecipientManifestationType {
+  CONFIRMACAO_DA_OPERACAO // "De acordo" — mercadoria recebida conforme a nota
+  OPERACAO_NAO_REALIZADA // nota emitida mas a compra não ocorreu de fato
+  DESCONHECIMENTO_DA_OPERACAO // tenant nunca transacionou com o emitente (possível fraude/uso indevido do CNPJ)
+  CIENCIA_DA_OPERACAO // ciente, aguardando confirmação definitiva (passo intermediário obrigatório do fluxo SEFAZ)
+}
+
+model FiscalDocumentEvent {
+  id                 String                      @id @default(uuid())
+  tenantId           String
+  fiscalDocumentId   String
+  eventType          FiscalDocumentEventType
+  sequenceNumber     Int // nSeqEvento — a SEFAZ exige numeração sequencial por tipo de evento sobre o mesmo documento
+  justification      String? // obrigatória para CANCELLATION (mín. 15 caracteres, exigência real do schema XML da SEFAZ) e CORRECTION_LETTER
+  manifestationType  RecipientManifestationType? // preenchido apenas quando eventType = RECIPIENT_MANIFESTATION
+  protocolNumber     String? // nProt devolvido pela SEFAZ na autorização do evento
+  eventXmlStorageKey String? // XML do evento assinado, armazenado no Cloudflare R2 (Capítulo 3), mesmo padrão do XML principal
+  status             FiscalDocumentStatus        @default(PENDING) // reaproveita o mesmo enum do documento principal — um evento também passa por PENDING → AUTHORIZED/REJECTED
+  rejectionReason    String?
+  createdAt          DateTime                    @default(now())
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  fiscalDocument FiscalDocument @relation(fields: [fiscalDocumentId], references: [id], onDelete: Cascade)
+
+  @@unique([fiscalDocumentId, eventType, sequenceNumber])
+  @@index([tenantId, fiscalDocumentId])
+  @@map("fiscal_document_events")
+}

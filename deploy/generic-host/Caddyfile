@@ -1,0 +1,11 @@
+# Reverse proxy com HTTPS automático (Let's Encrypt). Variáveis vêm do serviço caddy
+# do docker-compose.yml (APP_DOMAIN / API_DOMAIN, definidas no .env).
+{$APP_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web:80
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy api:3333
+}

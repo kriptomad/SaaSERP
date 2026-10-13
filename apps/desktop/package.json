@@ -1,0 +1,71 @@
+{
+  "name": "@filitech/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Filitech ERP Desktop — shell Electron standalone (modo HOST ou USUÁRIO) para instalação on-premise no PC/servidor do lojista.",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev:renderer": "vite",
+    "dev:electron:build": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "dev:electron:start": "wait-on tcp:5174 && cross-env ELECTRON_RENDERER_URL=http://localhost:5174 electron .",
+    "dev": "concurrently -k -n renderer,electron-build,electron -c blue,yellow,green \"npm:dev:renderer\" \"npm:dev:electron:build\" \"npm:dev:electron:start\"",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:renderer && npm run build:electron",
+    "typecheck": "tsc --noEmit",
+    "package:win": "npm run build && electron-builder --win --publish=never",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@filitech/design-tokens": "*",
+    "@emotion/react": "^11.13.3",
+    "@emotion/styled": "^11.13.0",
+    "@mui/icons-material": "^5.18.0",
+    "@mui/material": "^5.16.7",
+    "electron-store": "^8.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/node": "^22.9.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.7",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.filitech.erp.desktop",
+    "productName": "Filitech ERP Desktop",
+    "directories": {
+      "output": "release",
+      "buildResources": "build-resources"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": ["nsis"],
+      "artifactName": "FilitechERPDesktop-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}

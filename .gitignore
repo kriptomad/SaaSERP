@@ -1,0 +1,35 @@
+# --- Dependências ---
+node_modules/
+**/node_modules/
+
+# --- Build outputs ---
+dist/
+build/
+**/dist/
+**/build/
+apps/desktop/dist-electron/
+apps/desktop/release/
+
+# --- Ambiente / segredos ---
+.env
+.env.*
+!.env.example
+apps/api/keys/
+*.pem
+
+# --- Prisma ---
+packages/db/prisma/migrations/dev-tmp/
+
+# --- Logs ---
+*.log
+npm-debug.log*
+
+# --- Editor/OS ---
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+Thumbs.db
+
+# --- Deploy self-host ---
+deploy/generic-host/secrets/*
+!deploy/generic-host/secrets/.gitkeep

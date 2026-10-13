@@ -1,0 +1,38 @@
+# Infraestrutura local de desenvolvimento (Postgres 15 + Redis), Capítulo 3 da Bible.
+# Uso: docker compose -f infra/docker/docker-compose.dev.yml up -d
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: filitech-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: filitech
+      POSTGRES_PASSWORD: filitech_dev_password
+      POSTGRES_DB: filitech
+    ports:
+      - "5432:5432"
+    volumes:
+      - filitech_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filitech"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: filitech-redis-dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - filitech_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  filitech_postgres_data:
+  filitech_redis_data:

@@ -1,0 +1,17 @@
+# Railway — hospeda apps/api (+ plugins Postgres e Redis). Guia: deploy/railway/README.md
+# Railway detecta este arquivo na raiz e builda a API via Dockerfile dedicado.
+# Postgres/Redis são adicionados como serviços do projeto e referenciados por variáveis
+# (DATABASE_URL / REDIS_URL) no serviço da API.
+#
+# Sem `startCommand` de propósito: a imagem é distroless (ENTRYPOINT já é `node`, CMD =
+# apps/api/dist/server.cjs). Um startCommand como "node ..." viraria `node node ...`.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "apps/api/Dockerfile"
+watchPatterns = ["apps/api/**", "packages/db/**", "package.json", "package-lock.json", "railway.toml"]
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

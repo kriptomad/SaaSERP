@@ -1,0 +1,158 @@
+# Filitech ERP — self-hosting em VPS genérica (Capítulo 3.1: Hetzner/DigitalOcean/etc.).
+# Topologia: postgres 15 + redis 7 + api + worker (BullMQ) + web (Nginx) + caddy (HTTPS, opcional).
+# Uso (a partir desta pasta):
+#   cp .env.example .env && nano .env
+#   docker compose up -d --build            # sobe tudo; o job `migrate` roda antes da api
+#   docker compose --profile https up -d    # idem + Caddy com HTTPS automático
+# Redis: o namespace de cache por tenant (tenant:{id}:cache, Capítulo 3.4) é só uma
+# convenção de chave da aplicação — não requer nenhuma configuração extra no servidor.
+
+x-api-env: &api-env
+  NODE_ENV: production
+  DATABASE_URL: postgresql://${POSTGRES_USER:-filitech}:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}@postgres:5432/${POSTGRES_DB:-filitech}?schema=public
+  REDIS_URL: redis://:${REDIS_PASSWORD:?defina REDIS_PASSWORD no .env}@redis:6379
+  JWT_PRIVATE_KEY_PATH: /run/secrets/jwt_private_key
+  JWT_PUBLIC_KEY_PATH: /run/secrets/jwt_public_key
+  PORT: "3333"
+  CORS_ORIGIN: ${CORS_ORIGIN:?defina CORS_ORIGIN no .env}
+  INTEGRATION_CREDENTIALS_MASTER_KEY: ${INTEGRATION_CREDENTIALS_MASTER_KEY:?defina INTEGRATION_CREDENTIALS_MASTER_KEY no .env}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  ASAAS_BASE_URL: ${ASAAS_BASE_URL:-https://www.asaas.com/api/v3}
+  ASAAS_API_KEY: ${ASAAS_API_KEY:-}
+  ASAAS_WEBHOOK_TOKEN: ${ASAAS_WEBHOOK_TOKEN:-}
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-filitech}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      POSTGRES_DB: ${POSTGRES_DB:-filitech}
+    volumes:
+      - filitech_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?defina REDIS_PASSWORD no .env}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
+    volumes:
+      - filitech_redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Job one-shot: aplica as migrations do Prisma (packages/db/prisma/migrations) e sai.
+  # A imagem da API é distroless (sem shell/npx), por isso chamamos o node e a CLI do prisma direto.
+  migrate:
+    build:
+      context: ../../
+      dockerfile: apps/api/Dockerfile
+    image: filitech-api:local
+    restart: "no"
+    entrypoint: ["/nodejs/bin/node"]
+    command:
+      - packages/db/node_modules/prisma/build/index.js
+      - migrate
+      - deploy
+      - --schema
+      - packages/db/prisma/schema.prisma
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-filitech}:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}@postgres:5432/${POSTGRES_DB:-filitech}?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ../../
+      dockerfile: apps/api/Dockerfile
+    image: filitech-api:local
+    restart: unless-stopped
+    environment: *api-env
+    secrets:
+      - jwt_private_key
+      - jwt_public_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:3333:3333"
+    healthcheck:
+      test: ["CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:3333/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Worker BullMQ (filas WhatsApp, fiscal, relatórios) — mesma imagem, outro entrypoint.
+  worker:
+    image: filitech-api:local
+    restart: unless-stopped
+    command: ["apps/api/dist/worker.cjs"]
+    environment: *api-env
+    secrets:
+      - jwt_private_key
+      - jwt_public_key
+    depends_on:
+      api:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ../../
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Embutido no bundle em build time (Vite): reconstrua a imagem ao mudar.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:3333}
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:8080:80"
+
+  # HTTPS automático (Let's Encrypt) — ativado com `--profile https`.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-app.example.com}
+      API_DOMAIN: ${API_DOMAIN:-api.example.com}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - filitech_caddy_data:/data
+      - filitech_caddy_config:/config
+    depends_on:
+      - web
+      - api
+
+secrets:
+  jwt_private_key:
+    file: ./secrets/jwt-private.pem
+  jwt_public_key:
+    file: ./secrets/jwt-public.pem
+
+volumes:
+  filitech_postgres_data:
+  filitech_redis_data:
+  filitech_caddy_data:
+  filitech_caddy_config:

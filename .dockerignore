@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.git
+.env
+.env.*
+!.env.example
+**/*.pem
+**/keys
+deploy
+infra
+*.md

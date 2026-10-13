@@ -1,0 +1,29 @@
+{
+  "name": "filitech-erp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Filitech ERP — SaaS vertical multi-tenant (implementação a partir de BIBLE_ENGINEERING_V2.md)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "db:generate": "npm run generate --workspace=@filitech/db",
+    "db:validate": "npm run validate --workspace=@filitech/db",
+    "db:migrate": "npm run migrate:dev --workspace=@filitech/db",
+    "db:deploy": "npm run migrate:deploy --workspace=@filitech/db",
+    "db:studio": "npm run studio --workspace=@filitech/db",
+    "api:dev": "npm run dev --workspace=@filitech/api",
+    "web:dev": "npm run dev --workspace=@filitech/web",
+    "desktop:dev": "npm run dev --workspace=@filitech/desktop",
+    "desktop:typecheck": "npm run typecheck --workspace=@filitech/desktop",
+    "dev": "npm run api:dev & npm run web:dev"
+  },
+  "allowScripts": {
+    "argon2@0.41.1": true,
+    "esbuild@0.28.2": true
+  }
+}

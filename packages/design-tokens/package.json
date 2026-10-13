@@ -1,0 +1,19 @@
+{
+  "name": "@filitech/design-tokens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@emotion/react": "^11.13.3",
+    "@emotion/styled": "^11.13.0",
+    "@mui/material": "^5.16.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
