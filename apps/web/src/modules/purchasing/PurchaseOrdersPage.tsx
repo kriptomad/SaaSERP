@@ -1,7 +1,8 @@
 // apps/web/src/modules/purchasing/PurchaseOrdersPage.tsx
 import { useState } from "react";
-import { Button, Chip, MenuItem, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField } from "@mui/material";
+import { Button, Chip, MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
+import UploadFileIcon from "@mui/icons-material/UploadFileOutlined";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link as RouterLink } from "react-router-dom";
 import { orderTotal, purchaseOrdersApi, PO_STATUS, type PurchaseOrder, type PurchaseOrderStatus } from "./api";
@@ -37,9 +38,14 @@ export function PurchaseOrdersPage() {
         title="Ordens de compra"
         subtitle="A API retorna todas as ordens do tenant sem paginação."
         actions={
-          <Button component={RouterLink} to="/compras/nova" variant="contained" startIcon={<AddIcon />}>
-            Nova ordem de compra
-          </Button>
+          <Stack direction="row" spacing={1}>
+            <Button component={RouterLink} to="/compras/importar-xml" variant="outlined" startIcon={<UploadFileIcon />}>
+              Importar XML de NF-e
+            </Button>
+            <Button component={RouterLink} to="/compras/nova" variant="contained" startIcon={<AddIcon />}>
+              Nova ordem de compra
+            </Button>
+          </Stack>
         }
       />
       <TextField select size="small" label="Status" value={status} onChange={(e) => setStatus(e.target.value)} sx={{ mb: 2, minWidth: 240 }}>

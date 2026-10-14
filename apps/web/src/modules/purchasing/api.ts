@@ -60,6 +60,35 @@ export interface ReceiveInput {
   }>;
 }
 
+export interface NfeImportItem {
+  cProd: string;
+  ean: string | null;
+  description: string;
+  ncm: string | null;
+  quantity: number;
+  unitCost: number;
+  totalValue: number;
+  matchedProductId: string | null;
+  matchedBy: "BARCODE" | "SKU" | null;
+}
+
+export interface NfeImportPreview {
+  accessKey: string | null;
+  number: string | null;
+  series: string | null;
+  issueDate: string | null;
+  supplier: { cnpj: string; name: string };
+  totalValue: number;
+  items: NfeImportItem[];
+  supplierMatch: { id: string; name: string } | null;
+}
+
+export interface ConfirmNfeImportInput {
+  supplierId: string;
+  dueDate?: string;
+  items: Array<{ cProd: string; productId: string; quantity: number; unitCost: number }>;
+}
+
 export const purchaseOrdersApi = {
   list: (status?: string) => api.get<PurchaseOrder[]>("/purchase-orders", { status }),
   get: (id: string) => api.get<PurchaseOrder>(`/purchase-orders/${id}`),
@@ -68,6 +97,8 @@ export const purchaseOrdersApi = {
   send: (id: string) => api.patch<PurchaseOrder>(`/purchase-orders/${id}/send`),
   cancel: (id: string) => api.patch<PurchaseOrder>(`/purchase-orders/${id}/cancel`),
   receive: (id: string, input: ReceiveInput) => api.post<unknown>(`/purchase-orders/${id}/receive`, input),
+  previewNfeImport: (xml: string) => api.post<NfeImportPreview>("/purchase-orders/import-nfe/preview", { xml }),
+  confirmNfeImport: (input: ConfirmNfeImportInput) => api.post<PurchaseOrder>("/purchase-orders/import-nfe/confirm", input),
 };
 
 export function orderTotal(order: Pick<PurchaseOrder, "items">): number {
