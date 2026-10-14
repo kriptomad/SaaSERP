@@ -47,6 +47,16 @@ export async function registerCashMovement(
   if (!input.reason?.trim()) {
     throw new Error("Sangria/suprimento exige motivo obrigatório.");
   }
+  // GAP DE AUDITORIA FECHADO (Capítulo 6.7, Rodada 15): o `AuditLog` global
+  // (Capítulo 13) é exclusivo de ações do PAINEL DE PLATAFORMA — sua FK
+  // `platformAdminUserId` é obrigatória e não aceita usuários de tenant, então
+  // JAMAIS deve ser usado para sangria/suprimento de caixa (isso quebraria o
+  // invariante "AuditLog = apenas ações do dono da plataforma"). O registro
+  // imutável e auditável de sangria/suprimento já É o próprio
+  // `CashRegisterMovement`: nenhuma rota de UPDATE/DELETE existe para este
+  // modelo (apenas `create`, ver cash-register.routes.ts), `reason` é
+  // obrigatório, e `performedByUserId`/`createdAt` identificam quem e quando —
+  // o mesmo padrão de "ledger imutável" usado por `StockMovement`/`AuditLog`.
   return tx.cashRegisterMovement.create({
     data: {
       cashRegisterId: input.cashRegisterId,

@@ -14,17 +14,13 @@
 //     sistema deve sugerir cobrar o valor de reposição do casco na próxima venda.
 //
 // Decisão de integração com o fechamento de venda (close-sale.service.ts):
-//   NÃO foi adicionado lançamento automático de BORROWED no fechamento de venda nesta
-//   rodada. Motivos: (1) `CloseSaleServerInput`/`executeCloseSaleTransaction` não
-//   recebem `clientId` em nenhum ponto hoje — nem o schema de validação em
-//   `sales.routes.ts`, nem o `tx.sale.create` gravam esse campo, apesar de
-//   `Sale.clientId` existir no schema; (2) esse arquivo foi corrigido recentemente por
-//   outro agente para bugs de vazamento de tenant, e estender seu contrato de entrada
-//   (rota → service → transação) é uma mudança não-trivial que arrisca regressão num
-//   fluxo transacional crítico (Capítulo 6.6) sem tempo hábil para testar com segurança
-//   nesta tarefa. Fica documentado como pendência explícita (ver relatório final) — o
-//   lançamento continua disponível manualmente via POST /liquor-ledger/entries,
-//   inclusive com `saleId` opcional para o operador vincular à venda já fechada.
+//   RESOLVIDO NESTA RODADA (Capítulo 6.6/4.3): `close-sale.service.ts` agora coleta,
+//   durante o loop de itens, todo produto com `isReturnableContainer=true` vendido
+//   com `clientId` identificado, e materializa um lançamento BORROWED vinculado ao
+//   `sale.id` logo após a criação da venda (mesmo padrão de `opticalLabOrders`). Uma
+//   venda de casco retornável SEM cliente identificado (ex.: balcão avulso) não gera
+//   lançamento algum — não há "conta-corrente" sem titular. O lançamento manual via
+//   POST /liquor-ledger/entries continua disponível para correções/ajustes.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";

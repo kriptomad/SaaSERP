@@ -7,6 +7,7 @@ import { startSuspendOverdueTenantsWorker, scheduleSuspendOverdueTenantsJob } fr
 import { startFiscalEmissionWorker } from "./workers/fiscal-emission.worker";
 import { startWhatsAppNotificationsWorker } from "./workers/whatsapp-notifications.worker";
 import { startPluggySyncWorker } from "./workers/pluggy-sync.worker";
+import { startExpireLoyaltyPointsWorker, scheduleExpireLoyaltyPointsJob } from "./workers/expire-loyalty-points.worker";
 
 async function main() {
   const suspendOverdueTenantsWorker = startSuspendOverdueTenantsWorker();
@@ -14,8 +15,10 @@ async function main() {
   const fiscalEmissionWorker = startFiscalEmissionWorker();
   const whatsappNotificationsWorker = startWhatsAppNotificationsWorker();
   const pluggySyncWorker = startPluggySyncWorker();
+  const expireLoyaltyPointsWorker = startExpireLoyaltyPointsWorker();
+  await scheduleExpireLoyaltyPointsJob();
 
-  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker]) {
+  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker]) {
     worker.on("completed", (job) => {
       // eslint-disable-next-line no-console
       console.log(`[worker:${job.queueName}] job ${job.id} concluído:`, job.returnvalue);

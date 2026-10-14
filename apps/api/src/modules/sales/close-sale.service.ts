@@ -168,6 +168,11 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
       // uma O.S. de laboratório (`WorkOrder.workOrderType = OPTICAL_LAB`) após o Sale
       // existir (precisa de `sale.id`) — coletado durante o loop, materializado depois.
       const opticalLabOrders: { productName: string; lensDeliveryType: "STOCK" | "CUSTOM"; opticalPrescriptionId: string }[] = [];
+      // Capítulo 4.3 — Adega/Bebidas: vendas de produto com `isReturnableContainer=true`
+      // geram automaticamente um lançamento BORROWED na conta-corrente de cascos
+      // (ver liquor-ledger.routes.ts) — coletado durante o loop (ainda sem `sale.id`)
+      // e materializado depois, mesmo padrão de `opticalLabOrders` acima.
+      const returnableContainerEntries: { productId: string; quantity: number }[] = [];
 
       for (const item of input.items) {
         const product = await tx.product.findFirstOrThrow({ where: { id: item.productId, tenantId: input.tenantId } });
@@ -203,6 +208,10 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
             lensDeliveryType: product.lensDeliveryType ?? "STOCK",
             opticalPrescriptionId: prescription.id,
           });
+        }
+
+        if (product.isReturnableContainer && input.clientId) {
+          returnableContainerEntries.push({ productId: product.id, quantity: item.quantity });
         }
 
         const lineGross = new Prisma.Decimal(item.unitPrice).times(item.quantity);
@@ -521,6 +530,23 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
             workOrderType: "OPTICAL_LAB",
             estimatedReadyAt,
             opticalPrescriptionId: labOrder.opticalPrescriptionId,
+            saleId: sale.id,
+          },
+        });
+      }
+
+      // Capítulo 4.3 — Adega/Bebidas: materializa o lançamento BORROWED na
+      // conta-corrente de cascos para cada produto retornável vendido — fecha o gap
+      // documentado no header de `liquor-ledger.routes.ts` (o lançamento deixa de
+      // depender exclusivamente do POST manual `/liquor-ledger/entries`).
+      for (const containerEntry of returnableContainerEntries) {
+        await tx.returnableContainerLedger.create({
+          data: {
+            tenantId: input.tenantId,
+            clientId: input.clientId!,
+            productId: containerEntry.productId,
+            direction: "BORROWED",
+            quantity: containerEntry.quantity,
             saleId: sale.id,
           },
         });

@@ -185,6 +185,74 @@ loyaltyRouter.post("/loyalty/accounts/:clientId/adjust", requireAuth, async (req
   return res.status(201).json({ success: true, data: { transaction: result.transaction, pointsBalance: result.pointsBalance }, error: null });
 });
 
+const redeemSchema = z.object({
+  points: z.number().int().positive(),
+  saleId: z.string().uuid().optional().nullable(),
+});
+
+// GAP DE AUDITORIA FECHADO (Capítulo 4.1.1, Rodada 15): só havia leitura de saldo
+// (`redeemableValue` calculado em GET /loyalty/accounts/:clientId) e ajuste manual
+// genérico — nenhuma rota dedicada de RESGATE existia para o PDV aplicar o desconto
+// em pontos durante o fechamento da venda.
+loyaltyRouter.post("/loyalty/accounts/:clientId/redeem", requireAuth, async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "loyalty:account:write"))) {
+    return forbidden(res, "Seu nível de acesso não permite resgatar pontos de fidelidade.");
+  }
+  const parsed = redeemSchema.safeParse(req.body);
+  if (!parsed.success) return validationError(res, parsed.error.flatten());
+  const { points, saleId } = parsed.data;
+
+  const client = await prisma.client.findFirst({ where: { id: req.params.clientId, tenantId }, select: { id: true } });
+  if (!client) return notFound(res, "Cliente não encontrado.");
+
+  const program = await prisma.loyaltyProgram.findUnique({ where: { tenantId } });
+  if (!program?.active) {
+    return res.status(409).json({ success: false, data: null, error: { code: "LOYALTY_PROGRAM_INACTIVE", message: "O programa de fidelidade não está ativo." } });
+  }
+  if (points < program.minPointsToRedeem) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: { code: "BELOW_MIN_REDEMPTION", message: `O resgate mínimo é de ${program.minPointsToRedeem} pontos.` },
+    });
+  }
+
+  if (saleId) {
+    const sale = await prisma.sale.findFirst({ where: { id: saleId, tenantId }, select: { id: true } });
+    if (!sale) return notFound(res, "Venda informada não encontrada.");
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const account = await tx.loyaltyAccount.findUnique({ where: { clientId: client.id } });
+    if (!account) return { insufficient: true as const };
+
+    // Check-and-update atômico no WHERE: dois resgates concorrentes do mesmo saldo
+    // nunca levam a conta a ficar negativa (mesmo padrão de /adjust acima).
+    const updated = await tx.loyaltyAccount.updateMany({
+      where: { id: account.id, pointsBalance: { gte: points } },
+      data: { pointsBalance: { decrement: points } },
+    });
+    if (updated.count === 0) return { insufficient: true as const };
+
+    const transaction = await tx.loyaltyTransaction.create({
+      data: { loyaltyAccountId: account.id, type: "REDEEM", points: -points, saleId: saleId ?? null },
+    });
+    const fresh = await tx.loyaltyAccount.findUniqueOrThrow({ where: { id: account.id } });
+    const discountValue = Number(program.redemptionValuePerPoint) * points;
+    return { insufficient: false as const, transaction, pointsBalance: fresh.pointsBalance, discountValue };
+  });
+
+  if (result.insufficient) {
+    return res.status(409).json({ success: false, data: null, error: { code: "INSUFFICIENT_POINTS", message: "Saldo de pontos insuficiente para este resgate." } });
+  }
+  return res.status(201).json({
+    success: true,
+    data: { transaction: result.transaction, pointsBalance: result.pointsBalance, discountValue: result.discountValue },
+    error: null,
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // INDICAÇÃO (tenant → tenant). Permissões reaproveitadas: billing:subscription:read/manage.
 // ─────────────────────────────────────────────────────────────────────────

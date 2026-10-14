@@ -77,6 +77,8 @@ export const loyaltyApi = {
     api.get<LoyaltyTransaction[]>(`/loyalty/accounts/${clientId}/transactions`, { type }),
   adjust: (clientId: string, input: { points: number; reason: string }) =>
     api.post<{ transaction: LoyaltyTransaction; pointsBalance: number }>(`/loyalty/accounts/${clientId}/adjust`, input),
+  redeem: (clientId: string, input: { points: number; saleId?: string | null }) =>
+    api.post<{ transaction: LoyaltyTransaction; pointsBalance: number; discountValue: number }>(`/loyalty/accounts/${clientId}/redeem`, input),
   myReferralCode: () => api.get<ReferralCode>("/referrals/my-code"),
   listReferrals: () => api.get<Referral[]>("/referrals"),
   registerReferral: (code: string) => api.post<Referral>("/referrals/register", { code }),

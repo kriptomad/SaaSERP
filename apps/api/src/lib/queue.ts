@@ -33,6 +33,10 @@ export const QUEUE_NAMES = {
   // (`modules/financial/pluggy-webhook.routes.ts`) e pelas rotas de "sincronizar agora"
   // (business `bank-reconciliation.routes.ts` / pessoal `personal-planning.routes.ts`).
   PLUGGY_SYNC: "pluggy-sync",
+  // Capítulo 4.1.1 — varredura diária de expiração de pontos de fidelidade
+  // (`LoyaltyTransaction.expiresAt`), consumida por
+  // `workers/expire-loyalty-points.worker.ts`.
+  LOYALTY_POINTS_EXPIRATION: "loyalty-points-expiration",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -50,3 +54,7 @@ export const suspendOverdueTenantsQueue = new Queue(QUEUE_NAMES.SUSPEND_OVERDUE_
 });
 
 export const pluggySyncQueue = new Queue(QUEUE_NAMES.PLUGGY_SYNC, { connection: queueRedisConnection });
+
+export const loyaltyPointsExpirationQueue = new Queue(QUEUE_NAMES.LOYALTY_POINTS_EXPIRATION, {
+  connection: queueRedisConnection,
+});

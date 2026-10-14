@@ -14,7 +14,7 @@
 // fases sequenciais: (1) cancelamento fiscal, se houver documento autorizado; (2)
 // transação local de estoque + status da venda, só aberta depois que a fase 1 já
 // terminou com sucesso.
-import { TenantScopedPrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedPrismaClient } from "@filitech/db";
 import { verifyManagerPin } from "../auth/manager-pin.service";
 import { cancelFiscalDocument } from "../fiscal/cancel-fiscal-document.service";
 
@@ -105,6 +105,44 @@ export async function refundSale(
       });
       await tx.product.update({ where: { id: item.productId }, data: { stockQuantity: { increment: item.quantity } } });
     }
+
+    // GAP DE AUDITORIA FECHADO (Capítulo 6.8, Rodada 15): até aqui o estorno mudava
+    // apenas `Sale.status`, mas nunca os `Payment`s nem a gaveta de caixa — o
+    // fechamento de caixa (`closeCashRegister`) somava TODOS os pagamentos CASH com
+    // status CONFIRMED da venda, inclusive de vendas já estornadas, inflando o valor
+    // esperado em dinheiro mesmo depois do dinheiro já ter saído fisicamente da
+    // gaveta na devolução ao cliente.
+    const payments = await tx.payment.findMany({ where: { saleId: sale.id, tenantId: params.tenantId, status: "CONFIRMED" } });
+
+    await tx.payment.updateMany({
+      where: { saleId: sale.id, tenantId: params.tenantId, status: "CONFIRMED" },
+      data: { status: "REFUNDED" },
+    });
+
+    // Dinheiro devolvido fisicamente ao cliente sai da gaveta como uma sangria
+    // automática (mesmo ledger imutável de `CashRegisterMovement` usado para
+    // sangria/suprimento manual) — sem isto, `expectedAmount` do fechamento de
+    // caixa continuaria contando esse dinheiro como se ainda estivesse na gaveta.
+    const refundedCash = payments.filter((p) => p.method === "CASH").reduce((sum, p) => sum.add(p.amount), new Prisma.Decimal(0));
+    if (refundedCash.greaterThan(0)) {
+      await tx.cashRegisterMovement.create({
+        data: {
+          cashRegisterId: sale.cashRegisterId,
+          type: "WITHDRAWAL",
+          amount: refundedCash,
+          reason: `Estorno da venda #${sale.id.slice(0, 8)} — devolução em espécie ao cliente`,
+          performedByUserId: manager.id,
+        },
+      });
+    }
+
+    // Crediário/fiado (STORE_CREDIT) e faturas de convênio pendentes vinculadas a
+    // esta venda deixam de ser cobráveis — cancela a AccountReceivable em aberto
+    // para não gerar cobrança de uma venda que não existe mais.
+    await tx.accountReceivable.updateMany({
+      where: { saleId: sale.id, tenantId: params.tenantId, status: { in: ["PENDING", "OVERDUE"] } },
+      data: { status: "CANCELLED" },
+    });
 
     return tx.sale.findUniqueOrThrow({ where: { id: sale.id } });
   });

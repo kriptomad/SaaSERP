@@ -123,6 +123,9 @@ function AccountTab() {
   const [adjustPoints, setAdjustPoints] = useState("");
   const [adjustReason, setAdjustReason] = useState("");
   const [adjustError, setAdjustError] = useState<string | null>(null);
+  const [redeemPoints, setRedeemPoints] = useState("");
+  const [redeemError, setRedeemError] = useState<string | null>(null);
+  const [redeemSuccess, setRedeemSuccess] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   const summary = useQuery({
@@ -154,6 +157,31 @@ function AccountTab() {
     if (!points) return setAdjustError("Informe uma quantidade de pontos diferente de zero.");
     if (adjustReason.trim().length < 3) return setAdjustError("Informe o motivo do ajuste (mínimo 3 caracteres).");
     adjust.mutate();
+  }
+
+  // GAP DE AUDITORIA FECHADO (Capítulo 4.1.1, Rodada 15): só havia ajuste manual —
+  // nenhuma UI expunha o resgate de pontos como desconto (o endpoint dedicado
+  // POST /loyalty/accounts/:clientId/redeem). Usado aqui como resgate avulso
+  // (gerente processa o resgate e aplica o desconto manualmente no PDV); a
+  // integração automática dentro do fechamento de venda offline-first do PDV fica
+  // documentada como próximo passo (ver DEEP_AUDIT_REPORT.md).
+  const redeem = useMutation({
+    mutationFn: () => loyaltyApi.redeem(client!.id, { points: Math.round(Number(redeemPoints)) }),
+    onSuccess: (data) => {
+      void queryClient.invalidateQueries({ queryKey: ["loyalty-account", client?.id] });
+      void queryClient.invalidateQueries({ queryKey: ["loyalty-transactions", client?.id] });
+      setRedeemSuccess(`Resgate de ${Math.abs(data.transaction.points)} ponto(s) — aplique R$ ${data.discountValue.toFixed(2)} de desconto na venda.`);
+      setRedeemPoints("");
+    },
+    onError: (error) => setRedeemError(errorMessage(error)),
+  });
+
+  function submitRedeem() {
+    setRedeemError(null);
+    setRedeemSuccess(null);
+    const points = Math.round(Number(redeemPoints));
+    if (!points || points <= 0) return setRedeemError("Informe uma quantidade de pontos positiva.");
+    redeem.mutate();
   }
 
   return (
@@ -209,6 +237,34 @@ function AccountTab() {
             <TextField label="Motivo" value={adjustReason} onChange={(e) => setAdjustReason(e.target.value)} fullWidth />
             <Button variant="contained" onClick={submitAdjust} disabled={adjust.isPending}>
               {adjust.isPending ? "Ajustando…" : "Ajustar"}
+            </Button>
+          </Stack>
+        </Paper>
+      )}
+      {client && (
+        <Paper sx={{ p: 2 }}>
+          <Typography variant="subtitle1" sx={{ mb: 1 }}>
+            Resgatar pontos (desconto)
+          </Typography>
+          {redeemError && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {redeemError}
+            </Alert>
+          )}
+          {redeemSuccess && (
+            <Alert severity="success" sx={{ mb: 1 }}>
+              {redeemSuccess}
+            </Alert>
+          )}
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+            <TextField
+              label="Pontos a resgatar"
+              value={redeemPoints}
+              onChange={(e) => setRedeemPoints(e.target.value)}
+              sx={{ minWidth: 160 }}
+            />
+            <Button variant="contained" onClick={submitRedeem} disabled={redeem.isPending}>
+              {redeem.isPending ? "Resgatando…" : "Resgatar"}
             </Button>
           </Stack>
         </Paper>
