@@ -17,7 +17,10 @@
 --      PRÉ-EXISTENTE (Capítulo 11.2 — Ótica, de uma rodada anterior) que impedia
 --      `prisma generate` de rodar; sem esta coluna, NENHUMA alteração de schema
 --      desta rodada (nem das anteriores) podia ser validada. Fora do escopo 11.1/11.6,
---      mas corrigido aqui por ser bloqueante.
+--      mas corrigido aqui por ser bloqueante. Apenas a COLUNA é adicionada aqui —
+--      a FK para `health_insurance_plans` só é criada na migration seguinte
+--      (20261015090000), pois essa tabela ainda não existe neste ponto da timeline
+--      (bug de ordenação corrigido na auditoria de 20261020090000_fix_missing_fields_audit).
 --
 -- NOTA: esta migration foi escrita manualmente (ambiente sandbox sem acesso a um
 -- Postgres local/shadow database para rodar `prisma migrate dev` de verdade — mesma
@@ -32,9 +35,10 @@ CREATE TYPE "SaleChannel" AS ENUM ('COUNTER', 'DINE_IN', 'DELIVERY_IFOOD', 'ONLI
 -- AlterTable
 ALTER TABLE "sales" ADD COLUMN "channel" "SaleChannel" NOT NULL DEFAULT 'COUNTER';
 
--- AlterTable (correção incidental pré-existente, Capítulo 11.2 — ver nota acima)
+-- AlterTable (correção incidental pré-existente, Capítulo 11.2 — ver nota acima;
+-- a FK é criada só na migration seguinte, 20261015090000, quando a tabela
+-- "health_insurance_plans" passa a existir)
 ALTER TABLE "sales" ADD COLUMN "healthInsurancePlanId" TEXT;
-ALTER TABLE "sales" ADD CONSTRAINT "sales_healthInsurancePlanId_fkey" FOREIGN KEY ("healthInsurancePlanId") REFERENCES "health_insurance_plans"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AlterEnum
 ALTER TYPE "SalePaymentMethod" ADD VALUE IF NOT EXISTS 'MARKETPLACE';
