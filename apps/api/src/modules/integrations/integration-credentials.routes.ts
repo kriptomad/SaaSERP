@@ -12,7 +12,7 @@
 // confirmar visualmente qual credencial está salva sem expor o segredo completo.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma, IntegrationProvider, IntegrationEnvironment } from "@filitech/db";
+import { prisma, IntegrationProvider, IntegrationEnvironment } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { encryptEnvelope, decryptEnvelope } from "../../lib/envelope-crypto";
 import { testIntegrationCredential } from "./test-integration-credential";

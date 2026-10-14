@@ -61,7 +61,7 @@ const SCANNER_MAX_INTERVAL_MS = 50;
 const SCANNER_MIN_LENGTH = 8;
 
 export function PosPage() {
-  const { user } = useAuth();
+  const { user, tenant } = useAuth();
   const [search, setSearch] = useState("");
   const [cart, setCart] = useState<CartLine[]>([]);
   const [client, setClient] = useState<Client | null>(null);
@@ -273,8 +273,13 @@ export function PosPage() {
     try {
       const builder = buildReceipt(
         {
-          tenantTradeName: "Loja",
-          tenantDocument: "",
+          // Dados reais do tenant (Capítulo 21.7) — vêm da sessão autenticada
+          // (login/signup já devolvem `tradeName`/`cnpj` reais do banco), nunca de
+          // placeholder: o cupom impresso aqui é o "cupom não fiscal" (documento
+          // fiscal real só existe após o sync+emissão síncrona via fila
+          // `fiscal-emission`, ver `SalesHistoryPage`/`reimprimirCupomFiscal`).
+          tenantTradeName: tenant?.tradeName ?? "Loja",
+          tenantDocument: tenant?.cnpj ?? "",
           saleId: localId,
           closedAt: new Date(),
           items: cart.map((line) => ({

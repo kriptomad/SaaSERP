@@ -29,9 +29,14 @@ const api = {
     chooseFolder: (): Promise<string | null> => ipcRenderer.invoke(IPC_CHANNELS.DIALOG_CHOOSE_FOLDER),
   },
   license: {
-    activate: (payload: unknown) => ipcRenderer.invoke(IPC_CHANNELS.LICENSE_ACTIVATE, payload),
-    trial: (payload: unknown) => ipcRenderer.invoke(IPC_CHANNELS.LICENSE_TRIAL, payload),
+    activate: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSE_ACTIVATE),
+    trial: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSE_TRIAL),
     status: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSE_STATUS),
+  },
+  auth: {
+    login: (payload: { tenantSlug: string; email: string; password: string }) =>
+      ipcRenderer.invoke(IPC_CHANNELS.AUTH_LOGIN, payload),
+    logout: () => ipcRenderer.invoke(IPC_CHANNELS.AUTH_LOGOUT),
   },
   window: {
     openErp: (apiBaseUrl: string) => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_OPEN_ERP, apiBaseUrl),

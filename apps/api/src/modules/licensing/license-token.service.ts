@@ -11,6 +11,7 @@
 import jwt from "jsonwebtoken";
 import { JWT_PRIVATE_KEY as PRIVATE_KEY, JWT_PUBLIC_KEY as PUBLIC_KEY } from "../../lib/jwt-keys";
 import { TenantLicenseStatus } from "@filitech/db";
+import { getPlatformSecret } from "../../lib/platform-secrets";
 
 export interface LicenseTokenClaims {
   tenantId: string;
@@ -21,8 +22,8 @@ export interface LicenseTokenClaims {
 
 const LICENSE_ISSUER = "filitech-license";
 
-export function getOfflineTokenValidityDays(): number {
-  const raw = process.env.LICENSE_OFFLINE_TOKEN_DAYS;
+export async function getOfflineTokenValidityDays(): Promise<number> {
+  const raw = await getPlatformSecret("LICENSE_OFFLINE_TOKEN_DAYS");
   const parsed = raw ? Number(raw) : NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 7;
 }

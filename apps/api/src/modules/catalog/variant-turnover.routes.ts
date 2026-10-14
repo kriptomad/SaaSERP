@@ -24,7 +24,7 @@
 //   - Período filtra por `Sale.createdAt` (SaleItem não tem campo de data próprio) e
 //     por `Sale.status = "PAID"` (nunca inclui carrinho aberto/estornado no giro).
 import { Router, Request, Response } from "express";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 
 export const variantTurnoverRouter = Router();

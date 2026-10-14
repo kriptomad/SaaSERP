@@ -5,7 +5,7 @@
 // nunca em um job assíncrono separado — o saldo de pontos precisa refletir a venda
 // imediatamente, inclusive para permitir resgate na venda seguinte do mesmo cliente
 // minutos depois.
-import { Prisma } from "@filitech/db";
+import { Prisma, TenantScopedTransactionClient } from "@filitech/db";
 
 export interface AccrueLoyaltyPointsInput {
   tenantId: string;
@@ -20,7 +20,7 @@ function addDays(base: Date, days: number): Date {
   return d;
 }
 
-export async function accrueLoyaltyPoints(tx: Prisma.TransactionClient, input: AccrueLoyaltyPointsInput): Promise<void> {
+export async function accrueLoyaltyPoints(tx: TenantScopedTransactionClient, input: AccrueLoyaltyPointsInput): Promise<void> {
   if (!input.clientId) return; // venda sem cliente identificado (CPF na nota não informado) nunca acumula pontos
 
   // findUnique por campo @unique real (tenantId) — nunca findFirst sem filtro aqui,

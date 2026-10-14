@@ -10,9 +10,9 @@
 // confeitaria ficava desatualizado sempre que o preço de uma matéria-prima mudava.
 // Hook aditivo: chamado depois que `Product.costPrice` de um insumo já foi
 // persistido, nunca substitui a lógica de custeio existente.
-import { Prisma, PrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedTransactionClient } from "@filitech/db";
 
-type TxOrClient = PrismaClient | Prisma.TransactionClient;
+type TxOrClient = TenantScopedTransactionClient;
 
 /**
  * Recalcula `Product.costPrice` do produto final de uma ficha técnica a partir do

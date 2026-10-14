@@ -24,7 +24,7 @@
 // (21.18.8), módulo sócios/pró-labore/IRPF (21.18.12).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import {
   grantAccountingEngagement,

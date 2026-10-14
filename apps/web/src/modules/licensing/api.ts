@@ -57,6 +57,7 @@ export const licensingApi = {
   getStatus: () => api.get<LicensingStatusResponse>("/licensing/status"),
   startTrial: () => api.post<TrialResponse>("/licensing/trial"),
   activate: (input: ActivateLicenseInput) => api.post<ActivateLicenseResponse>("/licensing/activate", input),
+  revokeActivation: (id: string) => api.post<{ id: string; revokedAt: string }>(`/licensing/activations/${id}/revoke`),
 };
 
 export const LICENSE_STATUS_LABEL: Record<TenantLicenseStatus, string> = {

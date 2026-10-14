@@ -4,6 +4,17 @@
 // real: clique duplo do cliente ou edição simultânea do técnico. Usa lock otimista
 // por token consumível (UPDATE ... WHERE condicional atômico) em vez de lock
 // pessimista — mais barato para este fluxo de baixa contenção.
+//
+// CORREÇÃO DE AUDITORIA: a assinatura original recebia `TenantScopedPrismaClient`,
+// mas o endpoint que chama esta função (`POST /work-orders/budget-approval/:token`)
+// é deliberadamente público (sem `requireAuth`) — o cliente final que aprova o
+// orçamento via link de WhatsApp nunca tem conta/sessão no sistema. Sem sessão,
+// `tenantContextMiddleware` nunca chama `runWithTenantContext`, então qualquer
+// query através do client tenant-scoped lançava
+// "Tentativa de acesso ao banco fora de um contexto de tenant autenticado" —
+// ou seja, TODA aprovação de orçamento por WhatsApp quebrava com 500. Corrigido
+// para `PrismaClient` cru (`prismaUnscoped`): a segurança aqui nunca dependeu de
+// tenantId, e sim do token de uso único de 256 bits, que já é a autorização.
 import { PrismaClient } from "@filitech/db";
 
 export class BudgetAlreadyProcessedError extends Error {}

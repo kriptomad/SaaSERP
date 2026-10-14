@@ -5,7 +5,7 @@
 // REST jamais permitiu ao frontend listar/ler essas notificações — o "sininho" de
 // notificações descrito no Capítulo 8.4 não tinha de onde consumir dados reais.
 import { Router, Request, Response } from "express";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 
 export const notificationsRouter = Router();

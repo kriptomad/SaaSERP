@@ -1,4 +1,4 @@
-﻿// apps/api/src/modules/integrations/tenant-integrations.routes.ts
+// apps/api/src/modules/integrations/tenant-integrations.routes.ts
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 8 (emissão self-service, citada em
 // prosa) + Capítulo 15.4 (modelos `TenantApiKey`/`TenantWebhookEndpoint`,
 // oversight do painel global). GAP DE AUDITORIA ENCONTRADO E CORRIGIDO: o
@@ -10,7 +10,7 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import crypto from "node:crypto";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { hashApiKey } from "../platform-admin/platform-admin.routes";
 import { encryptEnvelope } from "../../lib/envelope-crypto";

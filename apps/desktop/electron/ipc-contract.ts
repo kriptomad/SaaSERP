@@ -21,19 +21,46 @@ export interface ClientHostConfig {
   useHttps: boolean;
 }
 
+/** Mesmos valores de `TenantLicenseStatus` no schema Prisma (packages/db). */
+export type LicenseStatus = "TRIAL" | "ACTIVE" | "SUSPENDED" | "EXPIRED";
+
+/**
+ * Espelha EXATAMENTE o shape retornado por POST /licensing/trial, POST /licensing/activate
+ * e GET /licensing/status (apps/api/src/modules/licensing/licensing.routes.ts) — nunca um
+ * shape inventado no shell desktop. `token` só existe após /licensing/activate (token
+ * offline RS256 de curta duração); o trial sozinho não emite token offline.
+ */
 export interface LicenseCache {
-  token: string;
-  tenantId: string;
-  plan: string;
-  expiresAt: string;
-  mode: "TRIAL" | "ACTIVATED";
+  token: string | null;
+  status: LicenseStatus;
+  licensedModules: string[];
+  trialEndsAt: string | null;
+  offlineTokenExpiresAt: string | null;
   cachedAt: string;
+}
+
+/**
+ * Sessão do usuário de sistema (login real via POST /auth/login, mesmo endpoint do
+ * apps/web) — necessária porque as rotas /licensing/* exigem `requireAuth` (a "licença
+ * mestra" é consultada no contexto de um tenant já autenticado, Capítulo 2.10). Sem
+ * isso o onboarding do desktop não teria como chamar /licensing/activate|trial|status.
+ * Espelha EXATAMENTE `AuthResponse` de apps/web/src/api/client.ts (mesmo contrato de
+ * POST /auth/login) para poder ser repassada como SSO para a janela do apps/web
+ * (window:open-erp) sem pedir login uma segunda vez.
+ */
+export interface TenantSessionCache {
+  token: string;
+  tenant: { id: string; slug: string; tradeName: string; status: string; tenantType: string };
+  user: { id: string; name: string; email: string; role: string };
 }
 
 export interface DesktopConfig {
   installMode: InstallMode | null;
   network: NetworkConfig;
   clientHost: ClientHostConfig | null;
+  session: TenantSessionCache | null;
+  /** UUID estável deste PC, gerado uma vez e persistido — usado como `deviceFingerprint` em /licensing/activate. */
+  deviceId: string | null;
   license: LicenseCache | null;
   onboardingComplete: boolean;
 }
@@ -66,6 +93,8 @@ export const IPC_CHANNELS = {
   LICENSE_ACTIVATE: "license:activate",
   LICENSE_TRIAL: "license:trial",
   LICENSE_STATUS: "license:status",
+  AUTH_LOGIN: "auth:login",
+  AUTH_LOGOUT: "auth:logout",
   WINDOW_OPEN_ERP: "window:open-erp",
   APP_VERSION: "app:version",
 } as const;

@@ -14,7 +14,7 @@
 // fases sequenciais: (1) cancelamento fiscal, se houver documento autorizado; (2)
 // transação local de estoque + status da venda, só aberta depois que a fase 1 já
 // terminou com sucesso.
-import { PrismaClient } from "@filitech/db";
+import { TenantScopedPrismaClient } from "@filitech/db";
 import { verifyManagerPin } from "../auth/manager-pin.service";
 import { cancelFiscalDocument } from "../fiscal/cancel-fiscal-document.service";
 
@@ -24,7 +24,7 @@ export class RefundCannotSelfAuthorizeError extends Error {}
 export class OnlyPaidSalesCanBeRefundedError extends Error {}
 
 export async function refundSale(
-  prisma: PrismaClient,
+  prisma: TenantScopedPrismaClient,
   params: { tenantId: string; saleId: string; requestedByUserId: string; reason: string; managerUserId: string; managerPin: string },
 ) {
   if (!params.reason?.trim()) {

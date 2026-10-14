@@ -5,7 +5,7 @@
 // por closeSale (Capítulo 6.6). A versão `calculateFullTax` (Capítulo 21.14, que
 // adiciona DIFAL/PIS-COFINS monofásico/ISS/veículo usado) é uma camada posterior de
 // aprofundamento fiscal — ainda não portada para código nesta fase da implementação.
-import { Prisma, PrismaClient } from "@filitech/db";
+import { Prisma } from "@filitech/db";
 
 export interface TaxCalculationInput {
   tenantId: string;
@@ -24,8 +24,40 @@ export interface TaxCalculationResult {
   appliedRules: { ruleId: string; legalReference: string }[];
 }
 
+interface TaxRuleLike {
+  id: string;
+  legalReference: string;
+  icmsStMva: Prisma.Decimal | null;
+  icmsAliquota: Prisma.Decimal | null;
+  ibsAliquota: Prisma.Decimal | null;
+  cbsAliquota: Prisma.Decimal | null;
+  selectiveTaxAliquota: Prisma.Decimal | null;
+}
+
+// Interface estrutural deliberadamente desacoplada dos tipos genéricos gerados pela
+// Prisma Client Extension: `calculateTax` é chamado tanto dentro de transações do
+// cliente tenant-scoped (closeSale, comanda, consumeRecipeForComandaItem) quanto
+// dentro de uma transação do cliente bruto `prismaUnscoped` (webhook do iFood, que
+// roda fora de qualquer contexto de tenant autenticado — não existe AsyncLocalStorage
+// de tenant disponível num webhook de marketplace). Os tipos gerados pela extensão
+// (`DynamicModelExtensionFluentApi` etc.) e pelo client bruto não são estruturalmente
+// unificáveis em uma união sem estourar a profundidade de comparação de tipos do
+// TypeScript — por isso usamos aqui apenas o subconjunto mínimo de shape realmente
+// consumido pela função, que ambos os clientes satisfazem.
+interface TaxEngineClient {
+  tenant: {
+    findUniqueOrThrow(args: {
+      where: { id: string };
+      select: { taxRegime: true; simplesNacionalAnexo: true };
+    }): Promise<{ taxRegime: string; simplesNacionalAnexo: string | null }>;
+  };
+  taxRule: {
+    findFirst(args: any): Promise<TaxRuleLike | null>;
+  };
+}
+
 export async function calculateTax(
-  prisma: PrismaClient | Prisma.TransactionClient,
+  prisma: TaxEngineClient,
   input: TaxCalculationInput,
 ): Promise<TaxCalculationResult> {
   const tenant = await prisma.tenant.findUniqueOrThrow({

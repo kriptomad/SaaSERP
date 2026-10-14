@@ -13,7 +13,7 @@
 // (produzida - perdida) entra de fato no estoque vendável; a quantidade perdida é
 // registrada como um movimento `LOSS` (negativo) para alimentar o relatório gerencial
 // de perdas, nunca incrementada no estoque do produto final.
-import { Prisma, PrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedPrismaClient } from "@filitech/db";
 
 interface ProduceRecipeBatchInput {
   tenantId: string;
@@ -27,7 +27,7 @@ interface ProduceRecipeBatchInput {
 export class MissingIngredientStockError extends Error {}
 export class InvalidLossQuantityError extends Error {}
 
-export async function produceRecipeBatch(prisma: PrismaClient, input: ProduceRecipeBatchInput) {
+export async function produceRecipeBatch(prisma: TenantScopedPrismaClient, input: ProduceRecipeBatchInput) {
   const quantityLost = input.quantityLost ?? new Prisma.Decimal(0);
   if (quantityLost.lessThan(0) || quantityLost.greaterThan(input.quantityProduced)) {
     throw new InvalidLossQuantityError("A quantidade perdida deve estar entre 0 e a quantidade produzida.");

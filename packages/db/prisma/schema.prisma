@@ -517,6 +517,13 @@ model User {
   totpSecretEncrypted String? // nulo até o Passo 1 do enrollment (Capítulo 14.2) gerar o segredo
   totpConfirmedAt     DateTime? // nulo até o Passo 2 confirmar o primeiro código válido (Capítulo 14.2); obrigatório por papel via SystemParameter ENFORCE_2FA_FOR_ROLES
   managerPinHash      String? // Capítulo 6.8 — argon2id do PIN de 4-6 dígitos para aprovações rápidas em campo (estorno de venda, etc.); nulo até o Owner/Manager configurar. Correção de auditoria: o snippet original do Capítulo 6.8 citava bcrypt, inconsistente com o padrão de hashing argon2id já adotado em todo o restante do sistema (Capítulo 3.5) — a implementação real usa argon2id, nunca um segundo algoritmo de hash isolado.
+  // GAP DE AUDITORIA CORRIGIDO (Capítulo 20.2 — notificações reais por WhatsApp):
+  // nenhum campo de telefone existia em User antes desta rodada. `NotificationPreference.whatsapp`
+  // e o worker `whatsapp-notifications` precisam de um número E.164 (ex.: "+5511999998888")
+  // por usuário para de fato disparar a mensagem via WhatsApp Cloud API — sem este campo o
+  // canal "whatsapp" da preferência nunca teria para onde enviar. Opcional: nulo até o
+  // próprio usuário preencher via PATCH /users/me/contact.
+  whatsappPhone       String?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
@@ -1301,53 +1308,53 @@ enum SaleChannel {
 }
 
 model Sale {
-  id                       String            @id @default(uuid())
-  tenantId                 String
-  clientId                 String?
-  cashierId                String
-  cashRegisterId           String
-  status                   SaleStatus        @default(OPEN)
-  channel                  SaleChannel       @default(COUNTER)
-  idempotencyKey           String
-  paymentMethod            SalePaymentMethod
-  totalAmount              Decimal           @db.Decimal(12, 2)
-  discountAmount           Decimal           @default(0) @db.Decimal(12, 2)
-  chartOfAccountId         String? // preenchido automaticamente por regra padrão do nicho (Capítulo 17.1), editável manualmente
-  fiscalStatus             String? // preenchido apenas quando o documento fiscal vinculado sofre evento pós-emissão (Capítulo 21.19) — ex.: "CANCELLED_AFTER_AUTHORIZATION"; nulo em operação normal
+  id                          String            @id @default(uuid())
+  tenantId                    String
+  clientId                    String?
+  cashierId                   String
+  cashRegisterId              String
+  status                      SaleStatus        @default(OPEN)
+  channel                     SaleChannel       @default(COUNTER)
+  idempotencyKey              String
+  paymentMethod               SalePaymentMethod
+  totalAmount                 Decimal           @db.Decimal(12, 2)
+  discountAmount              Decimal           @default(0) @db.Decimal(12, 2)
+  chartOfAccountId            String? // preenchido automaticamente por regra padrão do nicho (Capítulo 17.1), editável manualmente
+  fiscalStatus                String? // preenchido apenas quando o documento fiscal vinculado sofre evento pós-emissão (Capítulo 21.19) — ex.: "CANCELLED_AFTER_AUTHORIZATION"; nulo em operação normal
   // Pré-existente (Capítulo 11.2 — Ótica): faltava o campo inverso de
   // HealthInsurancePlan.sales (bug de schema anterior a esta rodada); corrigido
   // apenas para destravar `prisma generate`, que falha globalmente sem ele.
-  healthInsurancePlanId    String?
+  healthInsurancePlanId       String?
   // Capítulo 11.2 — Ótica: preenchido quando esta venda já foi incluída na fatura
   // consolidada de convênio (AccountReceivable.healthInsurancePlanId) — garante que
   // o endpoint de faturamento (health-insurance-billing.routes.ts) nunca cobra a
   // mesma venda duas vezes em competências diferentes.
   healthInsuranceReceivableId String?
-  refundReason             String?           @db.Text // Capítulo 6.8 — obrigatório no momento do estorno
-  refundedByUserId         String? // Capítulo 6.8 — operador que solicitou
-  refundAuthorizedByUserId String? // Capítulo 6.8 — Owner/Manager que autorizou com PIN
-  refundedAt               DateTime? // Capítulo 6.8
-  createdAt                DateTime          @default(now())
-  updatedAt                DateTime          @updatedAt
+  refundReason                String?           @db.Text // Capítulo 6.8 — obrigatório no momento do estorno
+  refundedByUserId            String? // Capítulo 6.8 — operador que solicitou
+  refundAuthorizedByUserId    String? // Capítulo 6.8 — Owner/Manager que autorizou com PIN
+  refundedAt                  DateTime? // Capítulo 6.8
+  createdAt                   DateTime          @default(now())
+  updatedAt                   DateTime          @updatedAt
 
-  tenant                   Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  client                   Client?                  @relation(fields: [clientId], references: [id])
-  cashier                  User                     @relation(fields: [cashierId], references: [id])
-  cashRegister             CashRegister             @relation(fields: [cashRegisterId], references: [id])
-  chartOfAccount           ChartOfAccount?          @relation(fields: [chartOfAccountId], references: [id])
-  healthInsurancePlan      HealthInsurancePlan?     @relation(fields: [healthInsurancePlanId], references: [id])
-  healthInsuranceReceivable AccountReceivable?      @relation("HealthInsuranceBilledSale", fields: [healthInsuranceReceivableId], references: [id])
-  refundedByUser           User?                    @relation("SaleRefundRequestedBy", fields: [refundedByUserId], references: [id])
-  refundAuthorizedByUser   User?                    @relation("SaleRefundAuthorizedBy", fields: [refundAuthorizedByUserId], references: [id])
-  items                    SaleItem[]
-  payments                 Payment[]
-  fiscalDocuments          FiscalDocument[]
-  accountsReceivable       AccountReceivable[]
-  loyaltyTransactions      LoyaltyTransaction[] // Capítulo 4.1.1 — ganho ou resgate de pontos originado por esta venda
-  Comanda                  Comanda?
-  marketplaceExpenses      AccountPayable[] // Capítulo 11.1 — comissão de marketplace (iFood) vinculada à venda de origem, para margem líquida por canal
-  serviceCommissionEntries ServiceCommissionEntry[] // Capítulo 11.6
-  workOrders               WorkOrder[] // Capítulo 11.2 — Ótica: O.S. de laboratório óptico aberta a partir desta venda
+  tenant                    Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client                    Client?                  @relation(fields: [clientId], references: [id])
+  cashier                   User                     @relation(fields: [cashierId], references: [id])
+  cashRegister              CashRegister             @relation(fields: [cashRegisterId], references: [id])
+  chartOfAccount            ChartOfAccount?          @relation(fields: [chartOfAccountId], references: [id])
+  healthInsurancePlan       HealthInsurancePlan?     @relation(fields: [healthInsurancePlanId], references: [id])
+  healthInsuranceReceivable AccountReceivable?       @relation("HealthInsuranceBilledSale", fields: [healthInsuranceReceivableId], references: [id])
+  refundedByUser            User?                    @relation("SaleRefundRequestedBy", fields: [refundedByUserId], references: [id])
+  refundAuthorizedByUser    User?                    @relation("SaleRefundAuthorizedBy", fields: [refundAuthorizedByUserId], references: [id])
+  items                     SaleItem[]
+  payments                  Payment[]
+  fiscalDocuments           FiscalDocument[]
+  accountsReceivable        AccountReceivable[]
+  loyaltyTransactions       LoyaltyTransaction[] // Capítulo 4.1.1 — ganho ou resgate de pontos originado por esta venda
+  Comanda                   Comanda?
+  marketplaceExpenses       AccountPayable[] // Capítulo 11.1 — comissão de marketplace (iFood) vinculada à venda de origem, para margem líquida por canal
+  serviceCommissionEntries  ServiceCommissionEntry[] // Capítulo 11.6
+  workOrders                WorkOrder[] // Capítulo 11.2 — Ótica: O.S. de laboratório óptico aberta a partir desta venda
 
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId, status, createdAt])
@@ -1549,15 +1556,15 @@ model AccountReceivable {
   createdAt             DateTime         @default(now())
   updatedAt             DateTime         @updatedAt
 
-  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  client              Client?              @relation(fields: [clientId], references: [id])
-  sale                Sale?                @relation(fields: [saleId], references: [id])
-  chartOfAccount      ChartOfAccount?      @relation(fields: [chartOfAccountId], references: [id])
-  healthInsurancePlan HealthInsurancePlan? @relation(fields: [healthInsurancePlanId], references: [id])
+  tenant                     Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client                     Client?              @relation(fields: [clientId], references: [id])
+  sale                       Sale?                @relation(fields: [saleId], references: [id])
+  chartOfAccount             ChartOfAccount?      @relation(fields: [chartOfAccountId], references: [id])
+  healthInsurancePlan        HealthInsurancePlan? @relation(fields: [healthInsurancePlanId], references: [id])
   // Capítulo 11.2 — Ótica: vendas HEALTH_INSURANCE individuais consolidadas nesta
   // fatura (distinto de `sale`/`saleId` acima, que é o vínculo 1:1 genérico de
   // crediário/fiado — aqui é 1 fatura : N vendas).
-  healthInsuranceBilledSales Sale[] @relation("HealthInsuranceBilledSale")
+  healthInsuranceBilledSales Sale[]               @relation("HealthInsuranceBilledSale")
 
   @@index([tenantId, status, dueDate])
   @@index([tenantId, clientId])
@@ -1590,6 +1597,18 @@ model FiscalDocument {
   accessKey                    String?               @unique
   xmlStorageKey                String?
   rejectionReason              String?
+  // CORREÇÃO DE AUDITORIA (fila `fiscal-emission` sem nenhum worker consumidor —
+  // todo FiscalDocument ficava travado em PENDING para sempre): campos devolvidos
+  // pela Focus NFe na emissão real (doc.focusnfe.com.br/reference/emitir_nfce),
+  // necessários tanto para idempotência (focusNfeStatusSefaz) quanto para a
+  // impressão térmica da NFC-e (Capítulo 21.7 — QR Code obrigatório no cupom).
+  focusNfeReference            String?               @unique // "ref" enviado no POST — usamos o próprio FiscalDocument.id como referência externa
+  focusNfeNumero               String? // número da nota atribuído pela Focus NFe/SEFAZ
+  focusNfeSerie                String?
+  focusNfeStatusSefaz          String? // "status_sefaz" (ex.: "100" = autorizado, "704" = rejeição) — cTotal do protocolo, nunca interpretado como texto livre
+  focusNfeMensagemSefaz        String?               @db.Text
+  qrCodeUrl                    String? // "qrcode_url" — renderizado na notinha térmica (Capítulo 21.7) para o consumidor validar no site da SEFAZ
+  danfeStorageKey              String? // "caminho_danfe" devolvido pela Focus NFe — path do DANFE/HTML hospedado por eles, referenciado na reimpressão (Capítulo 21.7)
   // Campos da Reforma Tributária (Capítulo 21.3) — convivem com os tributos legados
   // durante toda a transição 2026-2033; nulos fora da janela em que o tributo se aplica.
   legacyIcmsAmount             Decimal?              @db.Decimal(12, 2) // ICMS "antigo", calculado enquanto vigente
@@ -1700,6 +1719,12 @@ model PersonalAccount {
   invoiceDueDay        Int? // dia do mês de vencimento da fatura (type = CREDIT_CARD)
   isShared             Boolean             @default(true) // visível para todos os membros da residência (Capítulo 22.3)
   openFinanceConsentId String? // preenchido quando a conta é sincronizada automaticamente (Capítulo 22.5)
+  // GAP DE AUDITORIA CORRIGIDO (worker real de sincronização Pluggy, Capítulo 22.5):
+  // id lógico da conta no agregador — mesmo papel de `BankAccount.openFinanceExternalAccountId`
+  // no lado BUSINESS. Sem este campo, a chave de idempotência do worker caía só em
+  // `institutionName`, o que mescla erroneamente duas contas reais da mesma instituição
+  // (ex.: conta corrente + cartão de crédito do mesmo banco) em uma única PersonalAccount.
+  openFinanceExternalAccountId String?
   archivedAt           DateTime?
   createdAt            DateTime            @default(now())
   updatedAt            DateTime            @updatedAt
@@ -1714,8 +1739,9 @@ model PersonalAccount {
 
   // Identidade lógica da conta externa sincronizada via Open Finance (Capítulo 22.5)
   // — evita criar uma PersonalAccount duplicada a cada novo "item/updated" da Pluggy
-  // para a mesma instituição dentro do mesmo consentimento.
-  @@unique([openFinanceConsentId, institutionName])
+  // para a mesma conta dentro do mesmo consentimento (chave real do agregador, nunca
+  // o nome da instituição — uma instituição pode ter múltiplas contas no mesmo item).
+  @@unique([openFinanceConsentId, openFinanceExternalAccountId])
   @@index([tenantId, type])
   @@map("personal_accounts")
 }
@@ -2676,6 +2702,25 @@ model SystemParameter {
   updatedAt                    DateTime @updatedAt
 
   @@map("system_parameters")
+}
+
+// Painel "Administração → Infraestrutura": segredos/credenciais de nível de PLATAFORMA
+// (não por tenant — isso já é `IntegrationCredential`) hoje configuráveis só via variável
+// de ambiente do processo (Stripe, Asaas, etc.). Mesmo esquema de envelope encryption de
+// `IntegrationCredential` (`encryptedPayload`/`encryptionKeyId`), nunca texto puro no banco.
+// Exceções documentadas que PERMANECEM apenas em variável de ambiente (nunca migram para
+// cá): `INTEGRATION_CREDENTIALS_MASTER_KEY` (a própria KEK — não pode cifrar a si mesma),
+// `DATABASE_URL`/`REDIS_URL` (necessárias antes do processo conseguir falar com o banco
+// que guardaria este registro) e `JWT_PRIVATE_KEY`/`JWT_PUBLIC_KEY` (carregadas de forma
+// síncrona na inicialização do processo, antes de qualquer conexão com o banco).
+model PlatformSecret {
+  key                          String   @id // ex.: "STRIPE_SECRET_KEY", "ASAAS_API_KEY"
+  encryptedPayload             Bytes
+  encryptionKeyId              String
+  updatedByPlatformAdminUserId String?
+  updatedAt                    DateTime @updatedAt
+
+  @@map("platform_secrets")
 }
 
 model DiscountCoupon {

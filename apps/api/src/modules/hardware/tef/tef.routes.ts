@@ -13,7 +13,7 @@
 import { Router, Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../../middlewares/auth.middleware";
 import { decryptEnvelope } from "../../../lib/envelope-crypto";
 import { SitefAdapter, SitefConnectionConfig } from "./sitef-adapter";

@@ -20,10 +20,10 @@
 //     documentado da Focus NFe: "Authorization: Basic base64(token + ':')").
 //   - Respostas: 200 (cancelado), 400/401/403/404/415/422 (erro) — nunca um sucesso
 //     simulado fora desses casos.
-import { PrismaClient } from "@filitech/db";
-import { decryptEnvelope } from "../../lib/envelope-crypto";
+import { TenantScopedPrismaClient } from "@filitech/db";
+import { decryptFocusNfeCredential, resolveFocusNfeCredential, FocusNfeNotConfiguredError } from "./focus-nfe-credential";
 
-export class FocusNfeNotConfiguredError extends Error {}
+export { FocusNfeNotConfiguredError };
 export class FiscalDocumentMissingAccessKeyError extends Error {}
 
 export interface FiscalEventTransmissionResult {
@@ -32,40 +32,8 @@ export interface FiscalEventTransmissionResult {
   rejectionReason: string | null;
 }
 
-interface FocusNfeCredentialPayload {
-  token: string;
-  [key: string]: unknown;
-}
-
-function isFocusNfeCredentialPayload(value: Record<string, unknown>): value is FocusNfeCredentialPayload {
-  return typeof value.token === "string" && value.token.length > 0;
-}
-
-/**
- * Localiza a credencial Focus NFe aplicável: prioriza uma credencial própria do
- * tenant (lojista trouxe seu próprio contrato Focus NFe) e cai para a credencial de
- * plataforma (tenantId nulo — conta mestra/revenda Filitech) quando o tenant não
- * configurou a própria, conforme o modelo documentado no schema
- * (IntegrationCredential.tenantId nulo = "credencial de plataforma").
- */
-async function resolveFocusNfeCredential(prisma: PrismaClient, tenantId: string) {
-  const tenantCredential = await prisma.integrationCredential.findUnique({
-    where: {
-      tenantId_provider_environment: { tenantId, provider: "FISCAL_FOCUS_NFE", environment: "PRODUCTION" },
-    },
-  });
-  if (tenantCredential?.active) {
-    return tenantCredential;
-  }
-
-  const platformCredential = await prisma.integrationCredential.findFirst({
-    where: { tenantId: null, provider: "FISCAL_FOCUS_NFE", environment: "PRODUCTION", active: true },
-  });
-  return platformCredential ?? null;
-}
-
 export async function transmitFiscalEvent(
-  prisma: PrismaClient,
+  prisma: TenantScopedPrismaClient,
   params: { tenantId: string; fiscalDocumentEventId: string },
 ): Promise<FiscalEventTransmissionResult> {
   const event = await prisma.fiscalDocumentEvent.findUniqueOrThrow({
@@ -90,12 +58,7 @@ export async function transmitFiscalEvent(
     );
   }
 
-  const decrypted = decryptEnvelope(Buffer.from(credential.encryptedPayload), credential.encryptionKeyId);
-  if (!isFocusNfeCredentialPayload(decrypted)) {
-    throw new FocusNfeNotConfiguredError(
-      "Credencial Focus NFe cadastrada está com formato inválido (esperado { token }). Refaça o cadastro em Configurações > Integrações.",
-    );
-  }
+  const decrypted = decryptFocusNfeCredential(credential);
 
   if (!event.justification) {
     // Guarda redundante: cancelFiscalDocument já exige >=15 caracteres antes de criar

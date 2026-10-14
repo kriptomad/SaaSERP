@@ -9,7 +9,7 @@
 // Planos PERSONAL (B2C) têm includedUserSeats/extraUserSeatPrice nulos — não
 // existe conceito de headcount pago no Filitech Pessoal, então o excedente é
 // sempre zero para esse público.
-import { Prisma, PrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedPrismaClient, TenantScopedTransactionClient } from "@filitech/db";
 import { syncSeatQuantityWithStripe } from "./stripe.client";
 
 export interface SeatBillingSummary {
@@ -28,7 +28,7 @@ export interface SeatBillingSummary {
  * ao `basePrice` do plano na geração da próxima cobrança.
  */
 export async function calculateSeatBilling(
-  prisma: PrismaClient | Prisma.TransactionClient,
+  prisma: TenantScopedPrismaClient | TenantScopedTransactionClient,
   tenantId: string,
 ): Promise<SeatBillingSummary> {
   const subscription = await prisma.subscription.findFirst({
@@ -69,7 +69,7 @@ export async function calculateSeatBilling(
  * reconciliação manual/próxima tentativa, já que o valor real cobrado é
  * recalculado a cada ciclo de qualquer forma (Capítulo 2.7).
  */
-export async function reconcileSeatBillingWithProvider(prisma: PrismaClient, tenantId: string): Promise<void> {
+export async function reconcileSeatBillingWithProvider(prisma: TenantScopedPrismaClient, tenantId: string): Promise<void> {
   const subscription = await prisma.subscription.findFirst({ where: { tenantId }, orderBy: { createdAt: "desc" } });
   if (!subscription || subscription.provider !== "stripe") return;
 

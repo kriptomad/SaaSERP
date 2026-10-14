@@ -13,7 +13,7 @@
 // reparo geral (`GENERAL_REPAIR`), que continua 100% sob o fluxo do arquivo restrito.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { notifyTenant } from "../notifications/notify.service";
 

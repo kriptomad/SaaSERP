@@ -15,7 +15,7 @@
 // exclusivamente da allowlist `DATASET_REGISTRY` (nunca do payload do
 // usuário) e o único valor de usuário na query (`tenantId`) é sempre passado
 // como parâmetro vinculado ($1), nunca concatenado.
-import { PrismaClient } from "@filitech/db";
+import { TenantScopedPrismaClient } from "@filitech/db";
 import { DATASET_REGISTRY } from "./dataset-registry";
 
 export class InvalidReportFieldError extends Error {}
@@ -27,7 +27,7 @@ export interface ReportExecutionInput {
 }
 
 export async function executeReportDefinition(
-  prisma: PrismaClient,
+  prisma: TenantScopedPrismaClient,
   tenantId: string,
   definition: ReportExecutionInput,
 ): Promise<Record<string, unknown>[]> {

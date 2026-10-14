@@ -147,6 +147,23 @@ const READ_OPERATIONS = new Set(["findFirst", "findFirstOrThrow", "findMany", "f
 // Operações de escrita única — recebem tenantId tanto no "data" quanto no "where".
 const WRITE_WHERE_OPERATIONS = new Set(["update", "updateMany", "delete", "deleteMany", "upsert"]);
 
+// Tipos auxiliares para que services/funções de domínio aceitem indiferentemente o
+// client "cru" (PrismaClient) ou o client blindado por tenant retornado por
+// createTenantScopedPrismaClient abaixo — a extension do Prisma Client ($extends)
+// retorna um tipo estruturalmente diferente de PrismaClient (não é um subtipo nem
+// supertipo em TypeScript, mesmo sendo 100% compatível em runtime), então qualquer
+// função que hoje recebe `prisma: PrismaClient` ou `tx: Prisma.TransactionClient`
+// como parâmetro precisa aceitar também o client com extension — caso contrário o
+// TypeScript rejeita a migração em massa de prismaUnscoped -> prisma dos routers
+// (Capítulo 7.2).
+export type TenantScopedPrismaClient = ReturnType<typeof createTenantScopedPrismaClient>;
+export type AppPrismaClient = PrismaClient | TenantScopedPrismaClient;
+export type TenantScopedTransactionClient = Omit<
+  TenantScopedPrismaClient,
+  "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends"
+>;
+export type AppPrismaTransactionClient = import("@prisma/client").Prisma.TransactionClient | TenantScopedTransactionClient;
+
 export function createTenantScopedPrismaClient(basePrismaClient: PrismaClient) {
   return basePrismaClient.$extends({
     name: "tenant-isolation-extension",

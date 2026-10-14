@@ -7,6 +7,7 @@ import { z } from "zod";
 import { prismaUnscoped } from "@filitech/db";
 import { hashPassword, verifyPassword } from "./password.service";
 import { signSessionToken } from "./jwt.service";
+import { enforceRateLimit, resetRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
 
 export const authRouter = Router();
 
@@ -80,7 +81,14 @@ authRouter.post("/signup", async (req, res) => {
   const token = signSessionToken({ userId: owner.id, tenantId: tenant.id, role: "OWNER" });
   const authPayload = {
     token,
-    tenant: { id: tenant.id, slug: tenant.slug, tradeName: tenant.tradeName, status: tenant.status, tenantType: tenant.tenantType },
+    tenant: {
+      id: tenant.id,
+      slug: tenant.slug,
+      tradeName: tenant.tradeName,
+      status: tenant.status,
+      tenantType: tenant.tenantType,
+      cnpj: tenant.cnpj,
+    },
     user: { id: owner.id, name: owner.name, email: owner.email, role: owner.role },
   };
   // Envelope {success,data,error} + campos planos na raiz: o frontend (AuthResponse em apps/web) ainda lê token/tenant/user planos.
@@ -100,6 +108,20 @@ authRouter.post("/login", async (req, res) => {
   }
   const { tenantSlug, email, password } = parsed.data;
 
+  // Rate limiting por tentativas falhas (Capítulo 14.3, mesmo padrão "Redis INCR com
+  // TTL" já usado em manager-pin.service.ts): 5 tentativas a cada 15 minutos por
+  // tenant+e-mail, namespace isolado por tenant — um invasor tentando força bruta
+  // contra a conta de um lojista nunca consome/afeta o limite de outro tenant.
+  const rateLimitKey = `tenant:${tenantSlug}:login:fail:${email.toLowerCase()}`;
+  try {
+    await enforceRateLimit(rateLimitKey, 5, 900);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
+  }
+
   const tenant = await prismaUnscoped.tenant.findUnique({ where: { slug: tenantSlug } });
   if (!tenant) {
     return res.status(401).json({ success: false, data: null, error: { code: "INVALID_CREDENTIALS", message: "Credenciais inválidas." } });
@@ -115,6 +137,9 @@ authRouter.post("/login", async (req, res) => {
     return res.status(401).json({ success: false, data: null, error: { code: "INVALID_CREDENTIALS", message: "Credenciais inválidas." } });
   }
 
+  // Login válido: reseta o contador de tentativas falhas desta conta.
+  await resetRateLimit(rateLimitKey);
+
   // Capítulo 2 — Tenant Lockout: bloqueia login se a assinatura estiver suspensa.
   if (tenant.status === "SUSPENDED" || tenant.status === "CANCELLED") {
     return res.status(402).json({
@@ -125,7 +150,14 @@ authRouter.post("/login", async (req, res) => {
   const token = signSessionToken({ userId: user.id, tenantId: tenant.id, role: user.role as any });
   const authPayload = {
     token,
-    tenant: { id: tenant.id, slug: tenant.slug, tradeName: tenant.tradeName, status: tenant.status, tenantType: tenant.tenantType },
+    tenant: {
+      id: tenant.id,
+      slug: tenant.slug,
+      tradeName: tenant.tradeName,
+      status: tenant.status,
+      tenantType: tenant.tenantType,
+      cnpj: tenant.cnpj,
+    },
     user: { id: user.id, name: user.name, email: user.email, role: user.role },
   };
   return res.json({ success: true, data: authPayload, error: null, ...authPayload });

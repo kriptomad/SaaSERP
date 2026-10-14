@@ -6,6 +6,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { SignupPage } from "./pages/SignupPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { PosPage } from "./modules/market/pos/PosPage";
+import { SalesHistoryPage } from "./modules/market/sales/SalesHistoryPage";
 import { AppShell } from "./layout/AppShell";
 import { ClientsPage, SuppliersPage } from "./modules/registrations/PartiesPage";
 import { ProductsPage } from "./modules/registrations/ProductsPage";
@@ -33,6 +34,7 @@ import { HealthInsurancePage } from "./modules/optical/HealthInsurancePage";
 import { AccountingOfficePage } from "./modules/accounting-office/AccountingOfficePage";
 import { LicensingPage } from "./modules/licensing/LicensingPage";
 import { HardwarePage } from "./modules/settings/HardwarePage";
+import { NotificationSettingsPage } from "./modules/notifications/NotificationSettingsPage";
 import { AbcCurveReportPage } from "./modules/reports/AbcCurveReportPage";
 import { WorkOrderReportsPage } from "./modules/work-orders/WorkOrderReportsPage";
 import { LiquorLedgerPage } from "./modules/liquor-ledger/LiquorLedgerPage";
@@ -52,6 +54,11 @@ import { PersonalizationOrdersPage } from "./modules/personalization/Personaliza
 import { BusinessAccountInvoicePage } from "./modules/construction/BusinessAccountInvoicePage";
 import { TireWarrantyPage } from "./modules/tires/TireWarrantyPage";
 import { CarWashQueuePage } from "./modules/car-wash/CarWashQueuePage";
+import { PlatformAdminAuthProvider, usePlatformAdminAuth } from "./modules/platform-admin/PlatformAdminAuthContext";
+import { PlatformAdminLoginPage } from "./modules/platform-admin/PlatformAdminLoginPage";
+import { PlatformAdminShell } from "./modules/platform-admin/PlatformAdminShell";
+import { InfrastructureSettingsPage } from "./modules/platform-admin/InfrastructureSettingsPage";
+import { MarketingAdminPage } from "./modules/platform-admin/MarketingAdminPage";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const { isAuthenticated } = useAuth();
@@ -63,17 +70,34 @@ function RequireOwner({ children }: { children: JSX.Element }) {
   return user?.role === "OWNER" ? children : <Navigate to="/dashboard" replace />;
 }
 
+function RequirePlatformAdminAuth({ children }: { children: JSX.Element }) {
+  const { isAuthenticated } = usePlatformAdminAuth();
+  return isAuthenticated ? children : <Navigate to="/platform-admin/login" replace />;
+}
+
 export function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/signup" element={<SignupPage />} />
-          {/* Pública, sem auth: Cap. 11.6 — agendamento online self-service */}
-          <Route path="/agendar/:tenantSlug" element={<PublicBookingPage />} />
-          <Route
+      <PlatformAdminAuthProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/signup" element={<SignupPage />} />
+            {/* Pública, sem auth: Cap. 11.6 — agendamento online self-service */}
+            <Route path="/agendar/:tenantSlug" element={<PublicBookingPage />} />
+            <Route path="/platform-admin/login" element={<PlatformAdminLoginPage />} />
+            <Route
+              element={
+                <RequirePlatformAdminAuth>
+                  <PlatformAdminShell />
+                </RequirePlatformAdminAuth>
+              }
+            >
+              <Route path="/platform-admin/infraestrutura" element={<InfrastructureSettingsPage />} />
+              <Route path="/platform-admin/marketing" element={<MarketingAdminPage />} />
+            </Route>
+            <Route
             element={
               <RequireAuth>
                 <AppShell />
@@ -82,6 +106,7 @@ export function App() {
           >
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/pdv" element={<PosPage />} />
+            <Route path="/pdv/vendas" element={<SalesHistoryPage />} />
             <Route path="/cadastros/clientes" element={<ClientsPage />} />
             <Route path="/cadastros/fornecedores" element={<SuppliersPage />} />
             <Route path="/cadastros/produtos" element={<ProductsPage />} />
@@ -107,6 +132,7 @@ export function App() {
             <Route path="/cadastros/prontuarios" element={<ClientRecordsPage />} />
             <Route path="/contabilidade" element={<AccountingOfficePage />} />
             <Route path="/configuracoes/hardware" element={<HardwarePage />} />
+            <Route path="/configuracoes/notificacoes" element={<NotificationSettingsPage />} />
             <Route path="/relatorios/curva-abc" element={<AbcCurveReportPage />} />
             <Route path="/os/relatorios" element={<WorkOrderReportsPage />} />
             <Route path="/adega/cascos" element={<LiquorLedgerPage />} />
@@ -139,6 +165,7 @@ export function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
+      </PlatformAdminAuthProvider>
     </AuthProvider>
   );
 }

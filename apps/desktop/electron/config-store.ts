@@ -16,6 +16,8 @@ const DEFAULT_CONFIG: DesktopConfig = {
     databaseUrl: "postgresql://postgres:postgres@localhost:5432/filitech?schema=public",
   },
   clientHost: null,
+  session: null,
+  deviceId: null,
   license: null,
   onboardingComplete: false,
 };
@@ -33,6 +35,8 @@ export function getFullConfig(): DesktopConfig {
     installMode: configStore.get("installMode"),
     network: configStore.get("network"),
     clientHost: configStore.get("clientHost"),
+    session: configStore.get("session"),
+    deviceId: configStore.get("deviceId"),
     license: configStore.get("license"),
     onboardingComplete: configStore.get("onboardingComplete"),
   };

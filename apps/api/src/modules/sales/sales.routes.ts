@@ -8,7 +8,7 @@
 // navegador.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import {
   closeSaleAndEmitFiscalDocument,
@@ -50,8 +50,8 @@ export const salesRouter = Router();
 
 async function hasPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
   const [defaultGrant, override] = await Promise.all([
-    prismaUnscoped.roleDefaultPermission.findUnique({ where: { role_permissionCode: { role: role as any, permissionCode } } }),
-    prismaUnscoped.rolePermission.findUnique({ where: { userId_permission: { userId, permission: permissionCode } } }),
+    prisma.roleDefaultPermission.findUnique({ where: { role_permissionCode: { role: role as any, permissionCode } } }),
+    prisma.rolePermission.findUnique({ where: { userId_permission: { userId, permission: permissionCode } } }),
   ]);
   return override ? override.granted : Boolean(defaultGrant);
 }
@@ -136,14 +136,14 @@ salesRouter.post("/sales", requireAuth, async (req: Request, res: Response) => {
   // tenant ANTES de abrir a transação de fechamento — evita vazamento cross-tenant
   // via accrueLoyaltyPoints (Capítulo 4.1.1).
   if (input.clientId) {
-    const client = await prismaUnscoped.client.findFirst({ where: { id: input.clientId, tenantId }, select: { id: true } });
+    const client = await prisma.client.findFirst({ where: { id: input.clientId, tenantId }, select: { id: true } });
     if (!client) {
       return res.status(404).json({ success: false, data: null, error: { code: "CLIENT_NOT_FOUND", message: "Cliente não encontrado neste tenant." } });
     }
   }
 
   try {
-    const result = await closeSaleAndEmitFiscalDocument(prismaUnscoped, {
+    const result = await closeSaleAndEmitFiscalDocument(prisma, {
       tenantId,
       idempotencyKey: input.idempotencyKey,
       cashRegisterId: input.cashRegisterId,
@@ -237,7 +237,7 @@ salesRouter.post("/sales/:id/refund", requireAuth, async (req: Request, res: Res
   }
 
   try {
-    const refunded = await refundSale(prismaUnscoped, {
+    const refunded = await refundSale(prisma, {
       tenantId,
       saleId: req.params.id,
       requestedByUserId: userId,
@@ -295,13 +295,15 @@ salesRouter.get("/sales/:id", requireAuth, async (req: Request, res: Response) =
   if (!(await hasPermission(role, userId, "pdv:sale:create"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar vendas." } });
   }
-  const sale = await prismaUnscoped.sale.findFirst({
+  const sale = await prisma.sale.findFirst({
     where: { id: req.params.id, tenantId },
     select: {
       id: true,
       status: true,
       createdAt: true,
       clientId: true,
+      totalAmount: true,
+      paymentMethod: true,
       client: { select: { id: true, name: true } },
       items: {
         select: {
@@ -315,10 +317,70 @@ salesRouter.get("/sales/:id", requireAuth, async (req: Request, res: Response) =
           totalPrice: true,
         },
       },
+      // CORREÇÃO DE AUDITORIA (Rodada 7 — gap do cupom térmico): sem este bloco o
+      // front-end jamais conseguia saber se a NFC-e já foi autorizada pela SEFAZ
+      // (fila `fiscal-emission`, agora com worker real) para então oferecer a
+      // reimpressão do cupom fiscal de verdade (com QR Code/chave reais), em vez do
+      // "cupom não fiscal" impresso no balcão antes do sync (Capítulo 21.7/21.19).
+      fiscalDocuments: {
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          accessKey: true,
+          focusNfeNumero: true,
+          focusNfeSerie: true,
+          qrCodeUrl: true,
+          totalTaxesApprox: true,
+          rejectionReason: true,
+        },
+        orderBy: { createdAt: "desc" },
+      },
     },
   });
   if (!sale) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Venda não encontrada." } });
   }
   return res.json({ success: true, data: sale, error: null });
+});
+
+// GAP DE AUDITORIA ENCONTRADO E CORRIGIDO (Rodada 7): nenhuma rota de LISTAGEM de
+// vendas jamais existiu — sem ela, não havia como o front-end montar o histórico de
+// vendas do caixa logado e oferecer a reimpressão do cupom fiscal depois que o sync
+// offline-first (Capítulo 8.3) e a emissão real via Focus NFe (Capítulo 20.3)
+// terminam, muitas vezes segundos após a impressão do cupom não fiscal no balcão.
+// Paginação simples por cursor de data (nunca OFFSET, que degrada com volume alto de
+// vendas em lojas de giro rápido como mercado/conveniência).
+salesRouter.get("/sales", requireAuth, async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "pdv:sale:create"))) {
+    return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar vendas." } });
+  }
+  const limitParam = Number(req.query.limit);
+  const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 100 ? limitParam : 25;
+  const before = typeof req.query.before === "string" ? new Date(req.query.before) : null;
+
+  const sales = await prisma.sale.findMany({
+    where: {
+      tenantId,
+      cashierId: userId,
+      ...(before && !Number.isNaN(before.getTime()) ? { createdAt: { lt: before } } : {}),
+    },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    select: {
+      id: true,
+      status: true,
+      createdAt: true,
+      totalAmount: true,
+      paymentMethod: true,
+      client: { select: { id: true, name: true } },
+      fiscalDocuments: {
+        select: { id: true, type: true, status: true, accessKey: true, qrCodeUrl: true },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+      },
+    },
+  });
+  return res.json({ success: true, data: sales, error: null });
 });

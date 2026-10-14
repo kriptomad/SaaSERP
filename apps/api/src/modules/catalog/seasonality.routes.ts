@@ -9,7 +9,7 @@
 // seguindo o mesmo padrão de boilerplate de `liquor-ledger.routes.ts`.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { Prisma, prismaUnscoped as prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 
 export const seasonalityRouter = Router();

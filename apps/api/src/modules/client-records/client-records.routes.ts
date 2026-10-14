@@ -11,7 +11,7 @@
 // mesmo domínio RBAC do cadastro de cliente, nunca um domínio novo.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { notifyTenant } from "../notifications/notify.service";
 import { lookupVehicleByPlate } from "../integrations/vehicle-plate-lookup.service";

@@ -2,22 +2,19 @@
 // Fonte: BIBLE_ENGINEERING_V2.md, novo Capítulo 23.4 — layout de cupom simplificado e
 // de DANFE/NFC-e, montados em texto puro para a impressora térmica ESC/POS.
 //
-// LIMITAÇÃO REAL IMPORTANTE (documentar sempre): a emissão fiscal real (XML
-// autorizado pela SEFAZ) ainda não existe neste monorepo — a Rodada 4 do audit
-// confirmou que `transmitFiscalEvent.ts` cobre apenas CANCELAMENTO de documentos já
-// emitidos externamente, e não há nenhum fluxo de EMISSÃO que gere um XML de
-// NFC-e/NF-e real (isso está documentado como adiamento explícito, fora do escopo
-// desta missão de hardware). `FiscalDocument.xmlStorageKey` também não tem nenhum
-// leitor de storage real implementado (nenhum client S3/R2 existe no backend ainda).
-// Por isso, a "impressão de DANFE/NFC-e" aqui é a IMPRESSÃO DO CUPOM FISCAL
-// SIMPLIFICADO (Capítulo 21.7, já suportado pelo schema via `totalTaxesApprox`/
-// `accessKey`/protocolo de autorização gravados em `FiscalDocument`), que é o que
-// toda loja de fato entrega ao cliente no balcão — não o parsing de um XML de NF-e
-// completo (layout DANFE "A4"), que não existe de verdade no sistema hoje. Quando o
-// módulo fiscal ganhar emissão real com XML persistido, este arquivo pode ganhar um
-// segundo formatter que percorre o XML; a assinatura de `ReceiptData` já foi
-// desenhada para aceitar os campos que o XML forneceria (chave de acesso, protocolo)
-// sem quebra de contrato.
+// ATUALIZAÇÃO (Rodada 7 do audit): a emissão fiscal real (NFC-e autorizada pela
+// SEFAZ via Focus NFe, `emit-fiscal-document.service.ts` + worker da fila
+// `fiscal-emission`) já existe de ponta a ponta. A tensão arquitetural que
+// permanece é a do PDV OFFLINE-FIRST (Capítulo 8.3): o cupom impresso no balcão em
+// `PosPage.tsx` é sempre impresso ANTES do sync (o cliente não pode esperar a
+// rede/SEFAZ), logo nunca carrega chave de acesso/QR Code reais naquele instante —
+// por isso imprime honestamente "EMISSÃO FISCAL PENDENTE" nesse momento. Após o
+// Service Worker sincronizar a venda e o worker autorizar a NFC-e (geralmente
+// segundos depois), o operador consulta `SalesHistoryPage.tsx` (GET /sales e
+// /sales/:id, que já devolvem `accessKey`/`qrCodeUrl`/`focusNfeNumero` reais) e
+// reimprime o cupom fiscal de verdade dali — nunca inventado. `xmlStorageKey`/DANFE
+// "A4" completo (fora do cupom térmico simplificado) seguem fora do escopo deste
+// arquivo.
 import { EscPosBuilder } from "./escpos";
 
 export interface ReceiptItem {
@@ -90,7 +87,7 @@ export function buildReceipt(data: ReceiptData, columns: 32 | 42): EscPosBuilder
   return b;
 }
 
-function translatePaymentMethod(method: string): string {
+export function translatePaymentMethod(method: string): string {
   const map: Record<string, string> = {
     CASH: "Dinheiro",
     DEBIT_CARD: "Cartão de Débito",

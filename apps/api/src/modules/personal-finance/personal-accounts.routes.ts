@@ -12,7 +12,7 @@
 // (concedida a OWNER, MANAGER e HOUSEHOLD_MEMBER — Capítulo 22.1 do seed.ts).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { Prisma, prismaUnscoped as prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { isTenantStorageKey } from "../../lib/storage-key";
 

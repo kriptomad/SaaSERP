@@ -13,7 +13,7 @@
 // Reaproveita o mesmo padrão transacional (lock pessimista via `FOR UPDATE`,
 // Serializable) para evitar sobre-consumo em lançamentos concorrentes do mesmo
 // insumo por operadores diferentes.
-import { Prisma, PrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedPrismaClient } from "@filitech/db";
 
 export class MissingIngredientStockError extends Error {}
 
@@ -30,7 +30,7 @@ interface ConsumeRecipeForComandaItemInput {
  * estiver preenchido, não baixa novamente (protege contra reenvio/retry do
  * mesmo lançamento).
  */
-export async function consumeRecipeForComandaItem(prisma: PrismaClient, input: ConsumeRecipeForComandaItemInput) {
+export async function consumeRecipeForComandaItem(prisma: TenantScopedPrismaClient, input: ConsumeRecipeForComandaItemInput) {
   return prisma.$transaction(
     async (tx) => {
       const item = await tx.comandaItem.findFirstOrThrow({ where: { id: input.comandaItemId, tenantId: input.tenantId } });

@@ -18,6 +18,8 @@ export function resolveApiBaseUrl(): string {
 const API_BASE_URL = resolveApiBaseUrl();
 
 const TOKEN_STORAGE_KEY = "filitech.session.token";
+const SSO_TENANT_KEY = "filitech.session.tenant";
+const SSO_USER_KEY = "filitech.session.user";
 
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -30,6 +32,62 @@ export function setStoredToken(token: string | null): void {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
   }
 }
+
+export function getStoredTenant(): AuthResponse["tenant"] | null {
+  const raw = sessionStorage.getItem(SSO_TENANT_KEY);
+  return raw ? (JSON.parse(raw) as AuthResponse["tenant"]) : null;
+}
+
+export function getStoredUser(): AuthResponse["user"] | null {
+  const raw = sessionStorage.getItem(SSO_USER_KEY);
+  return raw ? (JSON.parse(raw) as AuthResponse["user"]) : null;
+}
+
+export function setStoredSession(response: AuthResponse | null): void {
+  setStoredToken(response?.token ?? null);
+  if (response) {
+    sessionStorage.setItem(SSO_TENANT_KEY, JSON.stringify(response.tenant));
+    sessionStorage.setItem(SSO_USER_KEY, JSON.stringify(response.user));
+  } else {
+    sessionStorage.removeItem(SSO_TENANT_KEY);
+    sessionStorage.removeItem(SSO_USER_KEY);
+  }
+}
+
+function base64UrlDecode(value: string): string {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(value.length + ((4 - (value.length % 4)) % 4), "=");
+  return decodeURIComponent(
+    atob(padded)
+      .split("")
+      .map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`)
+      .join(""),
+  );
+}
+
+/**
+ * SSO do shell desktop (apps/desktop/electron/main.ts, `openErpWindow`): repassa o
+ * AuthResponse já obtido no login do onboarding via `?sso=<base64url JSON>` para esta
+ * janela do apps/web nunca pedir login uma segunda vez. Roda uma única vez no boot do
+ * módulo (antes de qualquer render) e remove o parâmetro da URL imediatamente — o
+ * token nunca fica visível na barra de endereço depois do primeiro carregamento.
+ */
+function consumeSsoFromQuery(): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  const sso = url.searchParams.get("sso");
+  if (!sso) return;
+  try {
+    const response = JSON.parse(base64UrlDecode(sso)) as AuthResponse;
+    if (response?.token && response.tenant && response.user) {
+      setStoredSession(response);
+    }
+  } catch {
+    // sso inválido/corrompido — ignora silenciosamente e segue para a tela de login normal.
+  }
+  url.searchParams.delete("sso");
+  window.history.replaceState({}, "", url.pathname + (url.search ? url.search : ""));
+}
+consumeSsoFromQuery();
 
 export class ApiError extends Error {
   constructor(
@@ -91,7 +149,7 @@ export interface LoginInput {
 
 export interface AuthResponse {
   token: string;
-  tenant: { id: string; slug: string; tradeName: string; status: string; tenantType: string };
+  tenant: { id: string; slug: string; tradeName: string; status: string; tenantType: string; cnpj: string | null };
   user: { id: string; name: string; email: string; role: string };
 }
 

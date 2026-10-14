@@ -6,9 +6,9 @@
 // sua conferência é via extrato do adquirente (Capítulo 17.4), não via contagem de
 // dinheiro. divergenceAmount só é calculado DEPOIS da contagem confirmada — gaveta
 // cega (Capítulo 4.1): o operador nunca vê o valor esperado antes de contar.
-import { Prisma } from "@filitech/db";
+import { Prisma, TenantScopedTransactionClient } from "@filitech/db";
 
-export async function closeCashRegister(tx: Prisma.TransactionClient, cashRegisterId: string, countedAmount: Prisma.Decimal) {
+export async function closeCashRegister(tx: TenantScopedTransactionClient, cashRegisterId: string, countedAmount: Prisma.Decimal) {
   const register = await tx.cashRegister.findUniqueOrThrow({
     where: { id: cashRegisterId },
     include: { sales: { include: { payments: true } }, movements: true },
@@ -41,7 +41,7 @@ export async function closeCashRegister(tx: Prisma.TransactionClient, cashRegist
 }
 
 export async function registerCashMovement(
-  tx: Prisma.TransactionClient,
+  tx: TenantScopedTransactionClient,
   input: { cashRegisterId: string; type: "WITHDRAWAL" | "INJECTION"; amount: Prisma.Decimal; reason: string; performedByUserId: string },
 ) {
   if (!input.reason?.trim()) {

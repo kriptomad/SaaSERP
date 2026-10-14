@@ -32,7 +32,7 @@
 // Para o caso comum de pneu (normalmente 1 unidade por lote/linha), isso é
 // suficiente; é uma simplificação aceitável e documentada, não um bug oculto.
 import { Router, Request, Response } from "express";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 
 export const tireWarrantyRouter = Router();

@@ -8,7 +8,7 @@
 // Convenção de resposta (Capítulo 9): envelope { success, data, error }.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { hashPassword } from "../auth/password.service";
 import { setManagerPin, InvalidManagerPinFormatError } from "../auth/manager-pin.service";
@@ -174,6 +174,40 @@ usersRouter.patch("/users/:id/deactivate", requireAuth, async (req: Request, res
 // autorizar estornos), e sempre sobre a própria conta — nunca o PIN de outro
 // usuário, mesmo por um Owner, para preservar a cadeia de responsabilidade.
 const setManagerPinSchema = z.object({ pin: z.string().min(4).max(6) });
+
+// Capítulo 20.2 — número E.164 pessoal do usuário, usado pelo canal real de WhatsApp
+// (notify.service.ts/whatsapp.channel.ts). Dado pessoal do próprio usuário autenticado
+// (userId sempre de req.session, nunca do body/URL) — mesmo raciocínio de autorização
+// já usado pelas rotas de notification-settings.routes.ts: sem RBAC novo, pois um
+// usuário nunca edita o contato de outro, nem mesmo um OWNER.
+const setContactSchema = z.object({
+  whatsappPhone: z
+    .string()
+    .regex(/^\+[1-9]\d{7,14}$/, "Telefone inválido — use o formato E.164, ex.: +5511999998888.")
+    .nullable(),
+});
+
+usersRouter.get("/users/me/contact", requireAuth, async (req: Request, res: Response) => {
+  const { userId } = req.session!;
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, whatsappPhone: true } });
+  return res.json({ success: true, data: user, error: null });
+});
+
+usersRouter.patch("/users/me/contact", requireAuth, async (req: Request, res: Response) => {
+  const { userId } = req.session!;
+  const parsed = setContactSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+  }
+
+  const updated = await prisma.user.update({
+    where: { id: userId },
+    data: { whatsappPhone: parsed.data.whatsappPhone },
+    select: { whatsappPhone: true },
+  });
+
+  return res.json({ success: true, data: updated, error: null });
+});
 
 usersRouter.post("/users/me/manager-pin", requireAuth, async (req: Request, res: Response) => {
   const { userId, role } = req.session!;

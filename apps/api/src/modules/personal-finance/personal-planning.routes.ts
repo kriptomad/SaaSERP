@@ -6,8 +6,9 @@
 // completo do gap de auditoria que originou todo o módulo "Filitech Pessoal".
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { Prisma, prismaUnscoped as prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { pluggySyncQueue } from "../../lib/queue";
 
 export const personalPlanningRouter = Router();
 
@@ -479,8 +480,9 @@ personalPlanningRouter.post("/personal/net-worth-snapshots/recompute", requireAu
 
 // ─────────────────────────────────────────────────────────────────────────
 // OPEN FINANCE — gestão de consentimentos (Capítulo 22.5). A sincronização
-// automática real via Pluggy webhook fica pendente nesta correção (ver nota
-// no fim do arquivo); aqui apenas o ciclo de vida do consentimento é coberto.
+// automática real via Pluggy (webhook `item/updated` + worker dedicado) foi
+// implementada nesta rodada em `pluggy-webhook.routes.ts`/`pluggy-sync.worker.ts`;
+// aqui seguem o ciclo de vida do consentimento e o gatilho manual "sincronizar agora".
 // ─────────────────────────────────────────────────────────────────────────
 
 personalPlanningRouter.get("/personal/open-finance-consents", requireAuth, async (req: Request, res: Response) => {
@@ -519,4 +521,18 @@ personalPlanningRouter.delete("/personal/open-finance-consents/:id", requireAuth
   }
   await prisma.openFinanceConsent.delete({ where: { id: consent.id } });
   return res.json({ success: true, data: { id: consent.id }, error: null });
+});
+
+// Gatilho manual de sincronização (Capítulo 22.5) — mesma fila/worker usados pelo
+// webhook `item/updated` da Pluggy, para o usuário não ficar 100% dependente de um
+// webhook (ex.: forçar um refresh logo após conectar a conta pela primeira vez).
+personalPlanningRouter.post("/personal/open-finance-consents/:id/sync-now", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requireFinancialWrite(req, res))) return;
+  const { tenantId } = req.session!;
+  const consent = await prisma.openFinanceConsent.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!consent) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Consentimento não encontrado." } });
+  }
+  await pluggySyncQueue.add("sync-open-finance-item", { itemId: consent.itemId, consentId: consent.id }, { attempts: 5, backoff: { type: "exponential", delay: 10_000 } });
+  return res.status(202).json({ success: true, data: { enqueued: true }, error: null });
 });

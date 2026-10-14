@@ -5,7 +5,7 @@
 // unificando: (1) idempotência, (2) dedução de estoque roteada pelo trackingType do
 // produto, (3) cálculo tributário real via TaxEngine, e (4) enfileiramento da emissão
 // fiscal (fora da transação de banco).
-import { Prisma, PrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedPrismaClient } from "@filitech/db";
 import { calculateTax } from "../fiscal/tax-engine.service";
 import { resolveTaxReformPhase } from "../fiscal/tax-reform-phase.service";
 import { deductStockFefoWithinTx } from "../../services/stock/deduct-stock-fefo.service";
@@ -107,7 +107,7 @@ export class ConsignmentSupplierRequiredError extends Error {}
 // ser vendido.
 export class KitCompositionMissingError extends Error {}
 
-export async function closeSale(prisma: PrismaClient, input: CloseSaleServerInput) {
+export async function closeSale(prisma: TenantScopedPrismaClient, input: CloseSaleServerInput) {
   // Idempotência em primeiro lugar, fora/antes de qualquer efeito colateral: o Service
   // Worker do PDV offline (Capítulo 8.3) pode reenviar a mesma venda várias vezes
   // durante uma reconexão instável — reenviar nunca deve criar uma segunda Sale. A
@@ -136,7 +136,7 @@ export async function closeSale(prisma: PrismaClient, input: CloseSaleServerInpu
   }
 }
 
-async function executeCloseSaleTransaction(prisma: PrismaClient, input: CloseSaleServerInput) {
+async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, input: CloseSaleServerInput) {
   return prisma.$transaction(
     async (tx) => {
       const tenant = await tx.tenant.findUniqueOrThrow({
@@ -569,7 +569,7 @@ async function executeCloseSaleTransaction(prisma: PrismaClient, input: CloseSal
 // 4. Fora da transação (commit já confirmado): enfileira a emissão real via Focus NFe
 //    (Capítulo 20.3) em BullMQ — nunca síncrono dentro da transação de banco, para não
 //    segurar o lock de estoque esperando resposta de rede externa.
-export async function closeSaleAndEmitFiscalDocument(prisma: PrismaClient, input: CloseSaleServerInput) {
+export async function closeSaleAndEmitFiscalDocument(prisma: TenantScopedPrismaClient, input: CloseSaleServerInput) {
   const result = await closeSale(prisma, input);
   if (!result.isReplay && result.fiscalDocument) {
     await enqueueFiscalEmission({ fiscalDocumentId: result.fiscalDocument.id, tenantId: input.tenantId });

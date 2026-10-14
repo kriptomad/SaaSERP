@@ -16,7 +16,7 @@
 // extrato de movimentações.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { Prisma, prismaUnscoped as prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 
 export const stockRouter = Router();

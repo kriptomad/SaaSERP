@@ -8,7 +8,7 @@
 //   - `ReferralCode`/`Referral` são por TENANT (indicação SaaS→SaaS), não por cliente final.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 
 export const loyaltyRouter = Router();

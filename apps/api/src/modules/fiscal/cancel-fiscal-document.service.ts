@@ -1,7 +1,7 @@
 // apps/api/src/modules/fiscal/cancel-fiscal-document.service.ts
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 21.19.2 — Cancelamento de documento fiscal,
 // regra de prazo real da SEFAZ (Ajuste SINIEF) e bloqueio automático fora do prazo.
-import { PrismaClient } from "@filitech/db";
+import { TenantScopedPrismaClient } from "@filitech/db";
 import { transmitFiscalEvent } from "./transmit-fiscal-event";
 
 // Prazos reais da SEFAZ (padrão nacional, cada UF pode SÓ reduzir, nunca ampliar).
@@ -31,7 +31,7 @@ export class CancellationNotApplicableToDocumentTypeError extends Error {}
 export class CancellationDeadlineExpiredError extends Error {}
 
 export async function cancelFiscalDocument(
-  prisma: PrismaClient,
+  prisma: TenantScopedPrismaClient,
   params: { tenantId: string; fiscalDocumentId: string; justification: string },
 ) {
   if (params.justification.trim().length < 15) {

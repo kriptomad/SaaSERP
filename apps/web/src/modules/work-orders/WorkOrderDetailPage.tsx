@@ -1,6 +1,7 @@
 // apps/web/src/modules/work-orders/WorkOrderDetailPage.tsx
 // Detalhe da O.S.: itens, orçamento, checklist, fotos e transições de status.
-// Fotos: a API só registra a referência (storageKey) — não há endpoint de upload de arquivo.
+// Fotos: upload real direto para o Cloudflare R2 via URL assinada (Capítulo 3) —
+// o navegador faz o PUT binário direto no R2, a API só grava o ponteiro storageKey.
 import { useState } from "react";
 import {
   Alert,
@@ -39,6 +40,7 @@ import { Page, PageHeader, QueryState, errorMessage } from "../../shared/ui/Page
 import { ConfirmDialog } from "../../shared/ui/ConfirmDialog";
 import { useToast } from "../../shared/ui/Toast";
 import { formatDate, formatDateTime, money, parseDecimal, qty, toNumber } from "../../shared/ui/format";
+import { resolveStorageDownloadUrl, uploadFileToStorage } from "../../shared/storage/upload";
 
 const STAGE_LABEL: Record<Checklist["stage"], string> = { ENTRY: "Entrada", DIAGNOSIS: "Diagnóstico", DELIVERY: "Entrega" };
 
@@ -259,23 +261,49 @@ function ChecklistTab({ order }: { order: WorkOrderDetail }) {
 
 function PhotosTab({ order }: { order: WorkOrderDetail }) {
   const refresh = useRefresh(order.id);
-  const [storageKey, setStorageKey] = useState("");
+  const toast = useToast();
   const [caption, setCaption] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [viewingPhotoId, setViewingPhotoId] = useState<string | null>(null);
 
   const mutation = useMutation({
-    mutationFn: () => workOrdersApi.addPhoto(order.id, { storageKey: storageKey.trim(), caption: caption.trim() || null }),
+    mutationFn: async () => {
+      if (!selectedFile) throw new Error("Selecione um arquivo de foto antes de enviar.");
+      setUploading(true);
+      try {
+        const storageKey = await uploadFileToStorage(selectedFile, "work-order-photos");
+        return workOrdersApi.addPhoto(order.id, { storageKey, caption: caption.trim() || null });
+      } finally {
+        setUploading(false);
+      }
+    },
     onSuccess: () => {
-      setStorageKey("");
+      setSelectedFile(null);
       setCaption("");
       refresh();
     },
     onError: (error) => setFormError(errorMessage(error)),
   });
 
+  async function handleViewPhoto(photoId: string, storageKey: string) {
+    setViewingPhotoId(photoId);
+    try {
+      const url = await resolveStorageDownloadUrl(storageKey);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      toast.error(errorMessage(error));
+    } finally {
+      setViewingPhotoId(null);
+    }
+  }
+
   return (
     <Stack spacing={2}>
-      <Alert severity="info">A API registra apenas a chave de armazenamento da foto (storageKey); o upload do arquivo ainda não tem endpoint.</Alert>
+      <Alert severity="info">
+        Fotos do laudo técnico: JPEG/PNG/WEBP até 15 MB, enviadas diretamente para o armazenamento Cloudflare R2.
+      </Alert>
       {order.photos.length === 0 ? (
         <Alert severity="info">Nenhuma foto registrada.</Alert>
       ) : (
@@ -283,17 +311,21 @@ function PhotosTab({ order }: { order: WorkOrderDetail }) {
           <Table size="small">
             <TableHead>
               <TableRow>
-                <TableCell>Chave</TableCell>
                 <TableCell>Legenda</TableCell>
                 <TableCell>Registrada em</TableCell>
+                <TableCell align="right">Ações</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               {order.photos.map((p) => (
                 <TableRow key={p.id}>
-                  <TableCell>{p.storageKey}</TableCell>
                   <TableCell>{p.caption ?? "—"}</TableCell>
                   <TableCell>{formatDateTime(p.createdAt)}</TableCell>
+                  <TableCell align="right">
+                    <Button size="small" disabled={viewingPhotoId === p.id} onClick={() => handleViewPhoto(p.id, p.storageKey)}>
+                      {viewingPhotoId === p.id ? "Abrindo…" : "Ver foto"}
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -303,18 +335,29 @@ function PhotosTab({ order }: { order: WorkOrderDetail }) {
       <Paper sx={{ p: 2 }}>
         <Stack spacing={2}>
           {formError && <Alert severity="error">{formError}</Alert>}
-          <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
-            <TextField label="Chave de armazenamento" value={storageKey} onChange={(e) => setStorageKey(e.target.value)} fullWidth />
+          <Stack direction={{ xs: "column", md: "row" }} spacing={1} alignItems={{ md: "center" }}>
+            <Button variant="outlined" component="label">
+              {selectedFile ? selectedFile.name : "Escolher foto"}
+              <input
+                type="file"
+                hidden
+                accept="image/jpeg,image/png,image/webp"
+                onChange={(e) => {
+                  setFormError(null);
+                  setSelectedFile(e.target.files?.[0] ?? null);
+                }}
+              />
+            </Button>
             <TextField label="Legenda" value={caption} onChange={(e) => setCaption(e.target.value)} fullWidth />
             <Button
               variant="contained"
-              disabled={!storageKey.trim() || mutation.isPending}
+              disabled={!selectedFile || mutation.isPending || uploading}
               onClick={() => {
                 setFormError(null);
                 mutation.mutate();
               }}
             >
-              Registrar
+              {uploading ? "Enviando…" : "Enviar foto"}
             </Button>
           </Stack>
         </Stack>

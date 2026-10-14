@@ -7,7 +7,7 @@
 // de usuários (Capítulo 2.2).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { resolveElectionWindow } from "./ibs-cbs-regime-resolver.service";
 

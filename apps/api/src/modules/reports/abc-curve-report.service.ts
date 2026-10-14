@@ -7,7 +7,7 @@
 // reorder-suggestions.ts. Implementado como relatório dedicado (não via
 // DATASET_REGISTRY genérico) porque exige JOIN SaleItem→Product, que o motor
 // self-service ainda não suporta (limitação documentada em dataset-registry.ts).
-import { Prisma, PrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedPrismaClient } from "@filitech/db";
 
 export interface AbcCurveRow {
   productId: string;
@@ -24,7 +24,7 @@ export interface AbcCurveRow {
 const CLASS_A_CUTOFF = 0.8;
 const CLASS_B_CUTOFF = 0.95;
 
-export async function buildAbcCurveReport(prisma: PrismaClient, tenantId: string, days: number): Promise<AbcCurveRow[]> {
+export async function buildAbcCurveReport(prisma: TenantScopedPrismaClient, tenantId: string, days: number): Promise<AbcCurveRow[]> {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
   const grouped = await prisma.saleItem.groupBy({
@@ -97,7 +97,7 @@ export interface AbcCurveVariantRow {
   abcClass: "A" | "B" | "C";
 }
 
-export async function buildVariantAbcCurveReport(prisma: PrismaClient, tenantId: string, days: number): Promise<AbcCurveVariantRow[]> {
+export async function buildVariantAbcCurveReport(prisma: TenantScopedPrismaClient, tenantId: string, days: number): Promise<AbcCurveVariantRow[]> {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
   const grouped = await prisma.saleItem.groupBy({

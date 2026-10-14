@@ -2,25 +2,33 @@
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 2.7.3/20.1 — Stripe real via SDK oficial,
 // nunca reimplementação manual de assinatura/HMAC.
 import Stripe from "stripe";
+import { getPlatformSecret } from "../../lib/platform-secrets";
 
-// Em ambientes onde a chave ainda não foi configurada pelo administrador da
-// plataforma (painel admin → Integrações, Capítulo 20.9), não derrubamos o
-// processo inteiro na inicialização: o SDK é construído com um placeholder e
-// qualquer chamada real falhará de forma controlada (401 do Stripe), permitindo
-// que o restante do sistema (módulos que não dependem de billing) funcione.
-if (!process.env.STRIPE_SECRET_KEY) {
-  // eslint-disable-next-line no-console
-  console.warn(
-    "[billing] STRIPE_SECRET_KEY não configurada — integração Stripe operará em modo inativo até ser configurada no painel admin.",
-  );
+// A chave é resolvida via painel admin → Infraestrutura (banco, cifrado) com
+// fallback para `process.env.STRIPE_SECRET_KEY` (Capítulo 20.9) — nunca mais lida
+// de forma síncrona no import do módulo, pois o admin pode trocá-la em runtime
+// sem reiniciar o processo (propagação em até 15s via `getPlatformSecret`).
+let cachedClient: Stripe | null = null;
+let cachedKey: string | null = null;
+
+export async function getStripeClient(): Promise<Stripe> {
+  const key = await getPlatformSecret("STRIPE_SECRET_KEY");
+  if (!key) {
+    throw new Error(
+      "STRIPE_SECRET_KEY não configurada — configure em Painel Admin → Infraestrutura ou na variável de ambiente antes de usar a integração Stripe.",
+    );
+  }
+  if (cachedClient && cachedKey === key) {
+    return cachedClient;
+  }
+  cachedClient = new Stripe(key, { apiVersion: "2025-02-24.acacia" });
+  cachedKey = key;
+  return cachedClient;
 }
-
-export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "sk_test_not_configured_placeholder", {
-  apiVersion: "2025-02-24.acacia",
-});
 
 // Passo 1 — SetupIntent para salvar cartão sem cobrar (Capítulo 2.7.3).
 export async function createSetupIntent(stripeCustomerId: string) {
+  const stripe = await getStripeClient();
   return stripe.setupIntents.create({
     customer: stripeCustomerId,
     payment_method_types: ["card"],
@@ -46,6 +54,8 @@ export async function syncSeatQuantityWithStripe(
     return null;
   }
 
+  const stripe = await getStripeClient();
+
   if (existingSeatItemId) {
     await stripe.subscriptionItems.update(existingSeatItemId, { quantity: extraSeatCount });
     return existingSeatItemId;
@@ -61,6 +71,7 @@ export async function syncSeatQuantityWithStripe(
 
 // Passo 2 — assinatura recorrente com cobrança automática (Capítulo 2.7.3).
 export async function createRecurringSubscription(stripeCustomerId: string, priceId: string, paymentMethodId: string) {
+  const stripe = await getStripeClient();
   await stripe.paymentMethods.attach(paymentMethodId, { customer: stripeCustomerId });
   await stripe.customers.update(stripeCustomerId, {
     invoice_settings: { default_payment_method: paymentMethodId },

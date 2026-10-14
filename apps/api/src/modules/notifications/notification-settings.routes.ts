@@ -9,7 +9,7 @@
 // `expoPushToken` é @unique GLOBAL (um aparelho só pertence a um usuário por vez).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 
 export const notificationSettingsRouter = Router();

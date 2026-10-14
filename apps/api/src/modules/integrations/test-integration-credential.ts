@@ -19,15 +19,33 @@
 //     https://placas.fipeapi.com.br/placas/{placa}?key={apiKey}, consultando a placa
 //     de teste pública "ABC1234" documentada pelo próprio provedor — nunca consulta um
 //     veículo real do tenant apenas para testar a credencial.
+//   - BILLING_STRIPE: `stripe.balance.retrieve()` via SDK oficial — endpoint read-only
+//     mais leve que existe para confirmar que a secret key é válida (nunca cria nem
+//     cobra nada; stripe.com/docs/api/balance/balance_retrieve).
+//   - EMAIL_RESEND: GET /domains (api.resend.com) — endpoint de leitura (lista domínios
+//     verificados da conta) usado como health-check de autenticação; a Resend não expõe
+//     um endpoint dedicado de "validar API key" sem efeito colateral, então a listagem
+//     de domínios é o GET mais leve que de fato autentica sem enviar nenhum e-mail real
+//     (resend.com/docs/api-reference/domains/list-domains) — nunca dispara um e-mail de
+//     teste para um endereço falso só para validar a credencial.
 //
-// Provedores sem contrato de teste ainda pesquisado/confirmado (STORAGE_CLOUDFLARE_R2,
-// EMAIL_RESEND, SMS_ZENVIA,
-// BANK_OPEN_FINANCE_PLUGGY, BILLING_STRIPE) fazem apenas o "teste de decodificação":
+// GAP DE AUDITORIA FECHADO (R2): Cloudflare R2 deixou de ser modelado como
+// `IntegrationCredential` por tenant — é um bucket único de PLATAFORMA (Capítulo 3),
+// então suas 4 credenciais vivem em `PlatformSecret` (grupo "Armazenamento (R2)") e o
+// teste de conexão real (HeadBucket) é feito via botão dedicado no painel Infra
+// (`POST /platform-admin/platform-secrets/test-r2`, ver `lib/object-storage.ts`), não
+// por este arquivo. O valor `STORAGE_CLOUDFLARE_R2` permanece no enum apenas por
+// compatibilidade retroativa — nenhuma rota cria mais `IntegrationCredential` com
+// este provider.
+//
+// Provedores sem contrato de teste ainda pesquisado/confirmado (SMS_ZENVIA,
+// BANK_OPEN_FINANCE_PLUGGY) fazem apenas o "teste de decodificação":
 // confirmam que o payload cifrado é decifrável e tem o formato mínimo esperado, mas
 // marcam explicitamente `success: false` com mensagem honesta de que o teste de rede
 // real ainda não foi implementado — NUNCA simulam um sucesso de rede que não ocorreu.
 import type { IntegrationCredential } from "@filitech/db";
 import { createConnection } from "node:net";
+import Stripe from "stripe";
 import { decryptEnvelope } from "../../lib/envelope-crypto";
 
 export interface IntegrationTestResult {
@@ -163,6 +181,56 @@ async function testVehicleDataFipePlaca(payload: Record<string, unknown>): Promi
   };
 }
 
+// `stripe.balance.retrieve()` é o endpoint read-only mais leve da API Stripe — não
+// cria/cobra nada, só confirma que a secret key autentica de verdade na conta.
+async function testStripeCredential(payload: Record<string, unknown>): Promise<IntegrationTestResult> {
+  if (typeof payload.secretKey !== "string" || !payload.secretKey) {
+    return { success: false, message: "Payload da Stripe inválido: campo 'secretKey' ausente." };
+  }
+  try {
+    const stripe = new Stripe(payload.secretKey, { apiVersion: "2025-02-24.acacia", timeout: REQUEST_TIMEOUT_MS });
+    const balance = await stripe.balance.retrieve();
+    return {
+      success: true,
+      message: "Secret key autenticada com sucesso na Stripe.",
+      httpStatus: 200,
+      responseBodyPreview: truncateBody(JSON.stringify({ livemode: balance.livemode, available: balance.available })),
+    };
+  } catch (error) {
+    const stripeError = error as Stripe.errors.StripeError;
+    return {
+      success: false,
+      message: `Falha ao autenticar na Stripe: ${stripeError.message ?? (error as Error).message}`,
+      httpStatus: stripeError.statusCode,
+    };
+  }
+}
+
+// GET /domains é o endpoint de leitura mais leve que de fato autentica contra a
+// Resend sem efeito colateral (a Resend não expõe uma rota dedicada de "validar
+// API key" — ver nota do cabeçalho deste arquivo). Nunca envia um e-mail de teste
+// para um endereço falso só para confirmar a credencial.
+async function testResendCredential(payload: Record<string, unknown>): Promise<IntegrationTestResult> {
+  if (typeof payload.apiKey !== "string" || !payload.apiKey) {
+    return { success: false, message: "Payload da Resend inválido: campo 'apiKey' ausente." };
+  }
+  const response = await fetch("https://api.resend.com/domains", {
+    method: "GET",
+    headers: { Authorization: `Bearer ${payload.apiKey}` },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  const bodyText = await response.text();
+  if (response.status === 200) {
+    return { success: true, message: "Autenticado com sucesso na Resend.", httpStatus: 200, responseBodyPreview: truncateBody(bodyText) };
+  }
+  return {
+    success: false,
+    message: `Falha ao autenticar na Resend (HTTP ${response.status}).`,
+    httpStatus: response.status,
+    responseBodyPreview: truncateBody(bodyText),
+  };
+}
+
 export async function testIntegrationCredential(credential: IntegrationCredential): Promise<IntegrationTestResult> {
   let decrypted: Record<string, unknown>;
   try {
@@ -183,6 +251,10 @@ export async function testIntegrationCredential(credential: IntegrationCredentia
       return await testSitefReachability(decrypted);
     case "VEHICLE_DATA_FIPE_PLACA":
       return await testVehicleDataFipePlaca(decrypted);
+    case "BILLING_STRIPE":
+      return await testStripeCredential(decrypted);
+    case "EMAIL_RESEND":
+      return await testResendCredential(decrypted);
     default:
       // Contrato HTTP de teste ainda não pesquisado/confirmado para este provedor —
       // reportar honestamente em vez de simular sucesso. A decodificação acima já

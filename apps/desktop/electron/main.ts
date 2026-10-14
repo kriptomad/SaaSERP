@@ -9,7 +9,9 @@
 //     (ver apps/web/src/api/client.ts — pequena extensão para aceitar override em runtime).
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
-import { IPC_CHANNELS, type DesktopConfig, type LicenseCache } from "./ipc-contract";
+import os from "node:os";
+import { randomUUID } from "node:crypto";
+import { IPC_CHANNELS, type DesktopConfig, type LicenseCache, type TenantSessionCache } from "./ipc-contract";
 import { getFullConfig, patchConfig } from "./config-store";
 import { startBackend, stopBackend, getBackendState, onBackendStateChange } from "./backend-manager";
 import { listLocalIPv4Addresses, pingUrl } from "./network-utils";
@@ -65,7 +67,7 @@ function resolveActiveApiBaseUrl(config: DesktopConfig): string {
   return CLOUD_API_BASE_URL;
 }
 
-function openErpWindow(apiBaseUrl: string): void {
+function openErpWindow(apiBaseUrl: string, session: TenantSessionCache | null): void {
   if (erpWindow) {
     erpWindow.focus();
     return;
@@ -81,7 +83,14 @@ function openErpWindow(apiBaseUrl: string): void {
     },
   });
 
-  const search = `?apiBaseUrl=${encodeURIComponent(apiBaseUrl)}`;
+  const params = new URLSearchParams({ apiBaseUrl });
+  if (session) {
+    // SSO: repassa o mesmo AuthResponse de /auth/login (base64url de um JSON) para o
+    // apps/web consumir no boot e nunca pedir login uma segunda vez — ver
+    // `consumeSsoBootstrap()` em apps/web/src/api/client.ts.
+    params.set("sso", Buffer.from(JSON.stringify(session)).toString("base64url"));
+  }
+  const search = `?${params.toString()}`;
 
   if (RENDERER_DEV_URL) {
     // Dev: espera que `npm run web:dev` (apps/web, porta 5173) esteja rodando à parte —
@@ -117,16 +126,16 @@ function registerIpcHandlers(): void {
     return result.filePaths[0];
   });
 
-  ipcMain.handle(IPC_CHANNELS.LICENSE_ACTIVATE, async (_event, payload: { licenseKey: string }) => {
+  ipcMain.handle(IPC_CHANNELS.LICENSE_ACTIVATE, async () => {
     const config = getFullConfig();
     const apiBaseUrl = resolveActiveApiBaseUrl(config);
-    return activateLicense(apiBaseUrl, payload.licenseKey);
+    return activateLicense(apiBaseUrl, config.session);
   });
 
-  ipcMain.handle(IPC_CHANNELS.LICENSE_TRIAL, async (_event, payload: { tenantSlug: string; email: string }) => {
+  ipcMain.handle(IPC_CHANNELS.LICENSE_TRIAL, async () => {
     const config = getFullConfig();
     const apiBaseUrl = resolveActiveApiBaseUrl(config);
-    return startTrial(apiBaseUrl, payload);
+    return startTrial(apiBaseUrl, config.session);
   });
 
   ipcMain.handle(IPC_CHANNELS.LICENSE_STATUS, async () => {
@@ -134,8 +143,19 @@ function registerIpcHandlers(): void {
     return checkLicenseStatus(config);
   });
 
+  ipcMain.handle(IPC_CHANNELS.AUTH_LOGIN, async (_event, payload: { tenantSlug: string; email: string; password: string }) => {
+    const config = getFullConfig();
+    const apiBaseUrl = resolveActiveApiBaseUrl(config);
+    return loginTenantUser(apiBaseUrl, payload);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTH_LOGOUT, () => {
+    patchConfig({ session: null });
+  });
+
   ipcMain.handle(IPC_CHANNELS.WINDOW_OPEN_ERP, (_event, apiBaseUrl: string) => {
-    openErpWindow(apiBaseUrl);
+    const config = getFullConfig();
+    openErpWindow(apiBaseUrl, config.session);
   });
 
   ipcMain.handle(IPC_CHANNELS.APP_VERSION, () => app.getVersion());
@@ -145,35 +165,110 @@ function registerIpcHandlers(): void {
   });
 }
 
-// --- Licenciamento ---------------------------------------------------------------
-// Contrato consumido de apps/api/src/modules/licensing/ (construído em paralelo por
-// outro agente, "license-system"). Caso as rotas ainda não existam no backend atingido,
-// a chamada falha com 404 e a UI exibe "aguardando módulo de licenciamento" sem travar
-// o restante do onboarding (ver src/screens/LicenseActivation.tsx).
+// --- Autenticação + Licenciamento --------------------------------------------------
+// /licensing/* exige `requireAuth` (Capítulo 2.10: a licença mestra é consultada no
+// contexto de um usuário de sistema já autenticado do tenant) — por isso o onboarding
+// do shell desktop precisa logar o usuário (POST /auth/login, MESMO endpoint do
+// apps/web) antes de poder iniciar o trial ou ativar o dispositivo. O token retornado é
+// reaproveitado tanto para as chamadas de licenciamento quanto para abrir a janela do
+// apps/web (window:open-erp) sem pedir login uma segunda vez.
 
-interface LicenseApiResponse {
+interface AuthLoginApiResponse {
   success: boolean;
-  data?: { token: string; tenantId: string; plan: string; expiresAt: string };
+  token?: string;
+  tenant?: { id: string; slug: string; tradeName: string; status: string; tenantType: string };
+  user?: { id: string; name: string; email: string; role: string };
   error?: { code: string; message: string };
 }
 
-async function activateLicense(apiBaseUrl: string, licenseKey: string): Promise<LicenseCache | { error: string }> {
+async function loginTenantUser(
+  apiBaseUrl: string,
+  payload: { tenantSlug: string; email: string; password: string },
+): Promise<TenantSessionCache | { error: string }> {
   try {
-    const response = await fetch(`${apiBaseUrl}/licensing/activate`, {
+    const response = await fetch(`${apiBaseUrl}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ licenseKey }),
+      body: JSON.stringify(payload),
     });
-    const body = (await response.json().catch(() => null)) as LicenseApiResponse | null;
+    const body = (await response.json().catch(() => null)) as AuthLoginApiResponse | null;
+    if (!response.ok || !body?.token || !body.tenant || !body.user) {
+      return { error: body?.error?.message ?? `HTTP ${response.status} — credenciais inválidas ou backend indisponível.` };
+    }
+    const session: TenantSessionCache = { token: body.token, tenant: body.tenant, user: body.user };
+    patchConfig({ session });
+    return session;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+}
+
+/** UUID estável do PC (persistido), usado como `deviceFingerprint` em /licensing/activate. */
+function ensureDeviceId(): string {
+  const config = getFullConfig();
+  if (config.deviceId) return config.deviceId;
+  const deviceId = randomUUID();
+  patchConfig({ deviceId });
+  return deviceId;
+}
+
+interface LicenseTrialApiResponse {
+  success: boolean;
+  data?: { status: LicenseCache["status"]; trialEndsAt: string | null; licensedModules: string[] };
+  error?: { code: string; message: string };
+}
+
+interface LicenseActivateApiResponse {
+  success: boolean;
+  data?: {
+    token: string;
+    status: LicenseCache["status"];
+    licensedModules: string[];
+    trialEndsAt: string | null;
+    offlineTokenExpiresAt: string | null;
+  };
+  error?: { code: string; message: string };
+}
+
+interface LicenseStatusApiResponse {
+  success: boolean;
+  data?: {
+    license: {
+      status: LicenseCache["status"];
+      trialEndsAt: string | null;
+      licensedModules: string[];
+      offlineTokenExpiresAt: string | null;
+    } | null;
+    canStartTrial: boolean;
+    tenantStatus: string;
+  };
+  error?: { code: string; message: string };
+}
+
+async function activateLicense(
+  apiBaseUrl: string,
+  session: TenantSessionCache | null,
+): Promise<LicenseCache | { error: string }> {
+  if (!session) {
+    return { error: "Faça login com o usuário de sistema do tenant antes de ativar a licença neste dispositivo." };
+  }
+  try {
+    const deviceFingerprint = ensureDeviceId();
+    const response = await fetch(`${apiBaseUrl}/licensing/activate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.token}` },
+      body: JSON.stringify({ deviceFingerprint, deviceLabel: os.hostname() }),
+    });
+    const body = (await response.json().catch(() => null)) as LicenseActivateApiResponse | null;
     if (!response.ok || !body?.data) {
       return { error: body?.error?.message ?? `HTTP ${response.status} — módulo de licenciamento indisponível.` };
     }
     const cache: LicenseCache = {
       token: body.data.token,
-      tenantId: body.data.tenantId,
-      plan: body.data.plan,
-      expiresAt: body.data.expiresAt,
-      mode: "ACTIVATED",
+      status: body.data.status,
+      licensedModules: body.data.licensedModules,
+      trialEndsAt: body.data.trialEndsAt,
+      offlineTokenExpiresAt: body.data.offlineTokenExpiresAt,
       cachedAt: new Date().toISOString(),
     };
     patchConfig({ license: cache });
@@ -185,28 +280,33 @@ async function activateLicense(apiBaseUrl: string, licenseKey: string): Promise<
 
 async function startTrial(
   apiBaseUrl: string,
-  payload: { tenantSlug: string; email: string },
+  session: TenantSessionCache | null,
 ): Promise<LicenseCache | { error: string }> {
+  if (!session) {
+    return { error: "Faça login com o usuário de sistema do tenant antes de iniciar o trial." };
+  }
   try {
     const response = await fetch(`${apiBaseUrl}/licensing/trial`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.token}` },
+      body: "{}",
     });
-    const body = (await response.json().catch(() => null)) as LicenseApiResponse | null;
+    const body = (await response.json().catch(() => null)) as LicenseTrialApiResponse | null;
     if (!response.ok || !body?.data) {
       return { error: body?.error?.message ?? `HTTP ${response.status} — módulo de licenciamento indisponível.` };
     }
+    // O trial sozinho não emite token offline (só /licensing/activate emite) — o
+    // dispositivo precisa ativar em seguida para operar offline dentro da janela.
     const cache: LicenseCache = {
-      token: body.data.token,
-      tenantId: body.data.tenantId,
-      plan: body.data.plan,
-      expiresAt: body.data.expiresAt,
-      mode: "TRIAL",
+      token: null,
+      status: body.data.status,
+      licensedModules: body.data.licensedModules,
+      trialEndsAt: body.data.trialEndsAt,
+      offlineTokenExpiresAt: null,
       cachedAt: new Date().toISOString(),
     };
     patchConfig({ license: cache });
-    return cache;
+    return activateLicense(apiBaseUrl, session);
   } catch (error) {
     return { error: (error as Error).message };
   }
@@ -214,34 +314,45 @@ async function startTrial(
 
 /**
  * Revalida o token de licença em background quando há rede (GET /licensing/status).
- * Se a chamada falhar (offline ou backend fora do ar), mantém o cache local e permite
- * uso 100% offline enquanto `license.expiresAt` ainda não tiver vencido — a validação
- * "dura" fica a cargo do próprio backend em cada chamada de API normal (JWT assinado).
+ * Se a chamada falhar (offline, sem sessão, ou backend fora do ar), mantém o cache
+ * local e permite uso 100% offline enquanto `offlineTokenExpiresAt` ainda não tiver
+ * vencido — a validação "dura" fica a cargo do próprio backend em cada chamada de API
+ * normal (JWT assinado) e do `POST /licensing/validate` puramente criptográfico.
  */
 async function checkLicenseStatus(config: DesktopConfig): Promise<{ valid: boolean; offline: boolean; license: LicenseCache | null }> {
   const cached = config.license;
   if (!cached) return { valid: false, offline: false, license: null };
 
-  const notExpired = new Date(cached.expiresAt).getTime() > Date.now();
+  const notExpired = cached.offlineTokenExpiresAt ? new Date(cached.offlineTokenExpiresAt).getTime() > Date.now() : false;
   const apiBaseUrl = resolveActiveApiBaseUrl(config);
 
-  try {
-    const response = await fetch(`${apiBaseUrl}/licensing/status`, {
-      headers: { Authorization: `Bearer ${cached.token}` },
-    });
-    if (response.ok) {
-      const body = (await response.json()) as { data?: { valid: boolean; expiresAt: string } };
-      if (body.data) {
-        const refreshed: LicenseCache = { ...cached, expiresAt: body.data.expiresAt, cachedAt: new Date().toISOString() };
-        patchConfig({ license: refreshed });
-        return { valid: body.data.valid, offline: false, license: refreshed };
+  if (config.session) {
+    try {
+      const response = await fetch(`${apiBaseUrl}/licensing/status`, {
+        headers: { Authorization: `Bearer ${config.session.token}` },
+      });
+      if (response.ok) {
+        const body = (await response.json()) as LicenseStatusApiResponse;
+        if (body.data?.license) {
+          const refreshed: LicenseCache = {
+            ...cached,
+            status: body.data.license.status,
+            trialEndsAt: body.data.license.trialEndsAt,
+            licensedModules: body.data.license.licensedModules,
+            offlineTokenExpiresAt: body.data.license.offlineTokenExpiresAt,
+            cachedAt: new Date().toISOString(),
+          };
+          patchConfig({ license: refreshed });
+          const stillValid = refreshed.status === "ACTIVE" || refreshed.status === "TRIAL";
+          return { valid: stillValid, offline: false, license: refreshed };
+        }
       }
+    } catch {
+      // Sem rede ou backend indisponível — cai para validação 100% offline pelo cache local.
     }
-  } catch {
-    // Sem rede ou backend indisponível — cai para validação 100% offline pelo cache local.
   }
 
-  return { valid: notExpired, offline: true, license: cached };
+  return { valid: notExpired && (cached.status === "ACTIVE" || cached.status === "TRIAL"), offline: true, license: cached };
 }
 
 app.whenReady().then(() => {

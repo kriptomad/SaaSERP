@@ -5,18 +5,19 @@
 // no schema (com os campos de vínculo Open Finance adicionados em 17.4.1) desde o
 // início deste capítulo, mas nenhuma rota de importação/conciliação jamais existiu.
 // Esta implementação cobre o Caminho B (importação manual de arquivo OFX, sem
-// depender de nenhuma API externa) — o Caminho A (sincronização automática via
-// Open Finance/Pluggy, `sync-open-finance.worker.ts`, Capítulo 22.5) permanece
-// PENDENTE nesta passada: o worker mencionado no Capítulo 17.4.1 ainda não existe
-// como arquivo real, só como citação cruzada de prosa.
+// depender de nenhuma API externa) E o Caminho A (sincronização automática via
+// Open Finance/Pluggy): o worker real (`workers/pluggy-sync.worker.ts`) e o
+// webhook (`pluggy-webhook.routes.ts`) foram implementados nesta rodada — aqui só
+// resta a rota de gatilho manual "sincronizar agora" (`/bank-accounts/:id/sync-now`).
 // Reaproveita o parser dedicado `apps/api/src/lib/ofx-parser.ts` em vez de inventar
 // parsing inline, e as permissões já seedadas `financial:*:read`/`financial:*:write`
 // (mesmo domínio financeiro do Capítulo 17, sem código RBAC novo).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { parseOfxTransactions, InvalidOfxContentError } from "../../lib/ofx-parser";
+import { pluggySyncQueue } from "../../lib/queue";
 
 export const bankReconciliationRouter = Router();
 
@@ -120,6 +121,35 @@ bankReconciliationRouter.post("/bank-accounts/:id/import-ofx", requireAuth, asyn
   });
 
   return res.status(201).json({ success: true, data: { importedCount: result.count, totalInFile: parsedTransactions.length }, error: null });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// SINCRONIZAÇÃO OPEN FINANCE (Caminho A — Capítulo 17.4.1): gatilho manual, para o
+// usuário não depender 100% do webhook `item/updated` da Pluggy (ex.: forçar um
+// refresh logo após conectar o banco pela primeira vez). Mesma fila/worker
+// (`pluggy-sync.worker.ts`) usados pelo webhook — nunca uma segunda implementação.
+// ─────────────────────────────────────────────────────────────────────────
+
+bankReconciliationRouter.post("/bank-accounts/:id/sync-now", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requireWrite(req, res))) return;
+  const { tenantId } = req.session!;
+  const bankAccount = await prisma.bankAccount.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!bankAccount) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Conta bancária não encontrada." } });
+  }
+  if (!bankAccount.openFinanceConsentId) {
+    return res.status(409).json({
+      success: false,
+      data: null,
+      error: { code: "NOT_OPEN_FINANCE_LINKED", message: "Esta conta não está vinculada a um consentimento Open Finance — sincronização automática só se aplica a contas conectadas via Pluggy." },
+    });
+  }
+  const consent = await prisma.openFinanceConsent.findFirst({ where: { id: bankAccount.openFinanceConsentId, tenantId } });
+  if (!consent) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Consentimento Open Finance não encontrado." } });
+  }
+  await pluggySyncQueue.add("sync-open-finance-item", { itemId: consent.itemId, consentId: consent.id }, { attempts: 5, backoff: { type: "exponential", delay: 10_000 } });
+  return res.status(202).json({ success: true, data: { enqueued: true }, error: null });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

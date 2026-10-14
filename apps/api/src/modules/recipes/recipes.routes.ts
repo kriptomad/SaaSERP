@@ -13,7 +13,7 @@
 // código de permissão não documentado em nenhum outro lugar do sistema.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { Prisma, prismaUnscoped as prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { produceRecipeBatch, MissingIngredientStockError, InvalidLossQuantityError } from "../../services/production/produce-recipe-batch.service";
 

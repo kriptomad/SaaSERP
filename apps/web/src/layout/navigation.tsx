@@ -26,6 +26,7 @@ import PetsIcon from "@mui/icons-material/Pets";
 import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
 import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
 import SettingsInputComponentIcon from "@mui/icons-material/SettingsInputComponent";
+import NotificationsIcon from "@mui/icons-material/Notifications";
 import AssessmentIcon from "@mui/icons-material/Assessment";
 import PaymentsIcon from "@mui/icons-material/Payments";
 import WineBarIcon from "@mui/icons-material/WineBar";
@@ -66,6 +67,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: "dashboard", label: "Dashboard", path: "/dashboard", icon: <DashboardIcon /> },
       { id: "pdv", label: "PDV", path: "/pdv", icon: <PointOfSaleIcon /> },
+      { id: "pdv-vendas", label: "Histórico de vendas", path: "/pdv/vendas", icon: <ReceiptLongIcon /> },
       { id: "caixa", label: "Caixa", path: "/caixa", icon: <PointOfSaleOutlinedIcon /> },
       { id: "comanda", label: "Comanda", path: "/comanda", icon: <ReceiptLongIcon /> },
     ],
@@ -126,6 +128,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: "licenciamento", label: "Licença Mestra", path: "/admin/licenciamento", icon: <VerifiedUserIcon />, roles: ["OWNER"] },
       { id: "hardware", label: "Hardware do PDV", path: "/configuracoes/hardware", icon: <SettingsInputComponentIcon /> },
+      { id: "notificacoes", label: "Notificações", path: "/configuracoes/notificacoes", icon: <NotificationsIcon /> },
     ],
   },
   { id: "mercado", label: "Mercado / Conveniência", items: [{ id: "curva-abc", label: "Curva ABC de produtos", path: "/relatorios/curva-abc", icon: <AssessmentIcon /> }] },

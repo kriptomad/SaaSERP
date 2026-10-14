@@ -9,7 +9,7 @@
 // e "scheduling:appointment:read/write" (não existiam no seed.ts anterior).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { Prisma, prismaUnscoped as prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 
 export const schedulingRouter = Router();
@@ -251,6 +251,18 @@ schedulingRouter.post("/client-service-packages", requireAuth, async (req: Reque
   if (!(await hasPermission(role, userId, "scheduling:service:write"))) return forbid(res, "Seu nível de acesso não permite vender pacotes de sessões.");
   const parsed = packageSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+
+  // CORREÇÃO DE AUDITORIA (FK injection): esta rota não validava clientId/serviceId
+  // contra o tenant (diferente de POST /appointments, que já faz essa checagem) —
+  // um usuário mal-intencionado podia vender/vincular um pacote a um cliente ou
+  // serviço de OUTRO tenant.
+  const [client, service] = await Promise.all([
+    prisma.client.findFirst({ where: { id: parsed.data.clientId, tenantId } }),
+    prisma.service.findFirst({ where: { id: parsed.data.serviceId, tenantId } }),
+  ]);
+  if (!client) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Cliente não encontrado." } });
+  if (!service) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Serviço não encontrado." } });
+
   const pkg = await prisma.clientServicePackage.create({
     data: { tenantId, clientId: parsed.data.clientId, serviceId: parsed.data.serviceId, totalSessions: parsed.data.totalSessions, expiresAt: parsed.data.expiresAt ? new Date(parsed.data.expiresAt) : undefined },
   });

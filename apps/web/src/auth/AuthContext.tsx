@@ -2,7 +2,7 @@
 // Contexto real de sessão do frontend: guarda token + dados de tenant/user vindos do
 // login/signup real da API (Capítulo 3.5/7.1), nunca estado mockado.
 import { createContext, useContext, useState, useCallback, ReactNode } from "react";
-import { AuthResponse, getStoredToken, setStoredToken } from "../api/client";
+import { AuthResponse, getStoredToken, getStoredTenant, getStoredUser, setStoredSession } from "../api/client";
 
 interface AuthState {
   token: string | null;
@@ -21,17 +21,20 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({
     token: getStoredToken(),
-    tenant: null,
-    user: null,
+    // `tenant`/`user` também podem vir de um SSO do shell desktop (ver
+    // consumeSsoFromQuery em api/client.ts) — sessionStorage sobrevive ao primeiro
+    // render desta mesma janela, diferente de um `login()` feito nesta própria sessão.
+    tenant: getStoredTenant(),
+    user: getStoredUser(),
   });
 
   const setSession = useCallback((response: AuthResponse) => {
-    setStoredToken(response.token);
+    setStoredSession(response);
     setState({ token: response.token, tenant: response.tenant, user: response.user });
   }, []);
 
   const clearSession = useCallback(() => {
-    setStoredToken(null);
+    setStoredSession(null);
     setState({ token: null, tenant: null, user: null });
   }, []);
 

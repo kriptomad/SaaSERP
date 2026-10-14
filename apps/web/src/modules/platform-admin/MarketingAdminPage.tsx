@@ -1,0 +1,369 @@
+// apps/web/src/modules/platform-admin/MarketingAdminPage.tsx
+// Fonte: BIBLE_ENGINEERING_V2.md — Capítulo 20 (cupons de desconto globais + programa
+// de indicações). GAP DE AUDITORIA ENCONTRADO E CORRIGIDO: `marketing.routes.ts` já
+// implementava o CRUD completo (cupons/indicações) desde uma rodada anterior, mas
+// nenhuma tela de administração de plataforma o consumia — o SUPER_ADMIN só
+// conseguia operar via chamada HTTP direta. Esta tela fecha o ciclo com UI real.
+import { useEffect, useState } from "react";
+import {
+  Alert,
+  Box,
+  Button,
+  Checkbox,
+  Chip,
+  FormControlLabel,
+  MenuItem,
+  Paper,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  TextField,
+  Typography,
+} from "@mui/material";
+import { usePlatformAdminAuth } from "./PlatformAdminAuthContext";
+import { marketingAdminApi, DiscountCoupon, DiscountCouponInput, Referral } from "./marketing.api";
+
+const REFERRAL_STATUS_COLOR: Record<Referral["status"], "success" | "warning" | "default"> = {
+  CONVERTED: "success",
+  PENDING: "warning",
+  EXPIRED: "default",
+};
+
+function CouponForm({ onCreated }: { onCreated: (coupon: DiscountCoupon) => void }) {
+  const [form, setForm] = useState<DiscountCouponInput>({
+    code: "",
+    discountType: "PERCENTAGE",
+    discountValue: 10,
+    scopeType: "GLOBAL",
+    scopeReferenceId: null,
+    maxRedemptions: null,
+    validFrom: new Date().toISOString().slice(0, 10),
+    validUntil: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+    active: true,
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit() {
+    setSaving(true);
+    setError(null);
+    try {
+      const created = await marketingAdminApi.createCoupon({
+        ...form,
+        scopeReferenceId: form.scopeType === "GLOBAL" ? null : form.scopeReferenceId,
+        validFrom: new Date(form.validFrom).toISOString(),
+        validUntil: new Date(form.validUntil).toISOString(),
+      });
+      onCreated(created);
+      setForm((f) => ({ ...f, code: "" }));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Paper sx={{ p: 2, mb: 3 }}>
+      <Typography variant="subtitle1" sx={{ mb: 2 }}>
+        Novo cupom de desconto
+      </Typography>
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+      )}
+      <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
+        <TextField
+          label="Código"
+          size="small"
+          value={form.code}
+          onChange={(e) => setForm({ ...form, code: e.target.value })}
+          sx={{ minWidth: 160 }}
+        />
+        <TextField
+          select
+          label="Tipo"
+          size="small"
+          value={form.discountType}
+          onChange={(e) => setForm({ ...form, discountType: e.target.value as DiscountCouponInput["discountType"] })}
+          sx={{ minWidth: 160 }}
+        >
+          <MenuItem value="PERCENTAGE">Percentual</MenuItem>
+          <MenuItem value="FIXED_AMOUNT">Valor fixo</MenuItem>
+        </TextField>
+        <TextField
+          label="Valor"
+          type="number"
+          size="small"
+          value={form.discountValue}
+          onChange={(e) => setForm({ ...form, discountValue: Number(e.target.value) })}
+          sx={{ minWidth: 120 }}
+        />
+        <TextField
+          select
+          label="Escopo"
+          size="small"
+          value={form.scopeType}
+          onChange={(e) => setForm({ ...form, scopeType: e.target.value as DiscountCouponInput["scopeType"] })}
+          sx={{ minWidth: 140 }}
+        >
+          <MenuItem value="GLOBAL">Global</MenuItem>
+          <MenuItem value="PLAN">Plano</MenuItem>
+          <MenuItem value="MODULE">Módulo</MenuItem>
+        </TextField>
+        {form.scopeType !== "GLOBAL" && (
+          <TextField
+            label="Code do plano/módulo"
+            size="small"
+            value={form.scopeReferenceId ?? ""}
+            onChange={(e) => setForm({ ...form, scopeReferenceId: e.target.value })}
+            sx={{ minWidth: 160 }}
+          />
+        )}
+        <TextField
+          label="Válido de"
+          type="date"
+          size="small"
+          value={form.validFrom}
+          onChange={(e) => setForm({ ...form, validFrom: e.target.value })}
+          InputLabelProps={{ shrink: true }}
+          sx={{ minWidth: 160 }}
+        />
+        <TextField
+          label="Válido até"
+          type="date"
+          size="small"
+          value={form.validUntil}
+          onChange={(e) => setForm({ ...form, validUntil: e.target.value })}
+          InputLabelProps={{ shrink: true }}
+          sx={{ minWidth: 160 }}
+        />
+        <TextField
+          label="Máx. resgates"
+          type="number"
+          size="small"
+          value={form.maxRedemptions ?? ""}
+          onChange={(e) => setForm({ ...form, maxRedemptions: e.target.value ? Number(e.target.value) : null })}
+          sx={{ minWidth: 140 }}
+        />
+      </Stack>
+      <Button variant="contained" sx={{ mt: 2 }} disabled={saving || !form.code} onClick={handleSubmit}>
+        Criar cupom
+      </Button>
+    </Paper>
+  );
+}
+
+function CouponsSection({ canEdit }: { canEdit: boolean }) {
+  const [coupons, setCoupons] = useState<DiscountCoupon[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function reload() {
+    try {
+      setCoupons(await marketingAdminApi.listCoupons());
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    void reload();
+  }, []);
+
+  async function toggleActive(coupon: DiscountCoupon) {
+    try {
+      const updated = await marketingAdminApi.updateCoupon(coupon.id, { active: !coupon.active });
+      setCoupons((prev) => prev?.map((c) => (c.id === updated.id ? updated : c)) ?? null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  return (
+    <Box sx={{ mb: 4 }}>
+      <Typography variant="h6" sx={{ mb: 2 }}>
+        Cupons de desconto (globais)
+      </Typography>
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+      )}
+      {canEdit && <CouponForm onCreated={(c) => setCoupons((prev) => [c, ...(prev ?? [])])} />}
+      {coupons && (
+        <TableContainer component={Paper}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Código</TableCell>
+                <TableCell>Desconto</TableCell>
+                <TableCell>Escopo</TableCell>
+                <TableCell align="right">Resgates</TableCell>
+                <TableCell>Validade</TableCell>
+                <TableCell>Status</TableCell>
+                {canEdit && <TableCell align="right">Ações</TableCell>}
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {coupons.map((coupon) => (
+                <TableRow key={coupon.id}>
+                  <TableCell>{coupon.code}</TableCell>
+                  <TableCell>
+                    {coupon.discountType === "PERCENTAGE" ? `${coupon.discountValue}%` : `R$ ${coupon.discountValue}`}
+                  </TableCell>
+                  <TableCell>
+                    {coupon.scopeType}
+                    {coupon.scopeReferenceId ? ` (${coupon.scopeReferenceId})` : ""}
+                  </TableCell>
+                  <TableCell align="right">
+                    {coupon.redemptionCount}
+                    {coupon.maxRedemptions ? ` / ${coupon.maxRedemptions}` : ""}
+                  </TableCell>
+                  <TableCell>
+                    {new Date(coupon.validFrom).toLocaleDateString("pt-BR")} — {new Date(coupon.validUntil).toLocaleDateString("pt-BR")}
+                  </TableCell>
+                  <TableCell>
+                    <Chip size="small" color={coupon.active ? "success" : "default"} label={coupon.active ? "Ativo" : "Inativo"} />
+                  </TableCell>
+                  {canEdit && (
+                    <TableCell align="right">
+                      <Button size="small" onClick={() => toggleActive(coupon)}>
+                        {coupon.active ? "Desativar" : "Ativar"}
+                      </Button>
+                    </TableCell>
+                  )}
+                </TableRow>
+              ))}
+              {coupons.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={canEdit ? 7 : 6}>Nenhum cupom cadastrado.</TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      )}
+    </Box>
+  );
+}
+
+function ReferralsSection({ canEdit }: { canEdit: boolean }) {
+  const [referrals, setReferrals] = useState<Referral[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function reload() {
+    try {
+      setReferrals(await marketingAdminApi.listReferrals());
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    void reload();
+  }, []);
+
+  async function handleConvert(id: string) {
+    try {
+      const updated = await marketingAdminApi.convertReferral(id);
+      setReferrals((prev) => prev?.map((r) => (r.id === id ? updated : r)) ?? null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleReward(id: string) {
+    try {
+      const updated = await marketingAdminApi.applyReferralReward(id);
+      setReferrals((prev) => prev?.map((r) => (r.id === id ? updated : r)) ?? null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  return (
+    <Box>
+      <Typography variant="h6" sx={{ mb: 2 }}>
+        Indicações (programa de referral)
+      </Typography>
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+      )}
+      {referrals && (
+        <TableContainer component={Paper}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Indicado por</TableCell>
+                <TableCell>Tenant indicado</TableCell>
+                <TableCell>Status</TableCell>
+                <TableCell>Expira em</TableCell>
+                <TableCell>Recompensa</TableCell>
+                {canEdit && <TableCell align="right">Ações</TableCell>}
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {referrals.map((referral) => (
+                <TableRow key={referral.id}>
+                  <TableCell>{referral.referralCode.tenant.tradeName} ({referral.referralCode.code})</TableCell>
+                  <TableCell>{referral.referredTenant?.tradeName ?? "—"}</TableCell>
+                  <TableCell>
+                    <Chip size="small" color={REFERRAL_STATUS_COLOR[referral.status]} label={referral.status} />
+                  </TableCell>
+                  <TableCell>{new Date(referral.expiresAt).toLocaleDateString("pt-BR")}</TableCell>
+                  <TableCell>{referral.rewardAppliedAt ? new Date(referral.rewardAppliedAt).toLocaleDateString("pt-BR") : "—"}</TableCell>
+                  {canEdit && (
+                    <TableCell align="right">
+                      {referral.status === "PENDING" && (
+                        <Button size="small" onClick={() => handleConvert(referral.id)}>
+                          Marcar convertida
+                        </Button>
+                      )}
+                      {referral.status === "CONVERTED" && !referral.rewardAppliedAt && (
+                        <Button size="small" onClick={() => handleReward(referral.id)}>
+                          Aplicar recompensa
+                        </Button>
+                      )}
+                    </TableCell>
+                  )}
+                </TableRow>
+              ))}
+              {referrals.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={canEdit ? 6 : 5}>Nenhuma indicação registrada.</TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      )}
+    </Box>
+  );
+}
+
+export function MarketingAdminPage() {
+  const { admin } = usePlatformAdminAuth();
+  // requireSuperAdmin no backend é a garantia real; a UI só esconde ações de
+  // escrita para quem sabidamente não tem a role (mesmo padrão de InfrastructureSettingsPage).
+  const canEdit = admin?.role === "SUPER_ADMIN";
+
+  return (
+    <Box sx={{ p: 3, maxWidth: 1200, mx: "auto" }}>
+      <Typography variant="h5" sx={{ mb: 1 }}>
+        Marketing
+      </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+        Cupons de desconto globais e conversão/recompensa do programa de indicação entre tenants.
+      </Typography>
+      <CouponsSection canEdit={canEdit} />
+      <ReferralsSection canEdit={canEdit} />
+    </Box>
+  );
+}

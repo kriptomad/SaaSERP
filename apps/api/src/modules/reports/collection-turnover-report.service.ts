@@ -6,7 +6,7 @@
 // (`Product.collectionTag`, adicionado nesta mesma rodada) nem o relatório existiam.
 // Reaproveita o mesmo padrão de agregação de `abc-curve-report.service.ts`
 // (groupBy SaleItem→Product, filtrado por Sale.status=PAID/createdAt).
-import { Prisma, PrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedPrismaClient } from "@filitech/db";
 
 export interface CollectionProductRow {
   productId: string;
@@ -43,7 +43,7 @@ export interface CollectionTurnoverReport {
 const CLEARANCE_RATIO = 0.4;
 
 export async function buildCollectionTurnoverReport(
-  prisma: PrismaClient,
+  prisma: TenantScopedPrismaClient,
   tenantId: string,
   days: number,
 ): Promise<CollectionTurnoverReport> {

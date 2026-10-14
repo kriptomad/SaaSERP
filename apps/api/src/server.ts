@@ -29,7 +29,9 @@ import { comandaRouter } from "./modules/comanda/comanda.routes";
 import { publicBookingRouter } from "./modules/public-booking/public-booking.routes";
 import { clientRecordsRouter } from "./modules/client-records/client-records.routes";
 import { platformAdminAuthRouter } from "./modules/platform-admin/platform-admin-auth.routes";
+import { platformAdminAuthMiddleware } from "./modules/platform-admin/platform-admin-auth.middleware";
 import { platformAdminRouter } from "./modules/platform-admin/platform-admin.routes";
+import { platformSecretsRouter } from "./modules/platform-admin/platform-secrets.routes";
 import { fiscalCodeCatalogRouter } from "./modules/fiscal/fiscal-code-catalog.routes";
 import { ibsCbsRegimeElectionRouter } from "./modules/fiscal/ibs-cbs-regime-election.routes";
 import { cashRegisterRouter } from "./modules/cash-register/cash-register.routes";
@@ -37,10 +39,12 @@ import { notificationsRouter } from "./modules/notifications/notifications.route
 import { clientsRouter } from "./modules/clients/clients.routes";
 import { suppliersRouter } from "./modules/suppliers/suppliers.routes";
 import { workOrdersRouter } from "./modules/work-orders/work-orders.routes";
+import { storageRouter } from "./modules/storage/storage.routes";
 import { recipesRouter } from "./modules/recipes/recipes.routes";
 import { stockRouter } from "./modules/stock/stock.routes";
 import { financialRouter } from "./modules/financial/financial.routes";
 import { bankReconciliationRouter } from "./modules/financial/bank-reconciliation.routes";
+import { pluggyWebhookRouter } from "./modules/financial/pluggy-webhook.routes";
 import { reportsRouter } from "./modules/reports/reports.routes";
 import { accountingOfficeRouter } from "./modules/accounting-office/accounting-office.routes";
 import { loyaltyRouter } from "./modules/loyalty/loyalty.routes";
@@ -66,11 +70,32 @@ import { healthInsurancePlansRouter } from "./modules/optical/health-insurance-p
 import { healthInsuranceBillingRouter } from "./modules/optical/health-insurance-billing.routes";
 import { prismaUnscoped } from "@filitech/db";
 import { redis } from "./lib/redis";
+import { getPlatformSecret } from "./lib/platform-secrets";
 
 const app = express();
 
 app.use(helmet());
-app.use(cors({ origin: process.env.CORS_ORIGIN?.split(",") ?? "*", credentials: true }));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      getPlatformSecret("CORS_ORIGIN")
+        .then((raw) => {
+          const allowedOrigins = raw?.split(",") ?? null;
+          if (!allowedOrigins) {
+            // Sem valor configurado (nem no painel, nem via env) — libera qualquer
+            // origem (*), igual ao comportamento histórico pré-painel admin.
+            return callback(null, true);
+          }
+          if (!origin || allowedOrigins.includes(origin)) {
+            return callback(null, true);
+          }
+          return callback(new Error("Origem não permitida pela política de CORS."));
+        })
+        .catch((err) => callback(err as Error));
+    },
+    credentials: true,
+  }),
+);
 
 // Webhooks de billing — montados ANTES do express.json() global porque o Stripe
 // exige o corpo bruto (Buffer) para validar a assinatura HMAC (Capítulo 2.7/20.1).
@@ -78,9 +103,11 @@ app.use(cors({ origin: process.env.CORS_ORIGIN?.split(",") ?? "*", credentials: 
 app.use("/webhooks/stripe", express.raw({ type: "application/json" }));
 app.use("/webhooks/asaas", express.json({ limit: "2mb" }));
 app.use("/webhooks/ifood", express.raw({ type: "application/json" }));
+app.use("/webhooks/pluggy", express.json({ limit: "2mb" }));
 app.use(stripeWebhookRouter);
 app.use(asaasWebhookRouter);
 app.use(ifoodWebhookRouter);
+app.use(pluggyWebhookRouter);
 
 app.use(express.json({ limit: "2mb" }));
 
@@ -120,7 +147,9 @@ app.use(publicBookingRouter);
 // authMiddleware/tenantContextMiddleware/tenantLockoutMiddleware abaixo são no-ops
 // quando não há req.session de tenant, então esta rota segue sem qualquer tenant.
 app.use(platformAdminAuthRouter);
+app.use(platformAdminAuthMiddleware);
 app.use(platformAdminRouter);
+app.use(platformSecretsRouter);
 
 // A partir daqui, toda rota é tenant-aware: auth -> contexto de tenant -> lockout -> requireAuth.
 app.use(authMiddleware);
@@ -153,6 +182,7 @@ app.use(notificationsRouter);
 app.use(clientsRouter);
 app.use(suppliersRouter);
 app.use(workOrdersRouter);
+app.use(storageRouter);
 app.use(recipesRouter);
 app.use(stockRouter);
 app.use(financialRouter);

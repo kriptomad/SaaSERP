@@ -13,7 +13,7 @@
 import { randomBytes } from "node:crypto";
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { prisma, prismaUnscoped } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { isTenantStorageKey } from "../../lib/storage-key";
 import {
@@ -337,7 +337,10 @@ workOrdersRouter.post("/work-orders/:id/budget", requireAuth, async (req: Reques
  */
 workOrdersRouter.post("/work-orders/budget-approval/:token", async (req: Request, res: Response) => {
   try {
-    const workOrder = await approveBudget(prisma as any, req.params.token);
+    // `prismaUnscoped`: esta rota é pública (sem sessão de tenant), então o client
+    // tenant-scoped (`prisma`) lançaria por falta de AsyncLocalStorage — ver
+    // comentário de auditoria em `approve-budget.service.ts`.
+    const workOrder = await approveBudget(prismaUnscoped, req.params.token);
     return res.json({ success: true, data: workOrder, error: null });
   } catch (error) {
     if (error instanceof BudgetExpiredError) {

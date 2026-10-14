@@ -14,7 +14,7 @@
 //     por assento de usuário), que é um terceiro conceito independente.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma, TenantLicenseStatus } from "@filitech/db";
+import { prisma, TenantLicenseStatus } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { isTenantLocked } from "../../middlewares/tenant-lockout.middleware";
 import { getOfflineTokenValidityDays, signLicenseToken, verifyLicenseToken } from "./license-token.service";
@@ -160,7 +160,7 @@ licensingRouter.post("/licensing/activate", requireAuth, async (req: Request, re
       ? []
       : (await prisma.tenantModule.findMany({ where: { tenantId, active: true }, select: { moduleCode: true } })).map((m) => m.moduleCode);
 
-  const validityDays = getOfflineTokenValidityDays();
+  const validityDays = await getOfflineTokenValidityDays();
   const now = new Date();
   const offlineTokenExpiresAt = new Date(now.getTime() + validityDays * 24 * 60 * 60 * 1000);
 
@@ -240,6 +240,45 @@ licensingRouter.post("/licensing/validate", async (req: Request, res: Response) 
       error: null,
     });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST /licensing/activations/:id/revoke — Gap de auditoria fechado: o Owner via
+// perder/ter um dispositivo roubado e precisa invalidar o token offline cacheado
+// ali imediatamente. Marca `revokedAt` (já consultado por `/licensing/validate` só
+// de forma indireta — o token RS256 continua válido até expirar, então a revogação
+// efetiva de verdade é feita no próximo refresh online, igual ao Capítulo 2.10.4).
+// Para forçar a invalidação mesmo offline antes da expiração do token, a próxima
+// chamada de `/licensing/activate` deste mesmo `deviceFingerprint` é bloqueada com
+// DEVICE_REVOKED, e o dispositivo não recebe mais tokens novos.
+// ─────────────────────────────────────────────────────────────────────────
+licensingRouter.post("/licensing/activations/:id/revoke", requireAuth, async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "licensing:license:manage"))) {
+    return forbidden(res, "Seu nível de acesso não permite revogar dispositivos da licença mestra deste tenant.");
+  }
+
+  const license = await prisma.tenantLicense.findUnique({ where: { tenantId } });
+  if (!license) {
+    return res.status(404).json({ success: false, data: null, error: { code: "LICENSE_NOT_PROVISIONED", message: "Nenhuma licença mestra encontrada para este tenant." } });
+  }
+
+  const activation = await prisma.licenseActivation.findFirst({
+    where: { id: req.params.id, tenantLicenseId: license.id },
+  });
+  if (!activation) {
+    return res.status(404).json({ success: false, data: null, error: { code: "ACTIVATION_NOT_FOUND", message: "Dispositivo não encontrado nesta licença." } });
+  }
+  if (activation.revokedAt) {
+    return res.json({ success: true, data: { id: activation.id, revokedAt: activation.revokedAt }, error: null });
+  }
+
+  const updated = await prisma.licenseActivation.update({
+    where: { id: activation.id },
+    data: { revokedAt: new Date() },
+  });
+
+  return res.json({ success: true, data: { id: updated.id, revokedAt: updated.revokedAt }, error: null });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

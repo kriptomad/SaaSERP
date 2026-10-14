@@ -7,9 +7,10 @@ import type {
   BackendState,
   HealthPingResult,
   LicenseCache,
+  TenantSessionCache,
 } from "../../electron/ipc-contract";
 
-export type { DesktopConfig, NetworkConfig, BackendState, HealthPingResult, LicenseCache };
+export type { DesktopConfig, NetworkConfig, BackendState, HealthPingResult, LicenseCache, TenantSessionCache };
 
 export interface FilitechDesktopBridge {
   config: {
@@ -30,9 +31,13 @@ export interface FilitechDesktopBridge {
     chooseFolder(): Promise<string | null>;
   };
   license: {
-    activate(payload: { licenseKey: string }): Promise<LicenseCache | { error: string }>;
-    trial(payload: { tenantSlug: string; email: string }): Promise<LicenseCache | { error: string }>;
+    activate(): Promise<LicenseCache | { error: string }>;
+    trial(): Promise<LicenseCache | { error: string }>;
     status(): Promise<{ valid: boolean; offline: boolean; license: LicenseCache | null }>;
+  };
+  auth: {
+    login(payload: { tenantSlug: string; email: string; password: string }): Promise<TenantSessionCache | { error: string }>;
+    logout(): Promise<void>;
   };
   window: {
     openErp(apiBaseUrl: string): Promise<void>;

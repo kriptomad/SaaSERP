@@ -8,7 +8,7 @@
 // com o padrão de hashing argon2id já adotado em todo o resto do sistema (password.service.ts,
 // Capítulo 3.5). A implementação real usa argon2id, nunca uma segunda biblioteca de hash.
 import argon2 from "argon2";
-import { PrismaClient } from "@filitech/db";
+import { TenantScopedPrismaClient } from "@filitech/db";
 import { enforceRateLimit, resetRateLimit } from "../../lib/rate-limit";
 
 const ARGON2_OPTIONS: argon2.Options = { type: argon2.argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 };
@@ -17,7 +17,7 @@ export class InvalidManagerPinFormatError extends Error {}
 export class ManagerPinNotConfiguredError extends Error {}
 export class InvalidManagerPinError extends Error {}
 
-export async function setManagerPin(prisma: PrismaClient, userId: string, rawPin: string) {
+export async function setManagerPin(prisma: TenantScopedPrismaClient, userId: string, rawPin: string) {
   if (!/^\d{4,6}$/.test(rawPin)) {
     throw new InvalidManagerPinFormatError("O PIN deve conter de 4 a 6 dígitos numéricos.");
   }
@@ -25,7 +25,7 @@ export async function setManagerPin(prisma: PrismaClient, userId: string, rawPin
   return prisma.user.update({ where: { id: userId }, data: { managerPinHash } });
 }
 
-export async function verifyManagerPin(prisma: PrismaClient, userId: string, rawPin: string): Promise<true> {
+export async function verifyManagerPin(prisma: TenantScopedPrismaClient, userId: string, rawPin: string): Promise<true> {
   // Mesmo padrão de lockout por tentativas do login (Capítulo 14.3): 3 tentativas
   // erradas em 5 minutos bloqueiam novas tentativas de PIN para o usuário por 5
   // minutos, independente de bloqueio de senha.

@@ -23,6 +23,7 @@ import { licensingApi, LICENSE_STATUS_LABEL } from "./api";
 import { Page, PageHeader, QueryState, errorMessage } from "../../shared/ui/PageLayout";
 import { useToast } from "../../shared/ui/Toast";
 import { formatDateTime } from "../../shared/ui/format";
+import { ConfirmDialog } from "../../shared/ui/ConfirmDialog";
 
 const STATUS_COLOR: Record<string, "success" | "warning" | "error" | "default"> = {
   TRIAL: "warning",
@@ -35,6 +36,7 @@ export function LicensingPage() {
   const toast = useToast();
   const queryClient = useQueryClient();
   const [trialError, setTrialError] = useState<string | null>(null);
+  const [activationToRevoke, setActivationToRevoke] = useState<{ id: string; label: string } | null>(null);
 
   const query = useQuery({ queryKey: ["licensing-status"], queryFn: licensingApi.getStatus });
 
@@ -45,6 +47,19 @@ export function LicensingPage() {
       toast.success("Trial de 15 dias ativado para este tenant.");
     },
     onError: (error) => setTrialError(errorMessage(error)),
+  });
+
+  const revoke = useMutation({
+    mutationFn: (id: string) => licensingApi.revokeActivation(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["licensing-status"] });
+      toast.success("Dispositivo revogado. Ele deixará de receber tokens offline novos na próxima ativação.");
+      setActivationToRevoke(null);
+    },
+    onError: (error) => {
+      toast.error(errorMessage(error));
+      setActivationToRevoke(null);
+    },
   });
 
   return (
@@ -153,6 +168,7 @@ export function LicensingPage() {
                           <TableCell>Ativado em</TableCell>
                           <TableCell>Última vez visto</TableCell>
                           <TableCell>Status</TableCell>
+                          <TableCell align="right">Ações</TableCell>
                         </TableRow>
                       </TableHead>
                       <TableBody>
@@ -165,6 +181,17 @@ export function LicensingPage() {
                             <TableCell>
                               {a.revokedAt ? <Chip size="small" color="error" label="Revogado" /> : <Chip size="small" color="success" label="Ativo" />}
                             </TableCell>
+                            <TableCell align="right">
+                              {!a.revokedAt && (
+                                <Button
+                                  size="small"
+                                  color="error"
+                                  onClick={() => setActivationToRevoke({ id: a.id, label: a.deviceLabel ?? a.deviceFingerprint })}
+                                >
+                                  Revogar
+                                </Button>
+                              )}
+                            </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
@@ -176,6 +203,19 @@ export function LicensingPage() {
           </Stack>
         )}
       </QueryState>
+      <ConfirmDialog
+        open={activationToRevoke !== null}
+        title="Revogar dispositivo"
+        message={
+          activationToRevoke
+            ? `Revogar "${activationToRevoke.label}"? Este dispositivo deixará de receber novos tokens offline na próxima tentativa de ativação. Um token já emitido e cacheado permanece válido até sua expiração natural (padrão: 7 dias).`
+            : ""
+        }
+        confirmLabel="Revogar"
+        busy={revoke.isPending}
+        onConfirm={() => activationToRevoke && revoke.mutate(activationToRevoke.id)}
+        onClose={() => setActivationToRevoke(null)}
+      />
     </Page>
   );
 }

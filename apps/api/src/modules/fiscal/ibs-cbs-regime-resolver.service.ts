@@ -4,10 +4,10 @@
 // o Simples Nacional pode eleger apurar IBS/CBS "por fora" do DAS (REGULAR_COM_CREDITO)
 // em vez do padrão embutido no DAS (EMBUTIDO_NO_DAS). Fora do Simples, não existe
 // eleição: Lucro Presumido/Real já apuram no regime regular por definição legal.
-import { Prisma, PrismaClient, type IbsCbsRegimeOptante } from "@filitech/db";
+import { TenantScopedPrismaClient, type IbsCbsRegimeOptante } from "@filitech/db";
 
 export async function resolveIbsCbsRegimeForTenant(
-  prisma: PrismaClient | Prisma.TransactionClient,
+  prisma: TenantScopedPrismaClient,
   tenantId: string,
   saleDate: Date,
 ): Promise<IbsCbsRegimeOptante> {

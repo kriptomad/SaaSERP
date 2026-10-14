@@ -4,20 +4,28 @@
 // Iniciado via `npm run worker` (ver package.json), nunca dentro do processo do Express.
 import "dotenv/config";
 import { startSuspendOverdueTenantsWorker, scheduleSuspendOverdueTenantsJob } from "./workers/suspend-overdue-tenants.worker";
+import { startFiscalEmissionWorker } from "./workers/fiscal-emission.worker";
+import { startWhatsAppNotificationsWorker } from "./workers/whatsapp-notifications.worker";
+import { startPluggySyncWorker } from "./workers/pluggy-sync.worker";
 
 async function main() {
   const suspendOverdueTenantsWorker = startSuspendOverdueTenantsWorker();
   await scheduleSuspendOverdueTenantsJob();
+  const fiscalEmissionWorker = startFiscalEmissionWorker();
+  const whatsappNotificationsWorker = startWhatsAppNotificationsWorker();
+  const pluggySyncWorker = startPluggySyncWorker();
 
-  suspendOverdueTenantsWorker.on("completed", (job) => {
-    // eslint-disable-next-line no-console
-    console.log(`[worker:${job.queueName}] job ${job.id} concluído:`, job.returnvalue);
-  });
+  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker]) {
+    worker.on("completed", (job) => {
+      // eslint-disable-next-line no-console
+      console.log(`[worker:${job.queueName}] job ${job.id} concluído:`, job.returnvalue);
+    });
 
-  suspendOverdueTenantsWorker.on("failed", (job, error) => {
-    // eslint-disable-next-line no-console
-    console.error(`[worker:${job?.queueName}] job ${job?.id} falhou:`, error);
-  });
+    worker.on("failed", (job, error) => {
+      // eslint-disable-next-line no-console
+      console.error(`[worker:${job?.queueName}] job ${job?.id} falhou:`, error);
+    });
+  }
 
   // eslint-disable-next-line no-console
   console.log("[filitech-worker] processo de filas BullMQ iniciado.");

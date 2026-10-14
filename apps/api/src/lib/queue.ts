@@ -28,6 +28,11 @@ export const QUEUE_NAMES = {
   NFE_XML_INGESTION: "nfe-xml-ingestion",
   REPORT_GENERATION: "report-generation",
   SUSPEND_OVERDUE_TENANTS: "suspend-overdue-tenants",
+  // Capítulo 17.4.1/22.5 — sincronização automática real via Pluggy (Open Finance):
+  // consumida por `workers/pluggy-sync.worker.ts`, produzida pelo webhook `item/updated`
+  // (`modules/financial/pluggy-webhook.routes.ts`) e pelas rotas de "sincronizar agora"
+  // (business `bank-reconciliation.routes.ts` / pessoal `personal-planning.routes.ts`).
+  PLUGGY_SYNC: "pluggy-sync",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -43,3 +48,5 @@ export const reportGenerationQueue = new Queue(QUEUE_NAMES.REPORT_GENERATION, { 
 export const suspendOverdueTenantsQueue = new Queue(QUEUE_NAMES.SUSPEND_OVERDUE_TENANTS, {
   connection: queueRedisConnection,
 });
+
+export const pluggySyncQueue = new Queue(QUEUE_NAMES.PLUGGY_SYNC, { connection: queueRedisConnection });

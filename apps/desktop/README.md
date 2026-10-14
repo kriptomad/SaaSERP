@@ -61,29 +61,43 @@ Isso exigiu uma pequena extensão em `apps/web/src/api/client.ts`
 Redis (BullMQ) segue a mesma lógica: requer uma instância acessível via `REDIS_URL`
 (local via WSL/Memurai no Windows, ou remota). Não foi embutido nesta versão.
 
-## Licenciamento (ativação + trial + cache offline)
+## Licenciamento (login + ativação + trial + cache offline)
 
-Consome o contrato de `apps/api/src/modules/licensing/`
-(`POST /licensing/activate`, `POST /licensing/trial`, `GET /licensing/status`),
-construído em paralelo por outro agente ("license-system"). **Na data desta
-implementação essas rotas ainda não existem no backend** — `main.ts` já está preparado
-para consumi-las (`activateLicense`/`startTrial`/`checkLicenseStatus`), mas qualquer
-chamada hoje retorna 404, e a tela de licenciamento mostra esse aviso com um botão
-"Prosseguir mesmo assim" para não travar o onboarding (`onboardingComplete` é marcado
-verdadeiro mesmo sem uma licença real cacheada). Assim que o módulo `license-system`
-publicar as rotas, o fluxo passa a funcionar sem nenhuma mudança de código aqui.
+Consome o contrato REAL de `apps/api/src/modules/licensing/licensing.routes.ts`
+(`POST /licensing/trial`, `POST /licensing/activate`, `GET /licensing/status`), que
+exige sessão autenticada (`requireAuth`) — a licença mestra é sempre consultada no
+contexto de um usuário de sistema já logado do tenant (Capítulo 2.10). Por isso a tela
+de licenciamento (`LicenseActivation.tsx`) tem dois estágios reais:
 
-Fluxo de resolução da API alvo para a chamada de licenciamento:
+1. **Login** (`POST /auth/login`, o MESMO endpoint usado pelo `apps/web`): slug + e-mail
+   + senha de qualquer usuário do tenant (Owner ou funcionário criado por ele). O JWT
+   retornado é cacheado em `electron-store` (`config-store.ts`, chave `session`).
+2. **Trial ou Ativação**: com a sessão já autenticada, `POST /licensing/trial` concede o
+   trial de 15 dias (uma única vez por tenant) e, em seguida, já chama
+   `POST /licensing/activate` automaticamente para emitir o token offline deste
+   dispositivo (`deviceFingerprint` = UUID estável gerado e persistido localmente,
+   `config-store.ts` chave `deviceId`). "Ativar este dispositivo" chama
+   `/licensing/activate` diretamente (licença mestra já paga/ativa).
+
+O token offline é cacheado via `electron-store` (chave `license`), nunca em
+`localStorage` do renderer. `checkLicenseStatus` tenta revalidar contra
+`GET /licensing/status` (com o JWT de sessão) quando há rede; se falhar (offline, sem
+sessão, ou backend fora do ar), cai para validação 100% local comparando
+`license.offlineTokenExpiresAt` com a data atual.
+
+**SSO para a janela do ERP:** a mesma sessão (`TenantSessionCache`, shape idêntico ao
+`AuthResponse` de `apps/web/src/api/client.ts`) é repassada para a `BrowserWindow` do
+`apps/web` via `?sso=<base64url JSON>` quando `window:open-erp` é chamado — o usuário
+loga uma única vez no shell desktop e nunca precisa logar de novo na janela do ERP.
+`apps/web/src/api/client.ts` (`consumeSsoFromQuery`) decodifica esse parâmetro no boot,
+grava o token/tenant/user e remove o parâmetro da URL imediatamente (nunca fica visível
+na barra de endereço).
+
+Fluxo de resolução da API alvo para login/licenciamento/ERP (todas as chamadas):
 1. Modo HOST → backend local (`http://127.0.0.1:<porta>`).
 2. Modo CLIENT → o host configurado pelo usuário.
 3. Nenhum modo ainda escolhido → API central na nuvem (`FILITECH_CLOUD_API_URL`, default
    `https://api.filitech.com.br` — ajustar para o domínio real de produção).
-
-O token retornado é cacheado via `electron-store` (`config-store.ts`, chave `license`),
-nunca em `localStorage` do renderer. `checkLicenseStatus` tenta revalidar contra
-`GET /licensing/status` quando há rede; se falhar (offline ou backend fora do ar), cai
-para validação 100% local comparando `license.expiresAt` com a data atual — exatamente o
-"uso offline dentro da janela de validade do token" pedido.
 
 ## Contingência de venda offline
 

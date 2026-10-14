@@ -1,10 +1,19 @@
 // apps/api/src/modules/notifications/notify.service.ts
 // Sistema central de notificações real (Capítulo 8.4) — grava direto no banco
-// (model Notification). O fan-out multicanal (WhatsApp/e-mail/push) descrito no
-// Capítulo 20.2/20.8 é consumido por um worker BullMQ dedicado (próxima fase);
-// esta função é o ÚNICO ponto de entrada usado por todo o resto do sistema, então
-// quando o worker for acoplado, nenhum chamador precisa mudar.
+// (model Notification) e, quando há um usuário-alvo específico, dispara o fan-out
+// multicanal real (WhatsApp/e-mail/push) descrito no Capítulo 20.2/20.8, respeitando
+// a `NotificationPreference` do usuário. `notifyTenant()` é o ÚNICO ponto de entrada
+// usado por todo o resto do sistema.
+//
+// GAP DE AUDITORIA FECHADO: esta função só gravava a Notification e nunca enviava
+// nada de verdade — havia inclusive uma fila BullMQ (`whatsappNotificationsQueue`,
+// lib/queue.ts) declarada mas sem nenhum produtor. Agora: WhatsApp é enfileirado (job
+// assíncrono, retry/backoff via BullMQ, mesmo padrão de enqueueFiscalEmission), e-mail
+// e push são disparados direto (fire-and-forget, nunca bloqueiam o caller).
 import { prismaUnscoped } from "@filitech/db";
+import { whatsappNotificationsQueue } from "../../lib/queue";
+import { sendTransactionalEmail } from "./channels/email.channel";
+import { sendExpoPushNotifications } from "./channels/push.channel";
 
 export interface NotifyTenantInput {
   tenantId: string;
@@ -27,8 +36,92 @@ export interface NotifyTenantInput {
   sourceId?: string;
 }
 
+// Mesmos defaults de notification-settings.routes.ts para categorias ainda sem linha
+// de NotificationPreference (upsert nunca aconteceu para aquele usuário/categoria).
+const DEFAULT_CHANNELS = { inApp: true, email: true, push: false, whatsapp: false };
+
+// Categoria de NotificationPreference não inclui VACCINE_REMINDER (catálogo mais
+// restrito, só as categorias expostas em /notification-preferences); quando
+// `notifyTenant` recebe essa categoria o fan-out multicanal é pulado silenciosamente
+// (o in-app continua gravado normalmente) — nunca falha por categoria desconhecida.
+const PREFERENCE_CATEGORIES = new Set([
+  "WORK_ORDER_STATUS",
+  "SUPPORT_TICKET_UPDATE",
+  "CASH_FLOW_ALERT",
+  "BILLING_DUNNING",
+  "ACCOUNTING_TASK_REMINDER",
+  "STOCK_LOW",
+  "FISCAL_DOCUMENT_REJECTED",
+  "SYSTEM_ANNOUNCEMENT",
+]);
+
+async function enqueueWhatsAppJob(tenantId: string, toPhone: string, body: string): Promise<void> {
+  try {
+    // Mesmo padrão de attempts/backoff usado por enqueueFiscalEmission
+    // (modules/fiscal/queues/fiscal-emission.queue.ts): 5 tentativas, backoff
+    // exponencial a partir de 5s.
+    await whatsappNotificationsQueue.add(
+      "send-whatsapp-notification",
+      { tenantId, toPhone, body },
+      { attempts: 5, backoff: { type: "exponential", delay: 5_000 }, removeOnComplete: true },
+    );
+  } catch (error) {
+    // Redis/BullMQ fora do ar nunca pode derrubar a transação de negócio do caller
+    // (ex.: fechar uma venda, aprovar uma OS) — loga e segue.
+    // eslint-disable-next-line no-console
+    console.error("[notify.service] falha ao enfileirar notificação WhatsApp:", (error as Error).message);
+  }
+}
+
+async function dispatchUserChannels(input: NotifyTenantInput): Promise<void> {
+  if (!input.userId || !PREFERENCE_CATEGORIES.has(input.category)) {
+    // Notificação tenant-wide (ex.: SYSTEM_ANNOUNCEMENT sem userId) — não há um único
+    // usuário para resolver canais/preferências; broadcast multicanal para todos os
+    // usuários do tenant é um escopo/feature diferente, fora do escopo desta função.
+    return;
+  }
+
+  const [preference, user, pushDevices] = await Promise.all([
+    prismaUnscoped.notificationPreference.findUnique({
+      where: { userId_category: { userId: input.userId, category: input.category as any } },
+    }),
+    prismaUnscoped.user.findUnique({ where: { id: input.userId }, select: { email: true, whatsappPhone: true } }),
+    prismaUnscoped.pushDeviceToken.findMany({
+      where: { userId: input.userId, revokedAt: null },
+      select: { expoPushToken: true },
+    }),
+  ]);
+  if (!user) return;
+
+  const channels = {
+    email: preference?.email ?? DEFAULT_CHANNELS.email,
+    push: preference?.push ?? DEFAULT_CHANNELS.push,
+    whatsapp: preference?.whatsapp ?? DEFAULT_CHANNELS.whatsapp,
+  };
+
+  if (channels.whatsapp && user.whatsappPhone) {
+    await enqueueWhatsAppJob(input.tenantId, user.whatsappPhone, `${input.title}\n\n${input.body}`);
+  }
+
+  if (channels.email) {
+    // Fire-and-forget: falha de entrega de e-mail nunca pode bloquear o caller.
+    sendTransactionalEmail(input.tenantId, user.email, input.title, `<p>${input.body}</p>`).catch((error) => {
+      // eslint-disable-next-line no-console
+      console.error("[notify.service] falha ao enviar e-mail de notificação:", (error as Error).message);
+    });
+  }
+
+  if (channels.push && pushDevices.length > 0) {
+    const tokens = pushDevices.map((d) => d.expoPushToken);
+    sendExpoPushNotifications(tokens, input.title, input.body, { linkRoute: input.linkRoute, category: input.category }).catch((error) => {
+      // eslint-disable-next-line no-console
+      console.error("[notify.service] falha ao enviar push de notificação:", (error as Error).message);
+    });
+  }
+}
+
 export async function notifyTenant(input: NotifyTenantInput) {
-  return prismaUnscoped.notification.create({
+  const notification = await prismaUnscoped.notification.create({
     data: {
       tenantId: input.tenantId,
       userId: input.userId ?? null,
@@ -41,6 +134,16 @@ export async function notifyTenant(input: NotifyTenantInput) {
       sourceId: input.sourceId,
     },
   });
+
+  // Fan-out multicanal nunca bloqueia nem derruba a criação da Notification acima —
+  // qualquer falha de canal (Redis fora do ar, provedor não configurado, etc.) é
+  // tratada e logada dentro de dispatchUserChannels/enqueueWhatsAppJob.
+  await dispatchUserChannels(input).catch((error) => {
+    // eslint-disable-next-line no-console
+    console.error("[notify.service] falha no fan-out multicanal:", (error as Error).message);
+  });
+
+  return notification;
 }
 
 // Capítulo 2.7.4 — notificação de falha de pagamento, disparada pela régua de dunning.

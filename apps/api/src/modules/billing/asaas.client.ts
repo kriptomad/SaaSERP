@@ -1,19 +1,28 @@
 // apps/api/src/modules/billing/asaas.client.ts
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 2.7.2 — chamadas HTTP reais à API do Asaas
 // (tokenização de cartão + assinatura recorrente), nunca mock/stub local.
-const ASAAS_BASE_URL = process.env.ASAAS_BASE_URL ?? "https://www.asaas.com/api/v3";
+import { getPlatformSecret } from "../../lib/platform-secrets";
 
-function asaasHeaders() {
+// URL base e API key resolvidas por chamada via painel admin → Infraestrutura (banco,
+// cifrado) com fallback para `process.env` (Capítulo 20.9) — nunca cacheadas em módulo,
+// já que uma troca pelo painel precisa valer na próxima requisição (cache de 15s em
+// `getPlatformSecret` já evita round-trip excessivo ao banco).
+async function resolveAsaasBaseUrl(): Promise<string> {
+  return (await getPlatformSecret("ASAAS_BASE_URL")) ?? "https://www.asaas.com/api/v3";
+}
+
+async function asaasHeaders() {
   return {
     "Content-Type": "application/json",
-    access_token: process.env.ASAAS_API_KEY ?? "",
+    access_token: (await getPlatformSecret("ASAAS_API_KEY")) ?? "",
   };
 }
 
 async function asaasRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${ASAAS_BASE_URL}${path}`, {
+  const baseUrl = await resolveAsaasBaseUrl();
+  const response = await fetch(`${baseUrl}${path}`, {
     ...init,
-    headers: { ...asaasHeaders(), ...init?.headers },
+    headers: { ...(await asaasHeaders()), ...init?.headers },
   });
   const body = await response.json();
   if (!response.ok) {

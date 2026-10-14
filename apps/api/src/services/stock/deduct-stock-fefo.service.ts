@@ -4,7 +4,7 @@
 // para bloquear fisicamente os lotes candidatos até o commit, evitando duas vendas
 // simultâneas deduzirem do mesmo lote (race condition) e bloqueando qualquer lote
 // já vencido (risco sanitário — compliance ANVISA).
-import { Prisma, PrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedPrismaClient, TenantScopedTransactionClient } from "@filitech/db";
 
 interface DeductStockFefoInput {
   tenantId: string;
@@ -21,7 +21,7 @@ export class InsufficientStockError extends Error {}
 // não existe no tipo do client interativo). Todo chamador que já está dentro de uma
 // transação (como closeSale, Capítulo 6.6) DEVE usar este núcleo diretamente, nunca o
 // wrapper autônomo abaixo.
-export async function deductStockFefoWithinTx(tx: Prisma.TransactionClient, input: DeductStockFefoInput) {
+export async function deductStockFefoWithinTx(tx: TenantScopedTransactionClient, input: DeductStockFefoInput) {
   // Lock pessimista nos lotes candidatos, ordenados pela validade mais próxima.
   // Raw query necessária pois Prisma não expõe FOR UPDATE nativamente.
   const batches = await tx.$queryRaw<{ id: string; quantity: Prisma.Decimal; expirationDate: Date }[]>`
@@ -82,7 +82,7 @@ export async function deductStockFefoWithinTx(tx: Prisma.TransactionClient, inpu
 // chamadores que ainda não estão dentro de uma transação (ex.: um ajuste manual de
 // estoque disparado isoladamente pelo painel). Qualquer chamador já dentro de uma
 // transação (como closeSale, Capítulo 6.6) usa deductStockFefoWithinTx diretamente.
-export async function deductStockFefo(prisma: PrismaClient, input: DeductStockFefoInput) {
+export async function deductStockFefo(prisma: TenantScopedPrismaClient, input: DeductStockFefoInput) {
   return prisma.$transaction((tx) => deductStockFefoWithinTx(tx, input), {
     isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
   });

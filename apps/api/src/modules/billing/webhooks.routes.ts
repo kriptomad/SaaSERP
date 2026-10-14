@@ -7,7 +7,8 @@
 import { Router, Request, Response } from "express";
 import crypto from "node:crypto";
 import { prismaUnscoped } from "@filitech/db";
-import { stripe } from "./stripe.client";
+import { getStripeClient } from "./stripe.client";
+import { getPlatformSecret } from "../../lib/platform-secrets";
 import { handlePaymentFailure, handlePaymentRecovered } from "./dunning.service";
 
 export const stripeWebhookRouter = Router();
@@ -34,12 +35,13 @@ async function releaseBillingEvent(provider: string, externalEventKey: string) {
 
 stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response) => {
   const signature = req.headers["stripe-signature"];
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const endpointSecret = await getPlatformSecret("STRIPE_WEBHOOK_SECRET");
 
   if (!signature || !endpointSecret) {
     return res.status(400).json({ error: { code: "MISSING_SIGNATURE" } });
   }
 
+  const stripe = await getStripeClient();
   let event: import("stripe").Stripe.Event;
   try {
     // req.body aqui é o Buffer bruto (ver middleware express.raw em server.ts) —
@@ -97,7 +99,7 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
 
 asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) => {
   const receivedToken = req.headers["asaas-access-token"] as string | undefined;
-  const expectedToken = process.env.ASAAS_WEBHOOK_TOKEN ?? "";
+  const expectedToken = (await getPlatformSecret("ASAAS_WEBHOOK_TOKEN")) ?? "";
 
   const receivedBuf = Buffer.from(receivedToken ?? "");
   const expectedBuf = Buffer.from(expectedToken);
