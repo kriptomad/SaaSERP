@@ -35,10 +35,15 @@ export function AppShell() {
   const { pathname } = useLocation();
   const { tenant, user, clearSession } = useAuth();
 
-  // Capítulo 4 — feature-flipping por nicho: NavItems com `moduleCode` só aparecem se
-  // o módulo estiver ativo para o tenant (ex.: WORK_ORDER, LIQUOR_LEDGER, RECIPE_BOM,
-  // PHARMACY_SNGPC). Itens sem `moduleCode` (Geral, Mercado, Varejo Geral etc.) ficam
-  // sempre visíveis — não há módulo pago dedicado para esses dois nichos (Capítulo 2.6).
+  // Capítulo 4/11 — feature-flipping por nicho: NavItems com `moduleCode`/`moduleCodes`
+  // só aparecem se o(s) módulo(s) correspondente(s) estiver(em) ativo(s) para o tenant
+  // (ex.: WORK_ORDER, OPTICAL_LAB, FASHION_VARIANTS). `moduleCodes` casa por "QUALQUER
+  // UM" (item compartilhado por mais de um nicho). Itens sem `moduleCode`/`moduleCodes`
+  // (Geral, Mercado, Varejo Geral etc.) ficam sempre visíveis — não há módulo pago
+  // dedicado para esses dois nichos (Capítulo 2.6). GAP DE AUDITORIA FECHADO: antes
+  // desta correção, vários NavItems de nicho (Ótica, Moda, Papelaria, Construção,
+  // Setor Automotivo, Prontuários, O.S./Agenda) não tinham `moduleCode` nenhum e por
+  // isso apareciam para QUALQUER tenant, mesmo sem o módulo contratado.
   const activeModulesQuery = useQuery({
     queryKey: ["billing", "active-modules"],
     queryFn: fetchActiveModules,
@@ -53,7 +58,11 @@ export function AppShell() {
   }))
     .map((g) => ({
       ...g,
-      items: g.items.filter((i) => !i.moduleCode || activeModuleCodes.includes(i.moduleCode)),
+      items: g.items.filter(
+        (i) =>
+          (!i.moduleCode || activeModuleCodes.includes(i.moduleCode)) &&
+          (!i.moduleCodes || i.moduleCodes.some((code) => activeModuleCodes.includes(code))),
+      ),
     }))
     .filter((g) => g.items.length > 0);
   // Seleciona apenas o item com o caminho correspondente mais longo (ex.: /estoque vs /estoque/contagens)

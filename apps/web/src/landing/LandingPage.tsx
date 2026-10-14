@@ -174,7 +174,7 @@ export function LandingPage() {
       <Box id="nichos" sx={{ bgcolor: (t) => alpha(t.palette.text.primary, 0.03), py: { xs: 8, md: 12 } }}>
         <Container maxWidth="lg">
           <motion.div {...fadeUp(0)}>
-            <Typography variant="overline" color="primary.main">Um sistema, seis especialidades</Typography>
+            <Typography variant="overline" color="primary.main">Um sistema, dezoito especialidades</Typography>
             <Typography variant="h4" fontWeight={700} sx={{ mb: 1 }}>
               Escolha seu nicho e veja exatamente o que está incluso
             </Typography>

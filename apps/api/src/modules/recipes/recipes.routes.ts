@@ -15,6 +15,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { produceRecipeBatch, MissingIngredientStockError, InvalidLossQuantityError } from "../../services/production/produce-recipe-batch.service";
 
 export const recipesRouter = Router();
@@ -27,7 +28,7 @@ async function hasPermission(role: string, userId: string, permissionCode: strin
   return override ? override.granted : Boolean(defaultGrant);
 }
 
-recipesRouter.get("/products/:productId/recipe", requireAuth, async (req: Request, res: Response) => {
+recipesRouter.get("/products/:productId/recipe", requireAuth, requireModule("RECIPE_BOM"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:product:read"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar fichas técnicas." } });
@@ -60,7 +61,7 @@ const upsertRecipeSchema = z.object({
  * todos os ingredientes), nunca item a item — evita o risco de o cliente
  * REST esquecer de remover um ingrediente antigo que não existe mais.
  */
-recipesRouter.put("/products/:productId/recipe", requireAuth, async (req: Request, res: Response) => {
+recipesRouter.put("/products/:productId/recipe", requireAuth, requireModule("RECIPE_BOM"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:product:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite editar fichas técnicas." } });
@@ -106,7 +107,7 @@ recipesRouter.put("/products/:productId/recipe", requireAuth, async (req: Reques
   return res.json({ success: true, data: recipe, error: null });
 });
 
-recipesRouter.get("/production-batches", requireAuth, async (req: Request, res: Response) => {
+recipesRouter.get("/production-batches", requireAuth, requireModule("RECIPE_BOM"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:movement:read"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar fornadas de produção." } });
@@ -138,7 +139,7 @@ const produceBatchSchema = z.object({
  * qualquer item de catálogo normal a partir daqui). `quantityLost` registra
  * perdas/quebras (Capítulo 4.4) via `StockMovement` tipo `LOSS`.
  */
-recipesRouter.post("/production-batches", requireAuth, async (req: Request, res: Response) => {
+recipesRouter.post("/production-batches", requireAuth, requireModule("RECIPE_BOM"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:movement:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite registrar produção." } });
@@ -181,7 +182,7 @@ recipesRouter.post("/production-batches", requireAuth, async (req: Request, res:
  * padaria 30%-38%, confeitaria 25%-33%, perda operacional saudável < 5%-6%)
  * confirma que este indicador não tinha nenhuma tela até aqui.
  */
-recipesRouter.get("/production-batches/loss-report", requireAuth, async (req: Request, res: Response) => {
+recipesRouter.get("/production-batches/loss-report", requireAuth, requireModule("RECIPE_BOM"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:movement:read"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar o relatório de perdas." } });

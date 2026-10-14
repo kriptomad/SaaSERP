@@ -20,6 +20,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const workOrderReportsRouter = Router();
 
@@ -62,7 +63,7 @@ async function resolveCommissionPercent(tenantId: string, technicianId: string):
   return rule ? Number(rule.commissionPercent) : 0;
 }
 
-workOrderReportsRouter.get("/work-order-reports/commissions", requireAuth, async (req: Request, res: Response) => {
+workOrderReportsRouter.get("/work-order-reports/commissions", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar comissões de técnicos.");
@@ -120,7 +121,7 @@ workOrderReportsRouter.get("/work-order-reports/commissions", requireAuth, async
   return res.json({ success: true, data: { from: from ?? null, to: to ?? null, technicians: rows }, error: null });
 });
 
-workOrderReportsRouter.get("/work-order-reports/commissions/rules", requireAuth, async (req: Request, res: Response) => {
+workOrderReportsRouter.get("/work-order-reports/commissions/rules", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar regras de comissão.");
@@ -139,7 +140,7 @@ const commissionRuleSchema = z.object({
   commissionPercent: z.number().min(0).max(100),
 });
 
-workOrderReportsRouter.put("/work-order-reports/commissions/rules", requireAuth, async (req: Request, res: Response) => {
+workOrderReportsRouter.put("/work-order-reports/commissions/rules", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:commission:manage"))) {
     return forbidden(res, "Seu nível de acesso não permite configurar comissões de técnicos.");
@@ -179,7 +180,7 @@ const warrantyCheckQuerySchema = z.object({
   serial: z.string().trim().min(1, "Informe o número de série ou IMEI."),
 });
 
-workOrderReportsRouter.get("/work-order-reports/warranty-check", requireAuth, async (req: Request, res: Response) => {
+workOrderReportsRouter.get("/work-order-reports/warranty-check", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar garantia de equipamentos.");
@@ -249,7 +250,7 @@ workOrderReportsRouter.get("/work-order-reports/warranty-check", requireAuth, as
 // taxa de retrabalho (ver nota no topo do arquivo).
 // ─────────────────────────────────────────────────────────────────────────
 
-workOrderReportsRouter.get("/work-order-reports/kpis", requireAuth, async (req: Request, res: Response) => {
+workOrderReportsRouter.get("/work-order-reports/kpis", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar indicadores de ordens de serviço.");

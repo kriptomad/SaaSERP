@@ -7,6 +7,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const healthInsurancePlansRouter = Router();
 
@@ -40,14 +41,14 @@ const planSchema = z.object({
   active: z.boolean().optional(),
 });
 
-healthInsurancePlansRouter.get("/health-insurance-plans", requireAuth, async (req: Request, res: Response) => {
+healthInsurancePlansRouter.get("/health-insurance-plans", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const plans = await prisma.healthInsurancePlan.findMany({ where: { tenantId }, orderBy: { name: "asc" } });
   return res.json({ success: true, data: plans, error: null });
 });
 
-healthInsurancePlansRouter.post("/health-insurance-plans", requireAuth, async (req: Request, res: Response) => {
+healthInsurancePlansRouter.post("/health-insurance-plans", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = planSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -61,7 +62,7 @@ healthInsurancePlansRouter.post("/health-insurance-plans", requireAuth, async (r
   }
 });
 
-healthInsurancePlansRouter.patch("/health-insurance-plans/:id", requireAuth, async (req: Request, res: Response) => {
+healthInsurancePlansRouter.patch("/health-insurance-plans/:id", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = planSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });

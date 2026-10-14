@@ -13,6 +13,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { notifyTenant } from "../notifications/notify.service";
 import { lookupVehicleByPlate } from "../integrations/vehicle-plate-lookup.service";
 
@@ -57,7 +58,7 @@ const petSchema = z.object({
   weightKg: z.number().positive().optional(),
 });
 
-clientRecordsRouter.get("/pets", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/pets", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const ownerId = req.query.ownerId as string | undefined;
@@ -65,7 +66,7 @@ clientRecordsRouter.get("/pets", requireAuth, async (req: Request, res: Response
   return res.json({ success: true, data: pets, error: null });
 });
 
-clientRecordsRouter.get("/pets/:id", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/pets/:id", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const pet = await prisma.pet.findFirst({ where: { id: req.params.id, tenantId }, include: { vaccineRecords: { orderBy: { appliedAt: "desc" } }, owner: { select: { id: true, name: true } } } });
@@ -79,7 +80,7 @@ clientRecordsRouter.get("/pets/:id", requireAuth, async (req: Request, res: Resp
 // do pet, mesmo padrão de "prontuário por cliente" já usado em Vehicle/
 // OpticalPrescription — GAP DE AUDITORIA FECHADO: os três históricos já existiam
 // individualmente, mas nenhuma tela/endpoint os consolidava).
-clientRecordsRouter.get("/pets/:id/crm-summary", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/pets/:id/crm-summary", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const pet = await prisma.pet.findFirst({ where: { id: req.params.id, tenantId }, include: { owner: { select: { id: true, name: true, phone: true, email: true } } } });
@@ -105,7 +106,7 @@ clientRecordsRouter.get("/pets/:id/crm-summary", requireAuth, async (req: Reques
   });
 });
 
-clientRecordsRouter.post("/pets", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.post("/pets", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = petSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -120,7 +121,7 @@ clientRecordsRouter.post("/pets", requireAuth, async (req: Request, res: Respons
   return res.status(201).json({ success: true, data: pet, error: null });
 });
 
-clientRecordsRouter.patch("/pets/:id", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.patch("/pets/:id", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = petSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -140,14 +141,14 @@ clientRecordsRouter.patch("/pets/:id", requireAuth, async (req: Request, res: Re
 
 const vaccineSchema = z.object({ vaccineName: z.string().min(1), appliedAt: z.string().datetime(), nextDoseDueAt: z.string().datetime().optional() });
 
-clientRecordsRouter.get("/pets/:petId/vaccine-records", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/pets/:petId/vaccine-records", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const records = await prisma.vaccineRecord.findMany({ where: { tenantId, petId: req.params.petId }, orderBy: { appliedAt: "desc" } });
   return res.json({ success: true, data: records, error: null });
 });
 
-clientRecordsRouter.post("/pets/:petId/vaccine-records", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.post("/pets/:petId/vaccine-records", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = vaccineSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -165,7 +166,7 @@ clientRecordsRouter.post("/pets/:petId/vaccine-records", requireAuth, async (req
 // apenas consulta sob demanda; o job diário que dispara `emitNotification()`
 // automaticamente ainda não está registrado (mesma pendência já documentada
 // para o BullMQ de reposição de estoque).
-clientRecordsRouter.get("/vaccine-records/due-soon", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/vaccine-records/due-soon", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const withinDays = Number(req.query.withinDays ?? 7);
@@ -187,7 +188,7 @@ clientRecordsRouter.get("/vaccine-records/due-soon", requireAuth, async (req: Re
 // endpoint só garante que a notificação INTERNA é criada de fato, sem fabricar um
 // envio externo que ainda não existe). Idempotente via `reminderSentAt`: uma dose
 // só é lembrada uma vez, até a data mudar (nova aplicação zera o campo).
-clientRecordsRouter.post("/vaccine-records/notify-due-soon", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.post("/vaccine-records/notify-due-soon", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const { tenantId } = req.session!;
   const withinDays = Number(req.body?.withinDays ?? 7);
@@ -226,7 +227,7 @@ const vehicleSchema = z.object({
   mileageKm: z.number().int().optional(),
 });
 
-clientRecordsRouter.get("/vehicles", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/vehicles", requireAuth, requireModule("AUTO_REPAIR_SHOP"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const { ownerId, licensePlate } = req.query as Record<string, string | undefined>;
@@ -237,14 +238,14 @@ clientRecordsRouter.get("/vehicles", requireAuth, async (req: Request, res: Resp
 // Capítulo 11.9 — consulta automática pela placa (API Placa Fipe), disparada pelo
 // frontend no onBlur do campo de placa em /clientes/veiculos/novo. Sem credencial
 // VEHICLE_DATA_FIPE_PLACA ativa, retorna data:null (cadastro segue 100% manual).
-clientRecordsRouter.get("/vehicles/lookup-plate/:plate", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/vehicles/lookup-plate/:plate", requireAuth, requireModule("AUTO_REPAIR_SHOP"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const result = await lookupVehicleByPlate(tenantId, req.params.plate);
   return res.json({ success: true, data: result, error: null });
 });
 
-clientRecordsRouter.get("/vehicles/:id", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/vehicles/:id", requireAuth, requireModule("AUTO_REPAIR_SHOP"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const vehicle = await prisma.vehicle.findFirst({ where: { id: req.params.id, tenantId }, include: { owner: { select: { id: true, name: true } }, workOrders: { select: { id: true, status: true, createdAt: true } } } });
@@ -252,7 +253,7 @@ clientRecordsRouter.get("/vehicles/:id", requireAuth, async (req: Request, res: 
   return res.json({ success: true, data: vehicle, error: null });
 });
 
-clientRecordsRouter.post("/vehicles", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.post("/vehicles", requireAuth, requireModule("AUTO_REPAIR_SHOP"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = vehicleSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -270,7 +271,7 @@ clientRecordsRouter.post("/vehicles", requireAuth, async (req: Request, res: Res
   }
 });
 
-clientRecordsRouter.patch("/vehicles/:id", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.patch("/vehicles/:id", requireAuth, requireModule("AUTO_REPAIR_SHOP"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = vehicleSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -309,7 +310,7 @@ const listingSchema = z.object({
   detranCommunicationProtocol: z.string().min(1).optional(),
 });
 
-clientRecordsRouter.get("/vehicle-listings", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/vehicle-listings", requireAuth, requireModule("VEHICLE_DEALERSHIP"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const status = req.query.status as string | undefined;
@@ -317,7 +318,7 @@ clientRecordsRouter.get("/vehicle-listings", requireAuth, async (req: Request, r
   return res.json({ success: true, data: listings, error: null });
 });
 
-clientRecordsRouter.get("/vehicle-listings/:id", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/vehicle-listings/:id", requireAuth, requireModule("VEHICLE_DEALERSHIP"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const listing = await prisma.vehicleListing.findFirst({ where: { id: req.params.id, tenantId }, include: { consignorClient: { select: { id: true, name: true } } } });
@@ -325,7 +326,7 @@ clientRecordsRouter.get("/vehicle-listings/:id", requireAuth, async (req: Reques
   return res.json({ success: true, data: listing, error: null });
 });
 
-clientRecordsRouter.post("/vehicle-listings", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.post("/vehicle-listings", requireAuth, requireModule("VEHICLE_DEALERSHIP"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = listingSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -350,7 +351,7 @@ clientRecordsRouter.post("/vehicle-listings", requireAuth, async (req: Request, 
   }
 });
 
-clientRecordsRouter.patch("/vehicle-listings/:id", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.patch("/vehicle-listings/:id", requireAuth, requireModule("VEHICLE_DEALERSHIP"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = listingSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -382,7 +383,7 @@ const markSoldSchema = z.object({
   detranCommunicationProtocol: z.string().min(1).optional(),
 });
 
-clientRecordsRouter.patch("/vehicle-listings/:id/mark-sold", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.patch("/vehicle-listings/:id/mark-sold", requireAuth, requireModule("VEHICLE_DEALERSHIP"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = markSoldSchema.safeParse(req.body ?? {});
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -429,7 +430,7 @@ clientRecordsRouter.patch("/vehicle-listings/:id/mark-sold", requireAuth, async 
 // Baixa manual do repasse ao consignante (o pagamento em si acontece fora do
 // sistema — PIX/TED combinado com o consignante — este endpoint só registra que
 // já foi pago, mesmo padrão de outros "mark-paid" manuais do financeiro).
-clientRecordsRouter.patch("/vehicle-listings/:id/mark-payout-paid", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.patch("/vehicle-listings/:id/mark-payout-paid", requireAuth, requireModule("VEHICLE_DEALERSHIP"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const { tenantId } = req.session!;
   const listing = await prisma.vehicleListing.findFirst({ where: { id: req.params.id, tenantId } });
@@ -445,7 +446,7 @@ clientRecordsRouter.patch("/vehicle-listings/:id/mark-payout-paid", requireAuth,
 
 // Capítulo 11.12 — consulta do repasse vinculado a um anúncio (null se o
 // veículo não é consignado ou ainda não foi vendido).
-clientRecordsRouter.get("/vehicle-listings/:id/consignment-payout", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/vehicle-listings/:id/consignment-payout", requireAuth, requireModule("VEHICLE_DEALERSHIP"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const listing = await prisma.vehicleListing.findFirst({ where: { id: req.params.id, tenantId } });
@@ -476,7 +477,7 @@ const opticalPrescriptionSchema = z.object({
   pupillaryDistance: z.number().optional(),
 });
 
-clientRecordsRouter.get("/optical-prescriptions", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.get("/optical-prescriptions", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const clientId = req.query.clientId as string | undefined;
@@ -484,7 +485,7 @@ clientRecordsRouter.get("/optical-prescriptions", requireAuth, async (req: Reque
   return res.json({ success: true, data: prescriptions, error: null });
 });
 
-clientRecordsRouter.post("/optical-prescriptions", requireAuth, async (req: Request, res: Response) => {
+clientRecordsRouter.post("/optical-prescriptions", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = opticalPrescriptionSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });

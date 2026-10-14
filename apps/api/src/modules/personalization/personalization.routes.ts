@@ -25,6 +25,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const personalizationRouter = Router();
 
@@ -57,7 +58,7 @@ const createOrderSchema = z.object({
   productionDueAt: z.coerce.date(),
 });
 
-personalizationRouter.post("/personalization-orders", requireAuth, async (req: Request, res: Response) => {
+personalizationRouter.post("/personalization-orders", requireAuth, requireModule("GIFT_PERSONALIZATION"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "personalization:order:write"))) {
     return forbidden(res, "Seu nível de acesso não permite criar ordens de personalização.");
@@ -116,7 +117,7 @@ personalizationRouter.post("/personalization-orders", requireAuth, async (req: R
 // LISTAGEM — apenas O.S. que têm ao menos um item de personalização vinculado
 // ─────────────────────────────────────────────────────────────────────────
 
-personalizationRouter.get("/personalization-orders", requireAuth, async (req: Request, res: Response) => {
+personalizationRouter.get("/personalization-orders", requireAuth, requireModule("GIFT_PERSONALIZATION"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "personalization:order:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar ordens de personalização.");
@@ -134,7 +135,7 @@ personalizationRouter.get("/personalization-orders", requireAuth, async (req: Re
 // APROVAÇÃO DE ARTE
 // ─────────────────────────────────────────────────────────────────────────
 
-personalizationRouter.patch("/personalization-orders/:workOrderItemId/approve-art", requireAuth, async (req: Request, res: Response) => {
+personalizationRouter.patch("/personalization-orders/:workOrderItemId/approve-art", requireAuth, requireModule("GIFT_PERSONALIZATION"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "personalization:order:write"))) {
     return forbidden(res, "Seu nível de acesso não permite aprovar arte de personalização.");
@@ -159,7 +160,7 @@ const statusUpdateSchema = z.object({
   status: z.enum(STATUS_ORDER),
 });
 
-personalizationRouter.patch("/personalization-orders/:workOrderId/status", requireAuth, async (req: Request, res: Response) => {
+personalizationRouter.patch("/personalization-orders/:workOrderId/status", requireAuth, requireModule("GIFT_PERSONALIZATION"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "personalization:order:write"))) {
     return forbidden(res, "Seu nível de acesso não permite alterar o status desta ordem de personalização.");

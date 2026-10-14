@@ -15,6 +15,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma, prismaUnscoped } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { isTenantStorageKey } from "../../lib/storage-key";
 import {
   approveBudget,
@@ -45,7 +46,7 @@ const ALLOWED_STATUS_TRANSITIONS: Record<string, string[]> = {
   CANCELLED: [],
 };
 
-workOrdersRouter.get("/work-orders", requireAuth, async (req: Request, res: Response) => {
+workOrdersRouter.get("/work-orders", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:read"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar ordens de serviço." } });
@@ -68,7 +69,7 @@ workOrdersRouter.get("/work-orders", requireAuth, async (req: Request, res: Resp
   return res.json({ success: true, data: workOrders.map(({ budgetApprovalToken: _t, Vehicle, ...wo }) => ({ ...wo, vehicle: Vehicle })), error: null });
 });
 
-workOrdersRouter.get("/work-orders/:id", requireAuth, async (req: Request, res: Response) => {
+workOrdersRouter.get("/work-orders/:id", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:read"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar ordens de serviço." } });
@@ -117,7 +118,7 @@ const createWorkOrderSchema = z.object({
   vehicleId: z.string().uuid().nullable().optional(),
 });
 
-workOrdersRouter.post("/work-orders", requireAuth, async (req: Request, res: Response) => {
+workOrdersRouter.post("/work-orders", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite abrir ordens de serviço." } });
@@ -166,7 +167,7 @@ const updateWorkOrderSchema = z.object({
   status: z.enum(["RECEIVED", "DIAGNOSING", "IN_REPAIR", "READY", "CANCELLED"]).optional(),
 });
 
-workOrdersRouter.patch("/work-orders/:id", requireAuth, async (req: Request, res: Response) => {
+workOrdersRouter.patch("/work-orders/:id", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite editar ordens de serviço." } });
@@ -223,7 +224,7 @@ const addItemSchema = z.object({
   commissionable: z.boolean().default(false),
 });
 
-workOrdersRouter.post("/work-orders/:id/items", requireAuth, async (req: Request, res: Response) => {
+workOrdersRouter.post("/work-orders/:id/items", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite lançar itens na O.S." } });
@@ -263,7 +264,7 @@ workOrdersRouter.post("/work-orders/:id/items", requireAuth, async (req: Request
   return res.status(201).json({ success: true, data: item, error: null });
 });
 
-workOrdersRouter.delete("/work-orders/:id/items/:itemId", requireAuth, async (req: Request, res: Response) => {
+workOrdersRouter.delete("/work-orders/:id/items/:itemId", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite remover itens da O.S." } });
@@ -289,7 +290,7 @@ const setBudgetSchema = z.object({
  * (Capítulo 6.4) que será embutido no link enviado por WhatsApp ao cliente.
  * Transição: qualquer estado não-terminal → AWAITING_APPROVAL.
  */
-workOrdersRouter.post("/work-orders/:id/budget", requireAuth, async (req: Request, res: Response) => {
+workOrdersRouter.post("/work-orders/:id/budget", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite orçar ordens de serviço." } });
@@ -359,7 +360,7 @@ const addChecklistSchema = z.object({
   clientSignatureUrl: z.string().url().nullable().optional(),
 });
 
-workOrdersRouter.post("/work-orders/:id/checklist", requireAuth, async (req: Request, res: Response) => {
+workOrdersRouter.post("/work-orders/:id/checklist", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite registrar checklist." } });
@@ -399,7 +400,7 @@ const addPhotoSchema = z.object({
  * Cloudflare R2 pelo frontend via URL assinada, Capítulo 3 — esta rota só
  * grava o ponteiro `storageKey` retornado por aquele upload).
  */
-workOrdersRouter.post("/work-orders/:id/photos", requireAuth, async (req: Request, res: Response) => {
+workOrdersRouter.post("/work-orders/:id/photos", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite anexar fotos." } });
@@ -439,7 +440,7 @@ workOrdersRouter.post("/work-orders/:id/photos", requireAuth, async (req: Reques
  * Entrega do equipamento: única transição válida é READY → DELIVERED.
  * Grava `deliveredAt` para contagem de garantia a partir deste exato instante.
  */
-workOrdersRouter.post("/work-orders/:id/deliver", requireAuth, async (req: Request, res: Response) => {
+workOrdersRouter.post("/work-orders/:id/deliver", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite entregar ordens de serviço." } });

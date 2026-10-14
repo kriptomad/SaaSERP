@@ -46,6 +46,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const carWashQueueRouter = Router();
 
@@ -103,7 +104,7 @@ const walkInSchema = z.object({
   professionalId: z.string().min(1).optional(),
 });
 
-carWashQueueRouter.post("/car-wash-queue/walk-in", requireAuth, async (req: Request, res: Response) => {
+carWashQueueRouter.post("/car-wash-queue/walk-in", requireAuth, requireModule("CAR_WASH_QUEUE"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = walkInSchema.safeParse(req.body);
   if (!parsed.success) return fail(res, 400, "VALIDATION_ERROR", parsed.error.message);
@@ -157,7 +158,7 @@ carWashQueueRouter.post("/car-wash-queue/walk-in", requireAuth, async (req: Requ
   return res.status(201).json({ success: true, data: appointment, error: null });
 });
 
-carWashQueueRouter.get("/car-wash-queue/today", requireAuth, async (req: Request, res: Response) => {
+carWashQueueRouter.get("/car-wash-queue/today", requireAuth, requireModule("CAR_WASH_QUEUE"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const { start, end } = todayRange();
@@ -174,7 +175,7 @@ carWashQueueRouter.get("/car-wash-queue/today", requireAuth, async (req: Request
 // PATCH /appointments/:id/status do módulo de agenda para esses casos).
 const STATUS_SEQUENCE = ["SCHEDULED", "IN_PROGRESS", "COMPLETED"] as const;
 
-carWashQueueRouter.patch("/car-wash-queue/:appointmentId/advance-status", requireAuth, async (req: Request, res: Response) => {
+carWashQueueRouter.patch("/car-wash-queue/:appointmentId/advance-status", requireAuth, requireModule("CAR_WASH_QUEUE"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const { tenantId } = req.session!;
   const appointment = await prisma.appointment.findFirst({ where: { id: req.params.appointmentId, tenantId } });
@@ -215,7 +216,7 @@ carWashQueueRouter.patch("/car-wash-queue/:appointmentId/advance-status", requir
 // mas NÃO mede o tempo real gasto — isso exigiria adicionar `startedAt`/
 // `completedAt` ao model `Appointment` (gap deferido, documentado para a
 // próxima rodada de schema).
-carWashQueueRouter.get("/car-wash-queue/average-service-time", requireAuth, async (req: Request, res: Response) => {
+carWashQueueRouter.get("/car-wash-queue/average-service-time", requireAuth, requireModule("CAR_WASH_QUEUE"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const completed = await prisma.appointment.findMany({

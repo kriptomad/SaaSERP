@@ -11,6 +11,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireAnyModule } from "../../middlewares/gatekeeper.middleware";
 
 export const schedulingRouter = Router();
 
@@ -37,14 +38,14 @@ const serviceSchema = z.object({
   active: z.boolean().optional(),
 });
 
-schedulingRouter.get("/services", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.get("/services", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:service:read"))) return forbid(res, "Seu nível de acesso não permite consultar o catálogo de serviços.");
   const services = await prisma.service.findMany({ where: { tenantId }, orderBy: { name: "asc" } });
   return res.json({ success: true, data: services, error: null });
 });
 
-schedulingRouter.post("/services", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.post("/services", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:service:write"))) return forbid(res, "Seu nível de acesso não permite cadastrar serviços.");
   const parsed = serviceSchema.safeParse(req.body);
@@ -53,7 +54,7 @@ schedulingRouter.post("/services", requireAuth, async (req: Request, res: Respon
   return res.status(201).json({ success: true, data: service, error: null });
 });
 
-schedulingRouter.patch("/services/:id", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.patch("/services/:id", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:service:write"))) return forbid(res, "Seu nível de acesso não permite editar serviços.");
   const parsed = serviceSchema.partial().safeParse(req.body);
@@ -73,7 +74,7 @@ const workingHoursSchema = z.object({
   endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "endTime deve estar no formato HH:mm"),
 });
 
-schedulingRouter.get("/professional-working-hours", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.get("/professional-working-hours", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:appointment:read"))) return forbid(res, "Seu nível de acesso não permite consultar expedientes.");
   const professionalId = req.query.professionalId as string | undefined;
@@ -86,7 +87,7 @@ schedulingRouter.get("/professional-working-hours", requireAuth, async (req: Req
 
 // Upsert por (tenantId, professionalId, dayOfWeek) — reenviar o mesmo dia da
 // semana para um profissional atualiza o expediente existente, nunca duplica.
-schedulingRouter.put("/professional-working-hours", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.put("/professional-working-hours", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:appointment:write"))) return forbid(res, "Seu nível de acesso não permite configurar expedientes.");
   const parsed = workingHoursSchema.safeParse(req.body);
@@ -101,7 +102,7 @@ schedulingRouter.put("/professional-working-hours", requireAuth, async (req: Req
   return res.status(201).json({ success: true, data: entry, error: null });
 });
 
-schedulingRouter.delete("/professional-working-hours/:id", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.delete("/professional-working-hours/:id", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:appointment:write"))) return forbid(res, "Seu nível de acesso não permite configurar expedientes.");
   await prisma.professionalWorkingHours.deleteMany({ where: { id: req.params.id, tenantId } });
@@ -121,7 +122,7 @@ const createAppointmentSchema = z.object({
   source: z.enum(["INTERNAL", "PUBLIC_BOOKING"]).optional(),
 });
 
-schedulingRouter.get("/appointments", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.get("/appointments", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:appointment:read"))) return forbid(res, "Seu nível de acesso não permite consultar a agenda.");
   const { professionalId, from, to, status } = req.query as Record<string, string | undefined>;
@@ -138,7 +139,7 @@ schedulingRouter.get("/appointments", requireAuth, async (req: Request, res: Res
   return res.json({ success: true, data: appointments, error: null });
 });
 
-schedulingRouter.get("/appointments/:id", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.get("/appointments/:id", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:appointment:read"))) return forbid(res, "Seu nível de acesso não permite consultar a agenda.");
   const appointment = await prisma.appointment.findFirst({
@@ -154,7 +155,7 @@ schedulingRouter.get("/appointments/:id", requireAuth, async (req: Request, res:
 // apenas traduz a violação dessa constraint em um erro 409 legível, nunca
 // reimplementando a checagem manualmente (que teria race condition entre o
 // SELECT de verificação e o INSERT, Capítulo 6.3).
-schedulingRouter.post("/appointments", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.post("/appointments", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:appointment:write"))) return forbid(res, "Seu nível de acesso não permite criar agendamentos.");
   const parsed = createAppointmentSchema.safeParse(req.body);
@@ -203,7 +204,7 @@ schedulingRouter.post("/appointments", requireAuth, async (req: Request, res: Re
 
 const statusSchema = z.object({ status: z.enum(["SCHEDULED", "CONFIRMED", "IN_PROGRESS", "COMPLETED", "CANCELLED", "NO_SHOW"]) });
 
-schedulingRouter.patch("/appointments/:id/status", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.patch("/appointments/:id/status", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:appointment:write"))) return forbid(res, "Seu nível de acesso não permite alterar o status de agendamentos.");
   const parsed = statusSchema.safeParse(req.body);
@@ -238,7 +239,7 @@ const packageSchema = z.object({
   expiresAt: z.string().datetime().optional(),
 });
 
-schedulingRouter.get("/client-service-packages", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.get("/client-service-packages", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:service:read"))) return forbid(res, "Seu nível de acesso não permite consultar pacotes de sessões.");
   const clientId = req.query.clientId as string | undefined;
@@ -246,7 +247,7 @@ schedulingRouter.get("/client-service-packages", requireAuth, async (req: Reques
   return res.json({ success: true, data: packages, error: null });
 });
 
-schedulingRouter.post("/client-service-packages", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.post("/client-service-packages", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:service:write"))) return forbid(res, "Seu nível de acesso não permite vender pacotes de sessões.");
   const parsed = packageSchema.safeParse(req.body);
@@ -274,7 +275,7 @@ schedulingRouter.post("/client-service-packages", requireAuth, async (req: Reque
 // fechamento+pagamento da Comanda (`comanda.routes.ts` POST /comandas/:id/close),
 // nunca por este módulo. Reaproveita "scheduling:appointment:read" (mesmo domínio
 // operacional de agenda/profissional) em vez de criar um código de permissão novo.
-schedulingRouter.get("/service-commissions", requireAuth, async (req: Request, res: Response) => {
+schedulingRouter.get("/service-commissions", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:appointment:read"))) return forbid(res, "Seu nível de acesso não permite consultar comissões de serviço.");
   const { professionalId, from, to } = req.query as Record<string, string | undefined>;

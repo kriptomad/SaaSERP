@@ -15,6 +15,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { notifyTenant } from "../notifications/notify.service";
 
 export const opticalLabWorkOrdersRouter = Router();
@@ -44,7 +45,7 @@ async function requireWrite(req: Request, res: Response): Promise<boolean> {
   return true;
 }
 
-opticalLabWorkOrdersRouter.get("/optical-lab-work-orders", requireAuth, async (req: Request, res: Response) => {
+opticalLabWorkOrdersRouter.get("/optical-lab-work-orders", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const status = req.query.status as string | undefined;
@@ -56,7 +57,7 @@ opticalLabWorkOrdersRouter.get("/optical-lab-work-orders", requireAuth, async (r
   return res.json({ success: true, data: orders, error: null });
 });
 
-opticalLabWorkOrdersRouter.get("/optical-lab-work-orders/:id", requireAuth, async (req: Request, res: Response) => {
+opticalLabWorkOrdersRouter.get("/optical-lab-work-orders/:id", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const order = await prisma.workOrder.findFirst({
@@ -72,7 +73,7 @@ const statusSchema = z.object({ status: z.enum(["IN_REPAIR", "READY", "DELIVERED
 // Transição de status dedicada (nunca o PATCH genérico de work-orders.routes.ts,
 // que está fora do escopo editável desta rodada) — dispara a notificação ao
 // cliente quando o status muda para READY (Capítulo 11.2, item 2 do escopo).
-opticalLabWorkOrdersRouter.patch("/optical-lab-work-orders/:id/status", requireAuth, async (req: Request, res: Response) => {
+opticalLabWorkOrdersRouter.patch("/optical-lab-work-orders/:id/status", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = statusSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });

@@ -11,6 +11,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const seasonalityRouter = Router();
 
@@ -36,7 +37,7 @@ function validationError(res: Response, details: unknown) {
 // CADASTRO DE JANELAS DE SAZONALIDADE
 // ─────────────────────────────────────────────────────────────────────────
 
-seasonalityRouter.get("/seasonality-windows", requireAuth, async (req: Request, res: Response) => {
+seasonalityRouter.get("/seasonality-windows", requireAuth, requireModule("GIFT_PERSONALIZATION"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:product:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar janelas de sazonalidade.");
@@ -58,7 +59,7 @@ const createWindowSchema = z.object({
   active: z.boolean().optional(),
 });
 
-seasonalityRouter.post("/seasonality-windows", requireAuth, async (req: Request, res: Response) => {
+seasonalityRouter.post("/seasonality-windows", requireAuth, requireModule("GIFT_PERSONALIZATION"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:product:write"))) {
     return forbidden(res, "Seu nível de acesso não permite cadastrar janelas de sazonalidade.");
@@ -84,7 +85,7 @@ seasonalityRouter.post("/seasonality-windows", requireAuth, async (req: Request,
 
 const updateWindowSchema = createWindowSchema.partial();
 
-seasonalityRouter.patch("/seasonality-windows/:id", requireAuth, async (req: Request, res: Response) => {
+seasonalityRouter.patch("/seasonality-windows/:id", requireAuth, requireModule("GIFT_PERSONALIZATION"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:product:write"))) {
     return forbidden(res, "Seu nível de acesso não permite editar janelas de sazonalidade.");
@@ -145,7 +146,7 @@ function mostRecentWindowEnd(now: Date, endMonth: number, endDay: number): Date 
   return new Date(now.getFullYear() - 1, endMonth - 1, endDay, 23, 59, 59, 999);
 }
 
-seasonalityRouter.get("/seasonality-windows/clearance-report", requireAuth, async (req: Request, res: Response) => {
+seasonalityRouter.get("/seasonality-windows/clearance-report", requireAuth, requireModule("GIFT_PERSONALIZATION"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:product:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar o relatório de liquidação sazonal.");

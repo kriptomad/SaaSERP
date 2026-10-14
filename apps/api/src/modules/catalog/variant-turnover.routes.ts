@@ -26,6 +26,7 @@
 import { Router, Request, Response } from "express";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const variantTurnoverRouter = Router();
 
@@ -40,7 +41,7 @@ async function hasPermission(role: string, userId: string, permissionCode: strin
 const fail = (res: Response, status: number, code: string, message: string) =>
   res.status(status).json({ success: false, data: null, error: { code, message } });
 
-variantTurnoverRouter.get("/product-variants/turnover-report", requireAuth, async (req: Request, res: Response) => {
+variantTurnoverRouter.get("/product-variants/turnover-report", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:product:read"))) {
     return fail(res, 403, "FORBIDDEN", "Seu nível de acesso não permite consultar relatórios de estoque.");

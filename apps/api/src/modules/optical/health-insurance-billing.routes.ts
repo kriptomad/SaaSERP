@@ -9,6 +9,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const healthInsuranceBillingRouter = Router();
 
@@ -38,7 +39,7 @@ async function requireWrite(req: Request, res: Response): Promise<boolean> {
 
 // Lista as vendas HEALTH_INSURANCE deste convênio ainda não incluídas em nenhuma
 // fatura consolidada — a "pré-visualização" da próxima fatura antes de fechá-la.
-healthInsuranceBillingRouter.get("/health-insurance-plans/:planId/unbilled-sales", requireAuth, async (req: Request, res: Response) => {
+healthInsuranceBillingRouter.get("/health-insurance-plans/:planId/unbilled-sales", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const plan = await prisma.healthInsurancePlan.findFirst({ where: { id: req.params.planId, tenantId } });
@@ -58,7 +59,7 @@ const billingSchema = z.object({ dueDate: z.coerce.date(), referenceDescription:
 // faturadas deste convênio em uma única AccountReceivable (sem clientId — o
 // devedor desta conta é o convênio, não um cliente final) e marca cada venda como
 // faturada (`Sale.healthInsuranceReceivableId`), para nunca cobrá-la duas vezes.
-healthInsuranceBillingRouter.post("/health-insurance-plans/:planId/close-billing", requireAuth, async (req: Request, res: Response) => {
+healthInsuranceBillingRouter.post("/health-insurance-plans/:planId/close-billing", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = billingSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });

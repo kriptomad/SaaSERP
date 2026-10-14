@@ -47,8 +47,12 @@ export interface NavItem {
   label: string;
   path: string;
   icon: ReactNode;
-  // Código do módulo no catálogo (feature gating) — reservado para filtro por módulos ativos do tenant
+  // Código do módulo no catálogo (feature gating) exigido para ver este item.
   moduleCode?: string;
+  // Variante de `moduleCode` para itens que servem a mais de um nicho (ex.: O.S. de
+  // Oficina Mecânica reaproveita o mesmo módulo de Assistência Técnica) — basta o
+  // tenant ter QUALQUER UM dos módulos listados para o item aparecer.
+  moduleCodes?: string[];
   // Papéis (UserRole) autorizados a ver este item no menu — omitido = visível para todos
   // os papéis autenticados. Usado pela Licença Mestra (Capítulo 2.10), restrita ao Owner.
   roles?: string[];
@@ -79,7 +83,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: "clientes", label: "Clientes", path: "/cadastros/clientes", icon: <PeopleIcon /> },
       { id: "fornecedores", label: "Fornecedores", path: "/cadastros/fornecedores", icon: <LocalShippingIcon /> },
       { id: "produtos", label: "Produtos", path: "/cadastros/produtos", icon: <CategoryIcon /> },
-      { id: "prontuarios", label: "Prontuários (pet/veículo/ótica)", path: "/cadastros/prontuarios", icon: <PetsIcon /> },
+      { id: "prontuarios", label: "Prontuários (pet/veículo/ótica)", path: "/cadastros/prontuarios", icon: <PetsIcon />, moduleCodes: ["PETSHOP_VET", "OPTICAL_LAB", "AUTO_REPAIR_SHOP", "VEHICLE_DEALERSHIP"] },
     ],
   },
   {
@@ -106,10 +110,10 @@ export const NAV_GROUPS: NavGroup[] = [
     id: "servicos",
     label: "Serviços",
     items: [
-      { id: "os", label: "Ordens de Serviço", path: "/os", icon: <BuildIcon /> },
-      { id: "agenda", label: "Agenda", path: "/agenda", icon: <EventIcon /> },
-      { id: "servicos-cad", label: "Serviços oferecidos", path: "/agenda/servicos", icon: <MiscellaneousServicesIcon /> },
-      { id: "agenda-config", label: "Expediente e comissões", path: "/agenda/configuracoes", icon: <EventIcon /> },
+      { id: "os", label: "Ordens de Serviço", path: "/os", icon: <BuildIcon />, moduleCodes: ["WORK_ORDER", "TIRE_WARRANTY"] },
+      { id: "agenda", label: "Agenda", path: "/agenda", icon: <EventIcon />, moduleCodes: ["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"] },
+      { id: "servicos-cad", label: "Serviços oferecidos", path: "/agenda/servicos", icon: <MiscellaneousServicesIcon />, moduleCodes: ["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"] },
+      { id: "agenda-config", label: "Expediente e comissões", path: "/agenda/configuracoes", icon: <EventIcon />, moduleCodes: ["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"] },
     ],
   },
   {
@@ -172,41 +176,41 @@ export const NAV_GROUPS: NavGroup[] = [
     id: "moda",
     label: "Moda / Calçados",
     items: [
-      { id: "consulta-variantes", label: "Consulta rápida de saldo (grade)", path: "/varejo/consulta-variantes", icon: <InventoryIcon /> },
-      { id: "giro-colecao", label: "Giro por coleção/estação", path: "/relatorios/giro-colecao", icon: <InsightsIcon /> },
-      { id: "trocas", label: "Trocas e crédito de loja", path: "/varejo/trocas", icon: <SwapVertIcon /> },
+      { id: "consulta-variantes", label: "Consulta rápida de saldo (grade)", path: "/varejo/consulta-variantes", icon: <InventoryIcon />, moduleCode: "FASHION_VARIANTS" },
+      { id: "giro-colecao", label: "Giro por coleção/estação", path: "/relatorios/giro-colecao", icon: <InsightsIcon />, moduleCode: "FASHION_VARIANTS" },
+      { id: "trocas", label: "Trocas e crédito de loja", path: "/varejo/trocas", icon: <SwapVertIcon />, moduleCode: "FASHION_VARIANTS" },
     ],
   },
   {
     id: "otica",
     label: "Ótica",
     items: [
-      { id: "optica-laboratorio", label: "Laboratório óptico", path: "/optica/laboratorio", icon: <VisibilityIcon /> },
-      { id: "optica-convenios", label: "Convênios", path: "/optica/convenios", icon: <LocalHospitalIcon /> },
+      { id: "optica-laboratorio", label: "Laboratório óptico", path: "/optica/laboratorio", icon: <VisibilityIcon />, moduleCode: "OPTICAL_LAB" },
+      { id: "optica-convenios", label: "Convênios", path: "/optica/convenios", icon: <LocalHospitalIcon />, moduleCode: "OPTICAL_LAB" },
     ],
   },
   {
     id: "papelaria",
     label: "Papelaria / Presentes",
     items: [
-      { id: "sazonalidade", label: "Janelas de sazonalidade", path: "/sazonalidade", icon: <CardGiftcardIcon /> },
-      { id: "sazonalidade-liquidacao", label: "Liquidação pós-sazonalidade", path: "/sazonalidade/liquidacao", icon: <CardGiftcardIcon /> },
-      { id: "personalizacao", label: "Personalização (bordado/sublimação)", path: "/personalizacao", icon: <CardGiftcardIcon /> },
+      { id: "sazonalidade", label: "Janelas de sazonalidade", path: "/sazonalidade", icon: <CardGiftcardIcon />, moduleCode: "GIFT_PERSONALIZATION" },
+      { id: "sazonalidade-liquidacao", label: "Liquidação pós-sazonalidade", path: "/sazonalidade/liquidacao", icon: <CardGiftcardIcon />, moduleCode: "GIFT_PERSONALIZATION" },
+      { id: "personalizacao", label: "Personalização (bordado/sublimação)", path: "/personalizacao", icon: <CardGiftcardIcon />, moduleCode: "GIFT_PERSONALIZATION" },
     ],
   },
   {
     id: "material-construcao",
     label: "Material de Construção / Ferragens",
     items: [
-      { id: "ferragens-faturamento", label: "Faturamento mensal (profissionais)", path: "/ferragens/faturamento", icon: <ConstructionIcon /> },
+      { id: "ferragens-faturamento", label: "Faturamento mensal (profissionais)", path: "/ferragens/faturamento", icon: <ConstructionIcon />, moduleCode: "CONSTRUCTION_BULK_UNITS" },
     ],
   },
   {
     id: "setor-automotivo",
     label: "Setor Automotivo",
     items: [
-      { id: "pneus-garantia", label: "Garantia de pneus por lote", path: "/pneus/garantia", icon: <TireRepairIcon /> },
-      { id: "estetica-fila", label: "Fila de atendimento (lava-rápido)", path: "/estetica-automotiva/fila", icon: <LocalCarWashIcon /> },
+      { id: "pneus-garantia", label: "Garantia de pneus por lote", path: "/pneus/garantia", icon: <TireRepairIcon />, moduleCode: "TIRE_WARRANTY" },
+      { id: "estetica-fila", label: "Fila de atendimento (lava-rápido)", path: "/estetica-automotiva/fila", icon: <LocalCarWashIcon />, moduleCode: "CAR_WASH_QUEUE" },
     ],
   },
 ];

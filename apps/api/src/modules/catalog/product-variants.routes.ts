@@ -13,6 +13,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const productVariantsRouter = Router();
 
@@ -40,7 +41,7 @@ const isUnique = (e: any) => e?.code === "P2002";
 // EIXOS ("Cor", "Tamanho")
 // ─────────────────────────────────────────────────────────────────────────
 
-productVariantsRouter.get("/products/:productId/variant-axes", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.get("/products/:productId/variant-axes", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "read"))) return;
   const { tenantId } = req.session!;
   const product = await prisma.product.findFirst({ where: { id: req.params.productId, tenantId }, select: { id: true } });
@@ -55,7 +56,7 @@ productVariantsRouter.get("/products/:productId/variant-axes", requireAuth, asyn
 
 const axisSchema = z.object({ name: z.string().trim().min(1).max(60) });
 
-productVariantsRouter.post("/products/:productId/variant-axes", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.post("/products/:productId/variant-axes", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "write"))) return;
   const { tenantId } = req.session!;
   const parsed = axisSchema.safeParse(req.body);
@@ -71,7 +72,7 @@ productVariantsRouter.post("/products/:productId/variant-axes", requireAuth, asy
   }
 });
 
-productVariantsRouter.patch("/variant-axes/:axisId", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.patch("/variant-axes/:axisId", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "write"))) return;
   const { tenantId } = req.session!;
   const parsed = axisSchema.safeParse(req.body);
@@ -88,7 +89,7 @@ productVariantsRouter.patch("/variant-axes/:axisId", requireAuth, async (req: Re
 });
 
 // A exclusão do eixo cascateia para as variantes (onDelete: Cascade) — só é seguro sem venda e sem saldo.
-productVariantsRouter.delete("/variant-axes/:axisId", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.delete("/variant-axes/:axisId", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "write"))) return;
   const { tenantId } = req.session!;
   const axis = await prisma.productVariantAxis.findFirst({ where: { id: req.params.axisId, tenantId } });
@@ -109,7 +110,7 @@ productVariantsRouter.delete("/variant-axes/:axisId", requireAuth, async (req: R
 // VARIANTES (combinações)
 // ─────────────────────────────────────────────────────────────────────────
 
-productVariantsRouter.get("/products/:productId/variants", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.get("/products/:productId/variants", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "read"))) return;
   const { tenantId } = req.session!;
   const product = await prisma.product.findFirst({ where: { id: req.params.productId, tenantId }, select: { id: true } });
@@ -138,7 +139,7 @@ async function barcodeClash(tenantId: string, barcode: string, exceptVariantId?:
   return Boolean(product || variant);
 }
 
-productVariantsRouter.post("/products/:productId/variants", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.post("/products/:productId/variants", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "write"))) return;
   const { tenantId } = req.session!;
   const parsed = variantCreateSchema.safeParse(req.body);
@@ -170,7 +171,7 @@ const variantPatchSchema = z.object({
   priceOverride: z.number().nonnegative().nullable().optional(),
 });
 
-productVariantsRouter.patch("/product-variants/:variantId", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.patch("/product-variants/:variantId", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "write"))) return;
   const { tenantId } = req.session!;
   const parsed = variantPatchSchema.safeParse(req.body);
@@ -189,7 +190,7 @@ productVariantsRouter.patch("/product-variants/:variantId", requireAuth, async (
   }
 });
 
-productVariantsRouter.delete("/product-variants/:variantId", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.delete("/product-variants/:variantId", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "write"))) return;
   const { tenantId } = req.session!;
   const variant = await prisma.productVariant.findFirst({ where: { id: req.params.variantId, tenantId } });
@@ -214,7 +215,7 @@ productVariantsRouter.delete("/product-variants/:variantId", requireAuth, async 
 // direto por nome/SKU/EAN do produto OU pelo valor do eixo (ex.: "M", "40"),
 // devolvendo o saldo de cada variante já no primeiro resultado — sem o dialog
 // completo de edição de produto. Limitado a 20 produtos/80 variantes por busca.
-productVariantsRouter.get("/product-variants/quick-search", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.get("/product-variants/quick-search", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "read"))) return;
   const { tenantId } = req.session!;
   const term = String(req.query.q ?? "").trim();
@@ -259,7 +260,7 @@ productVariantsRouter.get("/product-variants/quick-search", requireAuth, async (
   return res.json({ success: true, data: results, error: null });
 });
 
-productVariantsRouter.get("/products/:productId/variants/stock", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.get("/products/:productId/variants/stock", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "read"))) return;
   const { tenantId } = req.session!;
   const product = await prisma.product.findFirst({
@@ -291,7 +292,7 @@ productVariantsRouter.get("/products/:productId/variants/stock", requireAuth, as
   });
 });
 
-productVariantsRouter.get("/product-variants/:variantId/stock", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.get("/product-variants/:variantId/stock", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "read"))) return;
   const { tenantId } = req.session!;
   const variant = await prisma.productVariant.findFirst({
@@ -326,7 +327,7 @@ const stockAdjustSchema = z.object({
 });
 
 // Só produtos sem rastreio (trackingType NONE): lote/serial têm saldo próprio e divergiriam do saldo da variante.
-productVariantsRouter.post("/product-variants/:variantId/stock-adjust", requireAuth, async (req: Request, res: Response) => {
+productVariantsRouter.post("/product-variants/:variantId/stock-adjust", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
   if (!(await hasPermission(req.session!.role, req.session!.userId, "stock:movement:write"))) {
     return fail(res, 403, "FORBIDDEN", "Seu nível de acesso não permite ajustar estoque.");

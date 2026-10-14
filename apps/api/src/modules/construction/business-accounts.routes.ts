@@ -15,6 +15,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const businessAccountsRouter = Router();
 
@@ -56,7 +57,7 @@ function resolveMonthRange(month?: string): { start: Date; end: Date; label: str
 // EXTRATO MENSAL (Capítulo 11.8)
 // ─────────────────────────────────────────────────────────────────────────
 
-businessAccountsRouter.get("/business-accounts/:clientId/monthly-statement", requireAuth, async (req: Request, res: Response) => {
+businessAccountsRouter.get("/business-accounts/:clientId/monthly-statement", requireAuth, requireModule("CONSTRUCTION_BULK_UNITS"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:product:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar o extrato de conta profissional.");
@@ -99,7 +100,7 @@ businessAccountsRouter.get("/business-accounts/:clientId/monthly-statement", req
 // utilizado de crediário do cliente, na mesma transação.
 // ─────────────────────────────────────────────────────────────────────────
 
-businessAccountsRouter.post("/business-accounts/:clientId/generate-monthly-invoice", requireAuth, async (req: Request, res: Response) => {
+businessAccountsRouter.post("/business-accounts/:clientId/generate-monthly-invoice", requireAuth, requireModule("CONSTRUCTION_BULK_UNITS"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "stock:product:write"))) {
     return forbidden(res, "Seu nível de acesso não permite gerar faturamento consolidado.");

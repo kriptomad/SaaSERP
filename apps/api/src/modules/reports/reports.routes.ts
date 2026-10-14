@@ -21,6 +21,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { executeReportDefinition, InvalidReportFieldError } from "./execute-report-definition";
 import { DATASET_REGISTRY } from "./dataset-registry";
 import { buildAbcCurveReport, buildVariantAbcCurveReport } from "./abc-curve-report.service";
@@ -75,7 +76,7 @@ reportsRouter.get("/reports/abc-curve", requireAuth, async (req: Request, res: R
 // combinação cor/tamanho, não pelo modelo agregado).
 // ─────────────────────────────────────────────────────────────────────────
 
-reportsRouter.get("/reports/abc-curve-variants", requireAuth, async (req: Request, res: Response) => {
+reportsRouter.get("/reports/abc-curve-variants", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const daysParsed = Number(req.query.days);
@@ -88,7 +89,7 @@ reportsRouter.get("/reports/abc-curve-variants", requireAuth, async (req: Reques
 // GIRO POR COLEÇÃO/ESTAÇÃO + LIQUIDAÇÃO (Capítulo 11.4 — Loja de Roupas/Moda).
 // ─────────────────────────────────────────────────────────────────────────
 
-reportsRouter.get("/reports/collection-turnover", requireAuth, async (req: Request, res: Response) => {
+reportsRouter.get("/reports/collection-turnover", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const daysParsed = Number(req.query.days);

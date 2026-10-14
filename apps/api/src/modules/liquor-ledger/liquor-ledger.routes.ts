@@ -29,6 +29,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const liquorLedgerRouter = Router();
 
@@ -56,7 +57,7 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 // SALDO DE CASCOS POR CLIENTE (por produto)
 // ─────────────────────────────────────────────────────────────────────────
 
-liquorLedgerRouter.get("/liquor-ledger/clients/:clientId", requireAuth, async (req: Request, res: Response) => {
+liquorLedgerRouter.get("/liquor-ledger/clients/:clientId", requireAuth, requireModule("LIQUOR_LEDGER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "liquor-ledger:ledger:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar a conta-corrente de cascos.");
@@ -99,7 +100,7 @@ liquorLedgerRouter.get("/liquor-ledger/clients/:clientId", requireAuth, async (r
   return res.json({ success: true, data: { client, balances }, error: null });
 });
 
-liquorLedgerRouter.get("/liquor-ledger/clients/:clientId/entries", requireAuth, async (req: Request, res: Response) => {
+liquorLedgerRouter.get("/liquor-ledger/clients/:clientId/entries", requireAuth, requireModule("LIQUOR_LEDGER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "liquor-ledger:ledger:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar o histórico de cascos.");
@@ -134,7 +135,7 @@ liquorLedgerRouter.get("/liquor-ledger/clients/:clientId/entries", requireAuth, 
 // se ultrapassou `daysThreshold`. É uma aproximação: não identifica fisicamente QUAL
 // unidade específica do casco voltou, apenas assume a ordem cronológica mais provável —
 // suficiente para o relatório gerencial, não para rastreio físico por número de série.
-liquorLedgerRouter.get("/liquor-ledger/overdue", requireAuth, async (req: Request, res: Response) => {
+liquorLedgerRouter.get("/liquor-ledger/overdue", requireAuth, requireModule("LIQUOR_LEDGER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "liquor-ledger:ledger:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar o relatório de cascos em atraso.");
@@ -231,7 +232,7 @@ const entrySchema = z.object({
   saleId: z.string().uuid().optional().nullable(),
 });
 
-liquorLedgerRouter.post("/liquor-ledger/entries", requireAuth, async (req: Request, res: Response) => {
+liquorLedgerRouter.post("/liquor-ledger/entries", requireAuth, requireModule("LIQUOR_LEDGER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "liquor-ledger:ledger:write"))) {
     return forbidden(res, "Seu nível de acesso não permite lançar movimentos de casco.");

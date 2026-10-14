@@ -34,6 +34,7 @@
 import { Router, Request, Response } from "express";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const tireWarrantyRouter = Router();
 
@@ -74,7 +75,7 @@ function warrantyShape(batch: { id: string; receivedAt: Date; manufacturerWarran
   };
 }
 
-tireWarrantyRouter.get("/tire-warranty/check/:productBatchId", requireAuth, async (req: Request, res: Response) => {
+tireWarrantyRouter.get("/tire-warranty/check/:productBatchId", requireAuth, requireModule("TIRE_WARRANTY"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const batch = await prisma.productBatch.findFirst({
@@ -87,7 +88,7 @@ tireWarrantyRouter.get("/tire-warranty/check/:productBatchId", requireAuth, asyn
   return res.json({ success: true, data: result, error: null });
 });
 
-tireWarrantyRouter.get("/tire-warranty/by-sale-item/:saleItemId", requireAuth, async (req: Request, res: Response) => {
+tireWarrantyRouter.get("/tire-warranty/by-sale-item/:saleItemId", requireAuth, requireModule("TIRE_WARRANTY"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const saleItem = await prisma.saleItem.findFirst({
@@ -139,7 +140,7 @@ tireWarrantyRouter.get("/tire-warranty/by-sale-item/:saleItemId", requireAuth, a
 // aproximação conservadora, documentada, não uma regra de negócio exata).
 const ROTATION_SUGGESTION_MONTHS = 6;
 
-tireWarrantyRouter.get("/tire-warranty/rotation-suggestions", requireAuth, async (req: Request, res: Response) => {
+tireWarrantyRouter.get("/tire-warranty/rotation-suggestions", requireAuth, requireModule("TIRE_WARRANTY"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
 

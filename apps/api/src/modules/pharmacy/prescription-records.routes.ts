@@ -23,6 +23,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const prescriptionRecordsRouter = Router();
 
@@ -56,7 +57,7 @@ const createSchema = z.object({
 
 // POST /prescription-records — registra a retenção de receita de um item de venda
 // já existente (Lista B / tarja preta / psicotrópicos — Portaria 344/1998, RDC 1.000/2025).
-prescriptionRecordsRouter.post("/prescription-records", requireAuth, async (req: Request, res: Response) => {
+prescriptionRecordsRouter.post("/prescription-records", requireAuth, requireModule("PHARMACY_SNGPC"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "pharmacy:prescription-record:write"))) {
     return forbidden(res, "Seu nível de acesso não permite registrar retenção de receita.");
@@ -100,7 +101,7 @@ const listQuerySchema = z.object({
   productId: z.string().optional(),
 });
 
-prescriptionRecordsRouter.get("/prescription-records", requireAuth, async (req: Request, res: Response) => {
+prescriptionRecordsRouter.get("/prescription-records", requireAuth, requireModule("PHARMACY_SNGPC"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "pharmacy:prescription-record:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar o histórico de receitas retidas.");
@@ -150,7 +151,7 @@ const expiringQuerySchema = z.object({
   daysAhead: z.coerce.number().int().positive().max(365).optional(),
 });
 
-prescriptionRecordsRouter.get("/pharmacy/expiring-batches", requireAuth, async (req: Request, res: Response) => {
+prescriptionRecordsRouter.get("/pharmacy/expiring-batches", requireAuth, requireModule("PHARMACY_SNGPC"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "pharmacy:expiring-batches:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar o relatório de validade a vencer.");

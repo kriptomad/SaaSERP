@@ -24,6 +24,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
 export const productExchangesRouter = Router();
 
@@ -60,7 +61,7 @@ const createExchangeSchema = z.object({
   newQuantity: z.number().positive().nullable().optional(),
 });
 
-productExchangesRouter.post("/product-exchanges", requireAuth, async (req: Request, res: Response) => {
+productExchangesRouter.post("/product-exchanges", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "write"))) return;
   const { tenantId, userId } = req.session!;
   const parsed = createExchangeSchema.safeParse(req.body);
@@ -211,7 +212,7 @@ const linkSaleSchema = z.object({ saleId: z.string().min(1) });
 // Vincula a venda fechada à parte (cobrindo a diferença de preço positiva de uma
 // troca NEW_ITEM) ao registro da troca, para rastreabilidade fiscal completa
 // (Capítulo 11.4). Só preenche uma vez — nunca sobrescreve um vínculo já gravado.
-productExchangesRouter.patch("/product-exchanges/:id/link-sale", requireAuth, async (req: Request, res: Response) => {
+productExchangesRouter.patch("/product-exchanges/:id/link-sale", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "write"))) return;
   const { tenantId } = req.session!;
   const parsed = linkSaleSchema.safeParse(req.body);
@@ -228,7 +229,7 @@ productExchangesRouter.patch("/product-exchanges/:id/link-sale", requireAuth, as
   return res.json({ success: true, data: updated, error: null });
 });
 
-productExchangesRouter.get("/product-exchanges", requireAuth, async (req: Request, res: Response) => {
+productExchangesRouter.get("/product-exchanges", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "read"))) return;
   const { tenantId } = req.session!;
   const exchanges = await prisma.productExchange.findMany({
@@ -243,7 +244,7 @@ productExchangesRouter.get("/product-exchanges", requireAuth, async (req: Reques
 // CRÉDITO DE LOJA (saldo + extrato + resgate manual)
 // ─────────────────────────────────────────────────────────────────────────
 
-productExchangesRouter.get("/clients/:clientId/store-credit", requireAuth, async (req: Request, res: Response) => {
+productExchangesRouter.get("/clients/:clientId/store-credit", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "read"))) return;
   const { tenantId } = req.session!;
   const client = await prisma.client.findFirst({ where: { id: req.params.clientId, tenantId }, select: { id: true, name: true, storeCreditBalance: true } });
@@ -266,7 +267,7 @@ const redeemSchema = z.object({
 // venda em andamento e confirmado aqui) — nenhuma UI de PDV aplica o crédito como
 // forma de pagamento automaticamente ainda (gap documentado no fechamento desta
 // rodada, mesmo precedente usado em farmácia/Rodada 5 para fluxo pós-venda real).
-productExchangesRouter.post("/clients/:clientId/store-credit/redeem", requireAuth, async (req: Request, res: Response) => {
+productExchangesRouter.post("/clients/:clientId/store-credit/redeem", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   if (!(await guard(req, res, "write"))) return;
   const { tenantId, userId } = req.session!;
   const parsed = redeemSchema.safeParse(req.body);
