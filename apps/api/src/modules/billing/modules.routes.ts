@@ -12,6 +12,7 @@ import { Router, Request, Response } from "express";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { invalidateTenantModuleCache } from "../../middlewares/gatekeeper.middleware";
+import { chargeModuleActivation, chargeModuleDeactivation } from "./module-billing.service";
 
 export const modulesRouter = Router();
 
@@ -71,6 +72,9 @@ modulesRouter.post("/billing/modules/:moduleCode/activate", requireAuth, async (
   });
 
   await invalidateTenantModuleCache(tenantId);
+  // Best-effort — nunca bloqueia a ativação do módulo em si se o provedor de
+  // billing falhar (ver module-billing.service.ts).
+  void chargeModuleActivation(tenantId, moduleCode);
 
   return res.json({
     success: true,
@@ -107,6 +111,7 @@ modulesRouter.post("/billing/modules/:moduleCode/deactivate", requireAuth, async
   });
 
   await invalidateTenantModuleCache(tenantId);
+  void chargeModuleDeactivation(tenantId, moduleCode);
 
   return res.json({ success: true, data: { moduleCode, active: false }, error: null });
 });

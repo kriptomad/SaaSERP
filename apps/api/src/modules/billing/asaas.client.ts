@@ -87,6 +87,14 @@ export function cancelAsaasSubscription(subscriptionId: string) {
   return asaasRequest(`/subscriptions/${subscriptionId}`, { method: "DELETE" });
 }
 
+// Capítulo 2.6 — Asaas não tem o conceito de "subscription item" por módulo como o
+// Stripe: a assinatura é um único valor fixo por ciclo. Para refletir módulos à la
+// carte ativados/desativados, recalculamos e sobrescrevemos o `value` total (base +
+// soma dos módulos ativos) a cada ativação/desativação.
+export function updateAsaasSubscriptionValue(subscriptionId: string, newValue: number) {
+  return asaasRequest(`/subscriptions/${subscriptionId}`, { method: "PUT", body: JSON.stringify({ value: newValue }) });
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Capítulo 9/17 — cobranças de Boleto/Pix emitidas pelo PRÓPRIO lojista aos
 // seus clientes finais (PaymentCharge), distinto da cobrança de assinatura

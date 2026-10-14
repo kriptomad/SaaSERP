@@ -368,6 +368,15 @@ model TenantModule {
   active        Boolean   @default(true)
   activatedAt   DateTime  @default(now())
   deactivatedAt DateTime?
+  // Capítulo 2.6 — cobrança real do módulo à la carte: item de "subscription
+  // item" do Stripe dedicado a ESTE módulo específico, usando `price_data`
+  // inline (o valor vem de `Module.monthlyPrice`, que pode variar por ambiente/
+  // promoção, então nunca um Price ID fixo pré-cadastrado). Criado ao ativar,
+  // removido ao desativar — nulo quando o provedor não é Stripe, ou enquanto a
+  // sincronização com o provedor ainda não foi tentada/bem-sucedida (ver
+  // module-billing.service.ts, mesmo padrão best-effort de
+  // stripeSeatSubscriptionItemId em Subscription).
+  stripeSubscriptionItemId String?
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   module Module @relation(fields: [moduleCode], references: [code])

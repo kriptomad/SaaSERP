@@ -69,6 +69,43 @@ export async function syncSeatQuantityWithStripe(
   return item.id;
 }
 
+// Capítulo 2.6 — cobrança real de módulo à la carte ativado/desativado pelo
+// lojista. Usa `price_data` inline (em vez de um Price ID fixo pré-cadastrado)
+// porque o valor (`Module.monthlyPrice`) já é mantido no banco e pode variar
+// por ambiente/promoção — mesma filosofia de "nunca hardcoded" do restante do
+// cliente Stripe deste arquivo.
+export async function addModuleToStripeSubscription(
+  stripeSubscriptionId: string,
+  moduleCode: string,
+  moduleLabel: string,
+  monthlyPriceBrl: number,
+): Promise<string> {
+  const stripe = await getStripeClient();
+  // O product_data inline não existe para subscriptionItems.create (só para
+  // invoiceItems) — por isso resolvemos (ou criamos, na primeira vez) um
+  // Product dedicado por módulo, identificado pelo seu `moduleCode` em
+  // metadata, e então usamos price_data apontando para ele.
+  const existingProducts = await stripe.products.search({ query: `metadata['moduleCode']:'${moduleCode}'`, limit: 1 });
+  const product = existingProducts.data[0] ?? (await stripe.products.create({ name: `Módulo Filitech — ${moduleLabel}`, metadata: { moduleCode } }));
+
+  const item = await stripe.subscriptionItems.create({
+    subscription: stripeSubscriptionId,
+    price_data: {
+      currency: "brl",
+      product: product.id,
+      unit_amount: Math.round(monthlyPriceBrl * 100),
+      recurring: { interval: "month" },
+    },
+    metadata: { moduleCode },
+  });
+  return item.id;
+}
+
+export async function removeModuleFromStripeSubscription(subscriptionItemId: string): Promise<void> {
+  const stripe = await getStripeClient();
+  await stripe.subscriptionItems.del(subscriptionItemId);
+}
+
 // Passo 2 — assinatura recorrente com cobrança automática (Capítulo 2.7.3).
 export async function createRecurringSubscription(stripeCustomerId: string, priceId: string, paymentMethodId: string) {
   const stripe = await getStripeClient();
