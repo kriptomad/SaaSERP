@@ -1,5 +1,5 @@
 // apps/web/src/layout/AppShell.tsx
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Outlet, NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -21,11 +21,13 @@ import {
 import { useTheme } from "@mui/material/styles";
 import MenuIcon from "@mui/icons-material/Menu";
 import LogoutIcon from "@mui/icons-material/Logout";
+import SearchIcon from "@mui/icons-material/Search";
 import { useAuth } from "../auth/AuthContext";
 import { ThemeToggleButton } from "../theme/ThemeToggleButton";
 import { fetchActiveModules } from "../api/client";
 import { NAV_GROUPS } from "./navigation";
 import { NotificationBell } from "../modules/notifications/NotificationBell";
+import { CommandPalette } from "../shared/CommandPalette";
 
 const DRAWER_WIDTH = 248;
 
@@ -33,6 +35,7 @@ export function AppShell() {
   const theme = useTheme();
   const isDesktop = useMediaQuery(theme.breakpoints.up("md"));
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const { pathname } = useLocation();
   const { tenant, user, clearSession } = useAuth();
 
@@ -52,6 +55,17 @@ export function AppShell() {
     staleTime: 60_000,
   });
   const activeModuleCodes = activeModulesQuery.data?.moduleCodes ?? [];
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen(true);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   // GAP DE AUDITORIA FECHADO (Capítulo 21.18.6/22.1): filtro por Tenant.tenantType —
   // aplicado ANTES de montar os itens do grupo, pois grupos inteiros de varejo (PDV,
@@ -140,6 +154,9 @@ export function AppShell() {
             )}
           </Typography>
           <ThemeToggleButton />
+          <IconButton color="inherit" aria-label="Busca global (Ctrl+K)" onClick={() => setPaletteOpen(true)}>
+            <SearchIcon />
+          </IconButton>
           <NotificationBell />
           {isDesktop ? (
             <Button color="inherit" startIcon={<LogoutIcon />} onClick={clearSession} sx={{ ml: 1 }}>
@@ -179,6 +196,7 @@ export function AppShell() {
         <Toolbar />
         <Outlet />
       </Box>
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} navGroups={groups} />
     </Box>
   );
 }
