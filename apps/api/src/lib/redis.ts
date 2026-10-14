@@ -2,6 +2,9 @@
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 3.4 — Redis com namespace por tenant
 // (tenant:{id}:cache) usado pelo gatekeeper (Cap.6.1) e pelas filas BullMQ.
 import { Redis } from "ioredis";
+import { createModuleLogger } from "./logger";
+
+const log = createModuleLogger("redis");
 
 export const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", {
   maxRetriesPerRequest: 3,
@@ -9,5 +12,5 @@ export const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379"
 });
 
 redis.on("error", (err) => {
-  console.error("[redis] erro de conexão:", err.message);
+  log.error({ err }, "erro de conexão");
 });

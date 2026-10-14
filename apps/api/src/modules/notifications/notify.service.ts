@@ -14,6 +14,9 @@ import { prismaUnscoped } from "@filitech/db";
 import { whatsappNotificationsQueue } from "../../lib/queue";
 import { sendTransactionalEmail } from "./channels/email.channel";
 import { sendExpoPushNotifications } from "./channels/push.channel";
+import { createModuleLogger } from "../../lib/logger";
+
+const log = createModuleLogger("notify.service");
 
 export interface NotifyTenantInput {
   tenantId: string;
@@ -68,8 +71,7 @@ async function enqueueWhatsAppJob(tenantId: string, toPhone: string, body: strin
   } catch (error) {
     // Redis/BullMQ fora do ar nunca pode derrubar a transação de negócio do caller
     // (ex.: fechar uma venda, aprovar uma OS) — loga e segue.
-    // eslint-disable-next-line no-console
-    console.error("[notify.service] falha ao enfileirar notificação WhatsApp:", (error as Error).message);
+    log.error({ tenantId, err: error }, "falha ao enfileirar notificação WhatsApp");
   }
 }
 
@@ -106,16 +108,14 @@ async function dispatchUserChannels(input: NotifyTenantInput): Promise<void> {
   if (channels.email) {
     // Fire-and-forget: falha de entrega de e-mail nunca pode bloquear o caller.
     sendTransactionalEmail(input.tenantId, user.email, input.title, `<p>${input.body}</p>`).catch((error) => {
-      // eslint-disable-next-line no-console
-      console.error("[notify.service] falha ao enviar e-mail de notificação:", (error as Error).message);
+      log.error({ tenantId: input.tenantId, err: error }, "falha ao enviar e-mail de notificação");
     });
   }
 
   if (channels.push && pushDevices.length > 0) {
     const tokens = pushDevices.map((d) => d.expoPushToken);
     sendExpoPushNotifications(tokens, input.title, input.body, { linkRoute: input.linkRoute, category: input.category }).catch((error) => {
-      // eslint-disable-next-line no-console
-      console.error("[notify.service] falha ao enviar push de notificação:", (error as Error).message);
+      log.error({ tenantId: input.tenantId, err: error }, "falha ao enviar push de notificação");
     });
   }
 }
@@ -139,8 +139,7 @@ export async function notifyTenant(input: NotifyTenantInput) {
   // qualquer falha de canal (Redis fora do ar, provedor não configurado, etc.) é
   // tratada e logada dentro de dispatchUserChannels/enqueueWhatsAppJob.
   await dispatchUserChannels(input).catch((error) => {
-    // eslint-disable-next-line no-console
-    console.error("[notify.service] falha no fan-out multicanal:", (error as Error).message);
+    log.error({ tenantId: input.tenantId, err: error }, "falha no fan-out multicanal");
   });
 
   return notification;

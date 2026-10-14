@@ -11,6 +11,9 @@
 // sempre zero para esse público.
 import { Prisma, TenantScopedPrismaClient, TenantScopedTransactionClient } from "@filitech/db";
 import { syncSeatQuantityWithStripe } from "./stripe.client";
+import { createModuleLogger } from "../../lib/logger";
+
+const log = createModuleLogger("seat-billing");
 
 export interface SeatBillingSummary {
   activeUserCount: number;
@@ -75,8 +78,7 @@ export async function reconcileSeatBillingWithProvider(prisma: TenantScopedPrism
 
   const seatPriceParam = await prisma.systemParameter.findUnique({ where: { key: "STRIPE_EXTRA_SEAT_PRICE_ID" } });
   if (!seatPriceParam?.value) {
-    // eslint-disable-next-line no-console
-    console.warn(`[seat-billing] STRIPE_EXTRA_SEAT_PRICE_ID não configurado — excedente de assentos do tenant ${tenantId} não sincronizado com o Stripe.`);
+    log.warn({ tenantId }, "STRIPE_EXTRA_SEAT_PRICE_ID não configurado — excedente de assentos não sincronizado com o Stripe");
     return;
   }
 
@@ -93,7 +95,6 @@ export async function reconcileSeatBillingWithProvider(prisma: TenantScopedPrism
       await prisma.subscription.update({ where: { id: subscription.id }, data: { stripeSeatSubscriptionItemId: itemId } });
     }
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error(`[seat-billing] Falha ao sincronizar excedente de assentos com o Stripe para o tenant ${tenantId}:`, err);
+    log.error({ tenantId, err }, "falha ao sincronizar excedente de assentos com o Stripe");
   }
 }

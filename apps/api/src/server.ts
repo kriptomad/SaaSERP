@@ -6,6 +6,7 @@ import express from "express";
 import "express-async-errors";
 import cors from "cors";
 import helmet from "helmet";
+import { logger } from "./lib/logger";
 import { authMiddleware, requireAuth } from "./middlewares/auth.middleware";
 import { tenantContextMiddleware } from "./middlewares/tenant-context.middleware";
 import { tenantLockoutMiddleware } from "./middlewares/tenant-lockout.middleware";
@@ -231,7 +232,7 @@ app.use((_req, res) => {
 // retorna um envelope JSON consistente, e o processo continua no ar.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error("[unhandled-error]", err);
+  logger.error({ err }, "unhandled-error");
   if (res.headersSent) {
     return;
   }
@@ -248,5 +249,5 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 const PORT = Number(process.env.PORT ?? 3333);
 const HOST = process.env.HOST ?? "0.0.0.0";
 app.listen(PORT, HOST, () => {
-  console.log(`[filitech-api] ouvindo na porta ${PORT} (bind ${HOST})`);
+  logger.info({ port: PORT, host: HOST }, "filitech-api ouvindo");
 });

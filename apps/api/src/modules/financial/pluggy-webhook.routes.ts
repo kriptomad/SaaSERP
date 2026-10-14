@@ -27,6 +27,9 @@ import { z } from "zod";
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { getPlatformSecret } from "../../lib/platform-secrets";
 import { pluggySyncQueue } from "../../lib/queue";
+import { createModuleLogger } from "../../lib/logger";
+
+const log = createModuleLogger("pluggy-webhook");
 
 export const pluggyWebhookRouter = Router();
 
@@ -60,16 +63,14 @@ pluggyWebhookRouter.post("/webhooks/pluggy", async (req: Request, res: Response)
     // em payload inesperado, para nunca entrar em loop de retry por um formato de
     // evento novo que ainda não mapeamos — mas o corpo bruto fica logado para
     // investigação manual.
-    // eslint-disable-next-line no-console
-    console.warn("[webhooks/pluggy] payload em formato inesperado:", JSON.stringify(req.body));
+    log.warn({ body: req.body }, "payload em formato inesperado");
     return res.status(200).json({ success: true, data: { acknowledged: true }, error: null });
   }
 
   const { event, itemId } = parsed.data;
 
   if (!SYNC_TRIGGERING_EVENTS.has(event) || !itemId) {
-    // eslint-disable-next-line no-console
-    console.log(`[webhooks/pluggy] evento "${event}" recebido e reconhecido, sem ação de sincronização.`);
+    log.info({ event }, "evento recebido e reconhecido, sem ação de sincronização");
     return res.status(200).json({ success: true, data: { acknowledged: true }, error: null });
   }
 
@@ -77,8 +78,7 @@ pluggyWebhookRouter.post("/webhooks/pluggy", async (req: Request, res: Response)
   if (!consent) {
     // itemId desconhecido (consentimento removido no Filitech, ou de outro cliente
     // Pluggy) — reconhece com 200 mesmo assim; não é um erro do lado da Pluggy.
-    // eslint-disable-next-line no-console
-    console.warn(`[webhooks/pluggy] itemId "${itemId}" não corresponde a nenhum OpenFinanceConsent conhecido.`);
+    log.warn({ itemId }, "itemId não corresponde a nenhum OpenFinanceConsent conhecido");
     return res.status(200).json({ success: true, data: { acknowledged: true }, error: null });
   }
 

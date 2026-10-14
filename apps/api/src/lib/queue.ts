@@ -9,6 +9,9 @@
 // src/workers/ e são iniciados por um processo `node` dedicado (`npm run worker`).
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
+import { createModuleLogger } from "./logger";
+
+const log = createModuleLogger("queue-redis");
 
 // BullMQ exige `maxRetriesPerRequest: null` na conexão dedicada que ele gerencia
 // internamente (requisito documentado da própria lib) — connection isolada da
@@ -18,8 +21,7 @@ export const queueRedisConnection = new IORedis(process.env.REDIS_URL ?? "redis:
 });
 
 queueRedisConnection.on("error", (err) => {
-  // eslint-disable-next-line no-console
-  console.error("[queue-redis] erro de conexão:", err.message);
+  log.error({ err }, "erro de conexão");
 });
 
 export const QUEUE_NAMES = {

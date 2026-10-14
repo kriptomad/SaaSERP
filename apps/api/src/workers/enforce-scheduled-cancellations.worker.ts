@@ -11,6 +11,9 @@ import { Worker, Job } from "bullmq";
 import { prismaUnscoped } from "@filitech/db";
 import { queueRedisConnection, QUEUE_NAMES, scheduledSubscriptionCancellationsQueue } from "../lib/queue";
 import { cancelAsaasSubscription } from "../modules/billing/asaas.client";
+import { createModuleLogger } from "../lib/logger";
+
+const log = createModuleLogger("enforce-scheduled-cancellations");
 
 const REPEATABLE_JOB_NAME = "daily-sweep";
 const DAILY_CRON_4AM = "0 4 * * *";
@@ -31,8 +34,7 @@ export async function enforceScheduledCancellationsProcessor(_job: Job): Promise
     if (subscription.provider === "asaas") {
       await cancelAsaasSubscription(subscription.externalSubscriptionId).catch((error) => {
         // Já pode ter sido cancelada manualmente no painel do Asaas — não impede o fechamento local.
-        // eslint-disable-next-line no-console
-        console.error(`[enforce-scheduled-cancellations] falha ao cancelar ${subscription.externalSubscriptionId} no Asaas:`, error);
+        log.error({ externalSubscriptionId: subscription.externalSubscriptionId, err: error }, "falha ao cancelar no Asaas");
       });
     }
 
