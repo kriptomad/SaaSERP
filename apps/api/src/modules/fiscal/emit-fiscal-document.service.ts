@@ -34,6 +34,9 @@ import {
   FocusNfeNotConfiguredError,
 } from "./focus-nfe-credential";
 import { notifyTenant } from "../notifications/notify.service";
+import { withCircuitBreaker } from "../../lib/circuit-breaker";
+
+const FOCUS_NFE_BREAKER = "focus-nfe";
 
 export { FocusNfeNotConfiguredError };
 
@@ -247,15 +250,17 @@ export async function emitFiscalDocument(
     });
   }
 
-  const response = await fetch(`https://api.focusnfe.com.br/v2/nfce?ref=${encodeURIComponent(referencia)}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${basicAuth}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  const response = await withCircuitBreaker(FOCUS_NFE_BREAKER, () =>
+    fetch(`https://api.focusnfe.com.br/v2/nfce?ref=${encodeURIComponent(referencia)}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }),
+  );
 
   let body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
 
@@ -264,10 +269,12 @@ export async function emitFiscalDocument(
   // (timeout de rede, processo reiniciado), consultamos o resultado já definitivo em
   // vez de tratar isto como falha — nunca reenviamos o payload sob a mesma ref.
   if (body.codigo === "already_processed") {
-    const queryResponse = await fetch(`https://api.focusnfe.com.br/v2/nfce/${encodeURIComponent(referencia)}`, {
-      method: "GET",
-      headers: { Authorization: `Basic ${basicAuth}`, Accept: "application/json" },
-    });
+    const queryResponse = await withCircuitBreaker(FOCUS_NFE_BREAKER, () =>
+      fetch(`https://api.focusnfe.com.br/v2/nfce/${encodeURIComponent(referencia)}`, {
+        method: "GET",
+        headers: { Authorization: `Basic ${basicAuth}`, Accept: "application/json" },
+      }),
+    );
     body = (await queryResponse.json().catch(() => ({}))) as Record<string, unknown>;
   }
 

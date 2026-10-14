@@ -13,8 +13,10 @@
 // continuar funcionando mesmo quando o lojista não contratou/configurou WhatsApp.
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { decryptEnvelope } from "../../../lib/envelope-crypto";
+import { withCircuitBreaker } from "../../../lib/circuit-breaker";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const WHATSAPP_BREAKER = "whatsapp-cloud";
 
 export interface SendWhatsAppResult {
   success: boolean;
@@ -38,22 +40,30 @@ export async function sendWhatsAppText(tenantId: string, toE164Phone: string, bo
   if (typeof decrypted.accessToken !== "string" || typeof decrypted.phoneNumberId !== "string") {
     return { success: false, message: "Payload do WhatsApp Cloud inválido: esperado { accessToken, phoneNumberId }." };
   }
+  // Vinculados a `const` locais (em vez de acessar `decrypted.*` dentro do closure
+  // abaixo) para preservar o estreitamento de tipo (`string`) feito acima: o
+  // TypeScript não propaga o estreitamento de propriedades de objeto através de
+  // fronteiras de função/closure.
+  const accessToken = decrypted.accessToken;
+  const phoneNumberId = decrypted.phoneNumberId;
 
   try {
-    const response = await fetch(`https://graph.facebook.com/v19.0/${encodeURIComponent(decrypted.phoneNumberId)}/messages`, {
-      method: "POST",
-      headers: {
+    const response = await withCircuitBreaker(WHATSAPP_BREAKER, () =>
+      fetch(`https://graph.facebook.com/v19.0/${encodeURIComponent(phoneNumberId)}/messages`, {
+        method: "POST",
+        headers: {
         Authorization: `Bearer ${decrypted.accessToken}`,
         "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: toE164Phone.replace(/^\+/, ""), // Graph API espera o número sem o "+" (ex.: "5511999998888")
-        type: "text",
-        text: { body },
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to: toE164Phone.replace(/^\+/, ""), // Graph API espera o número sem o "+" (ex.: "5511999998888")
+          type: "text",
+          text: { body },
+        }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    );
     const bodyText = await response.text();
     if (response.ok) {
       return { success: true, message: "Mensagem enviada com sucesso via WhatsApp Cloud API." };

@@ -22,6 +22,9 @@
 //     simulado fora desses casos.
 import { TenantScopedPrismaClient } from "@filitech/db";
 import { decryptFocusNfeCredential, resolveFocusNfeCredential, FocusNfeNotConfiguredError } from "./focus-nfe-credential";
+import { withCircuitBreaker } from "../../lib/circuit-breaker";
+
+const FOCUS_NFE_BREAKER = "focus-nfe";
 
 export { FocusNfeNotConfiguredError };
 export class FiscalDocumentMissingAccessKeyError extends Error {}
@@ -71,15 +74,17 @@ export async function transmitFiscalEvent(
   const referencia = encodeURIComponent(event.fiscalDocument.accessKey);
   const basicAuth = Buffer.from(`${decrypted.token}:`).toString("base64");
 
-  const response = await fetch(`https://api.focusnfe.com.br/v2/${endpointPath}/${referencia}`, {
-    method: "DELETE",
-    headers: {
-      Authorization: `Basic ${basicAuth}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ justificativa: event.justification }),
-  });
+  const response = await withCircuitBreaker(FOCUS_NFE_BREAKER, () =>
+    fetch(`https://api.focusnfe.com.br/v2/${endpointPath}/${referencia}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ justificativa: event.justification }),
+    }),
+  );
 
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
 
