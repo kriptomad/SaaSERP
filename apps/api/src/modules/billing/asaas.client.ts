@@ -86,3 +86,67 @@ export function refundAsaasPayment(paymentId: string) {
 export function cancelAsaasSubscription(subscriptionId: string) {
   return asaasRequest(`/subscriptions/${subscriptionId}`, { method: "DELETE" });
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Capítulo 9/17 — cobranças de Boleto/Pix emitidas pelo PRÓPRIO lojista aos
+// seus clientes finais (PaymentCharge), distinto da cobrança de assinatura
+// SaaS acima (Tenant → Filitech). Mesmo provedor (Asaas), conta de cada
+// lojista é identificada pelo `externalProviderId` persistido em `Client`
+// (criado sob demanda na primeira cobrança, reaproveitado nas seguintes).
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface CreateAsaasCustomerInput {
+  name: string;
+  cpfCnpj: string;
+  email?: string;
+  phone?: string;
+  externalReference?: string;
+}
+
+export interface AsaasCustomerResponse {
+  id: string;
+}
+
+// Cria (ou retorna, se o Asaas detectar duplicidade pelo cpfCnpj) o cliente
+// final no PSP — necessário antes de emitir qualquer cobrança avulsa.
+export function createAsaasCustomer(input: CreateAsaasCustomerInput): Promise<AsaasCustomerResponse> {
+  return asaasRequest("/customers", { method: "POST", body: JSON.stringify(input) });
+}
+
+export interface CreateAsaasChargeInput {
+  customer: string;
+  billingType: "BOLETO" | "PIX";
+  value: number;
+  dueDate: string; // YYYY-MM-DD
+  description: string;
+  externalReference?: string;
+}
+
+export interface AsaasChargeResponse {
+  id: string;
+  status: string;
+  invoiceUrl: string;
+  bankSlipUrl?: string;
+}
+
+// Capítulo 9 — emite a cobrança avulsa (boleto ou Pix) de uma AccountReceivable.
+export function createAsaasCharge(input: CreateAsaasChargeInput): Promise<AsaasChargeResponse> {
+  return asaasRequest("/payments", { method: "POST", body: JSON.stringify(input) });
+}
+
+export interface AsaasIdentificationField {
+  identificationField: string; // linha digitável do boleto
+}
+
+export function getAsaasBoletoIdentificationField(paymentId: string): Promise<AsaasIdentificationField> {
+  return asaasRequest(`/payments/${paymentId}/identificationField`);
+}
+
+export interface AsaasPixQrCode {
+  encodedImage: string; // base64 PNG
+  payload: string; // EMV copia-e-cola
+}
+
+export function getAsaasPixQrCode(paymentId: string): Promise<AsaasPixQrCode> {
+  return asaasRequest(`/payments/${paymentId}/pixQrCode`);
+}

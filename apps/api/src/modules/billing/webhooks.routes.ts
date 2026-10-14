@@ -113,6 +113,25 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
   const { event: eventType, payment } = req.body as { event: string; payment?: { subscription?: string; id: string } };
 
   if (!payment?.subscription) {
+    // Sem referência de assinatura: pode ser uma cobrança avulsa de Boleto/Pix emitida
+    // pelo lojista a um cliente dele (PaymentCharge, Capítulo 9), não billing SaaS.
+    if (payment?.id && (eventType === "PAYMENT_RECEIVED" || eventType === "PAYMENT_CONFIRMED")) {
+      const charge = await prismaUnscoped.paymentCharge.findFirst({ where: { externalProviderId: payment.id } });
+      if (charge && charge.status !== "PAID") {
+        const claimed = await prismaUnscoped.paymentCharge.updateMany({
+          where: { id: charge.id, status: { notIn: ["PAID", "CANCELLED"] } },
+          data: { status: "PAID", paidAt: new Date() },
+        });
+        if (claimed.count > 0) {
+          await prismaUnscoped.accountReceivable
+            .updateMany({
+              where: { id: charge.accountReceivableId, status: { notIn: ["PAID", "CANCELLED"] } },
+              data: { status: "PAID", paidAt: new Date() },
+            })
+            .catch(() => undefined);
+        }
+      }
+    }
     return res.json({ received: true, ignored: "no-subscription-reference" });
   }
 

@@ -25,6 +25,7 @@ import {
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import { Page, PageHeader, QueryState, errorMessage } from "../../shared/ui/PageLayout";
@@ -78,6 +79,81 @@ const CONFIG = {
 } as const;
 
 const STATUS_LABEL: Record<Status, string> = { PENDING: "Pendente", PAID: "Quitada", OVERDUE: "Vencida", CANCELLED: "Cancelada" };
+
+interface ChargeResult {
+  type: "BOLETO" | "PIX";
+  pixQrCodePayload: string | null;
+  boletoDigitableLine: string | null;
+  invoiceUrl: string;
+  bankSlipUrl: string | null;
+}
+
+function ChargeDialog({ account, onClose }: { account: Account; onClose: () => void }) {
+  const toast = useToast();
+  const [billingType, setBillingType] = useState<"PIX" | "BOLETO">("PIX");
+  const [result, setResult] = useState<ChargeResult | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: () => api.post<ChargeResult>(`/accounts-receivable/${account.id}/charge`, { billingType }),
+    onSuccess: (data) => setResult(data),
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+
+  function copy(text: string) {
+    void navigator.clipboard.writeText(text);
+    toast.success("Copiado.");
+  }
+
+  return (
+    <Dialog open onClose={mutation.isPending ? undefined : onClose} fullWidth maxWidth="sm">
+      <DialogTitle>Cobrar — {account.description}</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <Typography variant="body2" color="text.secondary">
+            Cliente: {account.client?.name ?? "—"} · Valor: {money(account.amount)}
+          </Typography>
+          {!result && (
+            <TextField select label="Forma de cobrança" value={billingType} onChange={(e) => setBillingType(e.target.value as "PIX" | "BOLETO")}>
+              <MenuItem value="PIX">Pix</MenuItem>
+              <MenuItem value="BOLETO">Boleto</MenuItem>
+            </TextField>
+          )}
+          {result?.type === "PIX" && result.pixQrCodePayload && (
+            <Stack spacing={1}>
+              <Typography variant="subtitle2">Pix copia-e-cola</Typography>
+              <TextField value={result.pixQrCodePayload} multiline rows={3} InputProps={{ readOnly: true }} />
+              <Button startIcon={<ContentCopyIcon />} onClick={() => copy(result.pixQrCodePayload!)}>
+                Copiar código Pix
+              </Button>
+            </Stack>
+          )}
+          {result?.type === "BOLETO" && result.boletoDigitableLine && (
+            <Stack spacing={1}>
+              <Typography variant="subtitle2">Linha digitável do boleto</Typography>
+              <TextField value={result.boletoDigitableLine} InputProps={{ readOnly: true }} />
+              <Button startIcon={<ContentCopyIcon />} onClick={() => copy(result.boletoDigitableLine!)}>
+                Copiar linha digitável
+              </Button>
+              {result.bankSlipUrl && (
+                <Button href={result.bankSlipUrl} target="_blank" rel="noreferrer">
+                  Abrir PDF do boleto
+                </Button>
+              )}
+            </Stack>
+          )}
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Fechar</Button>
+        {!result && (
+          <Button variant="contained" onClick={() => mutation.mutate()} disabled={mutation.isPending}>
+            {mutation.isPending ? "Gerando…" : "Gerar cobrança"}
+          </Button>
+        )}
+      </DialogActions>
+    </Dialog>
+  );
+}
 
 function CreateDialog({ kind, onClose }: { kind: Kind; onClose: () => void }) {
   const cfg = CONFIG[kind];
@@ -182,6 +258,7 @@ export function AccountsPage({ kind }: { kind: Kind }) {
   const [status, setStatus] = useState("");
   const [creating, setCreating] = useState(false);
   const [pending, setPending] = useState<{ action: "settle" | "cancel"; account: Account } | null>(null);
+  const [charging, setCharging] = useState<Account | null>(null);
 
   const query = useQuery({ queryKey: [cfg.queryKey, status], queryFn: () => api.get<Account[]>(cfg.path, { status: status || undefined }) });
 
@@ -270,6 +347,11 @@ export function AccountsPage({ kind }: { kind: Kind }) {
                             {cfg.paidVerb}
                           </Button>
                         )}
+                        {open && kind === "receivable" && a.client && (
+                          <Button size="small" onClick={() => setCharging(a)}>
+                            Cobrar
+                          </Button>
+                        )}
                         {open && kind === "payable" && (
                           <Button size="small" color="inherit" onClick={() => setPending({ action: "cancel", account: a })}>
                             Cancelar
@@ -285,6 +367,7 @@ export function AccountsPage({ kind }: { kind: Kind }) {
         )}
       </QueryState>
       {creating && <CreateDialog kind={kind} onClose={() => setCreating(false)} />}
+      {charging && <ChargeDialog account={charging} onClose={() => setCharging(null)} />}
       <ConfirmDialog
         open={pending !== null}
         title={pending?.action === "cancel" ? "Cancelar conta" : `${cfg.paidVerb} conta`}

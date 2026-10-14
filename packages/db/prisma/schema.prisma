@@ -648,6 +648,10 @@ model Client {
   whatsappOptInAt             DateTime? // Capítulo 20.2.1 — opt-in explícito para mensagens MARKETING
   whatsappOptOutAt            DateTime? // Capítulo 20.2.1 — bloqueia qualquer novo envio até novo opt-in
   isReseller                  Boolean   @default(false) // Capítulo 4.3 — precificação em cascata: seleciona Preço Revenda
+  // Capítulo 9/17 — cache do ID do cliente final criado no PSP (Asaas) na primeira
+  // cobrança de Boleto/Pix emitida pelo lojista (PaymentCharge). Evita recriar o
+  // cliente no provedor a cada nova cobrança do mesmo client local.
+  asaasCustomerId              String?
   // Capítulo 11.4 — Loja de Roupas/Moda: saldo de crédito de loja a favor do cliente,
   // emitido por trocas (ProductExchange/StoreCreditTransaction ISSUED) e consumido
   // manualmente pelo caixa como desconto numa venda nova (StoreCreditTransaction

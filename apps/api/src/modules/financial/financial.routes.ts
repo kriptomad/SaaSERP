@@ -20,6 +20,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { createAsaasCustomer, createAsaasCharge, getAsaasPixQrCode, getAsaasBoletoIdentificationField } from "../billing/asaas.client";
 
 export const financialRouter = Router();
 
@@ -348,6 +349,109 @@ financialRouter.post("/accounts-receivable/:id/receive", requireAuth, async (req
   }
   const updated = await prisma.accountReceivable.findFirstOrThrow({ where: { id: receivable.id, tenantId } });
   return res.json({ success: true, data: updated, error: null });
+});
+
+// Capítulo 9 — emite cobrança real de Boleto/Pix no Asaas para uma conta a
+// receber do lojista, e cria/reaproveita o PaymentCharge correspondente.
+// GAP DE AUDITORIA ENCONTRADO E CORRIGIDO: `PaymentCharge` existia no schema
+// desde o início, mas nenhuma rota disparava a criação real da cobrança no PSP.
+const chargeReceivableSchema = z.object({
+  billingType: z.enum(["BOLETO", "PIX"]),
+});
+
+financialRouter.post("/accounts-receivable/:id/charge", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requireFinancialWrite(req, res))) return;
+  const { tenantId } = req.session!;
+
+  const parsed = chargeReceivableSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+  }
+
+  const receivable = await prisma.accountReceivable.findFirst({ where: { id: req.params.id, tenantId }, include: { client: true } });
+  if (!receivable) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Conta a receber não encontrada." } });
+  }
+  if (receivable.status === "PAID" || receivable.status === "CANCELLED") {
+    return res.status(409).json({ success: false, data: null, error: { code: "INVALID_STATUS", message: `Não é possível cobrar uma conta com status ${receivable.status}.` } });
+  }
+  if (!receivable.client) {
+    return res.status(422).json({ success: false, data: null, error: { code: "CLIENT_REQUIRED", message: "Esta conta a receber não possui cliente vinculado — não é possível emitir Boleto/Pix." } });
+  }
+  if (!receivable.client.document) {
+    return res.status(422).json({ success: false, data: null, error: { code: "DOCUMENT_REQUIRED", message: "O cliente precisa ter CPF/CNPJ cadastrado para emitir cobrança." } });
+  }
+
+  const existingCharge = await prisma.paymentCharge.findUnique({ where: { accountReceivableId: receivable.id } });
+  if (existingCharge && existingCharge.status === "PENDING") {
+    return res.status(409).json({ success: false, data: null, error: { code: "CHARGE_ALREADY_EXISTS", message: "Já existe uma cobrança pendente para esta conta a receber." } });
+  }
+
+  try {
+    let asaasCustomerId = receivable.client.asaasCustomerId;
+    if (!asaasCustomerId) {
+      const customer = await createAsaasCustomer({
+        name: receivable.client.name,
+        cpfCnpj: receivable.client.document,
+        email: receivable.client.email ?? undefined,
+        phone: receivable.client.phone ?? undefined,
+        externalReference: receivable.client.id,
+      });
+      asaasCustomerId = customer.id;
+      await prisma.client.update({ where: { id: receivable.client.id }, data: { asaasCustomerId } });
+    }
+
+    const dueDate = receivable.dueDate.toISOString().slice(0, 10);
+    const charge = await createAsaasCharge({
+      customer: asaasCustomerId,
+      billingType: parsed.data.billingType,
+      value: Number(receivable.amount),
+      dueDate,
+      description: receivable.description,
+      externalReference: receivable.id,
+    });
+
+    let pixQrCodePayload: string | null = null;
+    let boletoDigitableLine: string | null = null;
+    if (parsed.data.billingType === "PIX") {
+      const qr = await getAsaasPixQrCode(charge.id);
+      pixQrCodePayload = qr.payload;
+    } else {
+      const identification = await getAsaasBoletoIdentificationField(charge.id);
+      boletoDigitableLine = identification.identificationField;
+    }
+
+    const paymentCharge = await prisma.paymentCharge.upsert({
+      where: { accountReceivableId: receivable.id },
+      create: {
+        tenantId,
+        accountReceivableId: receivable.id,
+        type: parsed.data.billingType,
+        status: "PENDING",
+        pixQrCodePayload,
+        boletoDigitableLine,
+        expiresAt: receivable.dueDate,
+        externalProviderId: charge.id,
+      },
+      update: {
+        type: parsed.data.billingType,
+        status: "PENDING",
+        pixQrCodePayload,
+        boletoDigitableLine,
+        expiresAt: receivable.dueDate,
+        externalProviderId: charge.id,
+        paidAt: null,
+      },
+    });
+
+    return res.status(201).json({
+      success: true,
+      data: { ...paymentCharge, invoiceUrl: charge.invoiceUrl, bankSlipUrl: charge.bankSlipUrl ?? null },
+      error: null,
+    });
+  } catch (err) {
+    return res.status(502).json({ success: false, data: null, error: { code: "ASAAS_CHARGE_FAILED", message: (err as Error).message } });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────
