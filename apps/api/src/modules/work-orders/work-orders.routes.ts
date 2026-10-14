@@ -22,6 +22,7 @@ import {
   BudgetAlreadyProcessedError,
   BudgetExpiredError,
 } from "../../services/work-order/approve-budget.service";
+import { notifyTenant } from "../notifications/notify.service";
 
 export const workOrdersRouter = Router();
 
@@ -211,6 +212,24 @@ workOrdersRouter.patch("/work-orders/:id", requireAuth, requireModule("WORK_ORDE
       ...(input.status !== undefined ? { status: input.status } : {}),
     },
   });
+
+  if (input.status && input.status !== existing.status) {
+    // Capítulo 8.2/8.4 — notifica (grava + empurra via SSE) o técnico responsável e,
+    // via broadcast (userId null), qualquer OWNER/MANAGER acompanhando o painel de O.S.
+    await notifyTenant({
+      tenantId,
+      userId: workOrder.assignedTechnicianId ?? null,
+      category: "WORK_ORDER_STATUS",
+      title: "Status da O.S. atualizado",
+      body: `A ordem de serviço #${workOrder.id.slice(0, 8)} mudou para ${input.status}.`,
+      severity: "INFO",
+      linkRoute: `/os/${workOrder.id}`,
+      sourceType: "WORK_ORDER",
+      sourceId: workOrder.id,
+    }).catch(() => {
+      // notifyTenant já loga internamente; status da O.S. nunca pode falhar por isso.
+    });
+  }
 
   return res.json({ success: true, data: workOrder, error: null });
 });

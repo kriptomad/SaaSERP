@@ -7,8 +7,22 @@
 import { Router, Request, Response } from "express";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { registerSseClient } from "../../lib/sse";
 
 export const notificationsRouter = Router();
+
+/**
+ * Stream SSE para o sininho de notificações ao vivo (Capítulo 8.2/8.4). Também
+ * carrega eventos de categoria WORK_ORDER_STATUS, cobrindo o requisito de status
+ * de O.S. ao vivo sem precisar de um segundo canal de conexão por aba.
+ * `requireAuth` já garante `req.session`; a conexão fica aberta até o cliente
+ * desconectar (cleanup garantido via registerSseClient).
+ */
+notificationsRouter.get("/notifications/stream", requireAuth, (req: Request, res: Response) => {
+  const { tenantId, userId } = req.session!;
+  const cleanup = registerSseClient(tenantId, userId, res);
+  req.on("close", cleanup);
+});
 
 /**
  * Lista notificações visíveis ao usuário logado: as dirigidas especificamente a ele

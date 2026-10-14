@@ -73,3 +73,31 @@ export const userContactApi = {
   getContact: () => api.get<{ email: string; whatsappPhone: string | null }>("/users/me/contact"),
   setWhatsappPhone: (whatsappPhone: string | null) => api.patch<{ whatsappPhone: string | null }>("/users/me/contact", { whatsappPhone }),
 };
+
+// Capítulo 8.4 — feed de notificações consumido pelo sininho (NotificationBell.tsx)
+// e pela página de O.S. (status ao vivo via SSE, Capítulo 8.2).
+export interface NotificationItem {
+  id: string;
+  tenantId: string;
+  userId: string | null;
+  category: string;
+  title: string;
+  body: string;
+  severity: "INFO" | "WARNING" | "CRITICAL";
+  linkRoute: string | null;
+  sourceType: string;
+  sourceId: string | null;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export interface NotificationFeed {
+  notifications: NotificationItem[];
+  unreadCount: number;
+}
+
+export const notificationFeedApi = {
+  list: (unreadOnly = false) => api.get<NotificationFeed>("/notifications", unreadOnly ? { unreadOnly: "true" } : undefined),
+  markRead: (id: string) => api.patch<NotificationItem>(`/notifications/${id}/read`),
+  markAllRead: () => api.patch<{ updatedCount: number }>("/notifications/read-all"),
+};

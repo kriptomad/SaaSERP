@@ -15,6 +15,7 @@ import { whatsappNotificationsQueue } from "../../lib/queue";
 import { sendTransactionalEmail } from "./channels/email.channel";
 import { sendExpoPushNotifications } from "./channels/push.channel";
 import { createModuleLogger } from "../../lib/logger";
+import { broadcastToTenant } from "../../lib/sse";
 
 const log = createModuleLogger("notify.service");
 
@@ -141,6 +142,10 @@ export async function notifyTenant(input: NotifyTenantInput) {
   await dispatchUserChannels(input).catch((error) => {
     log.error({ tenantId: input.tenantId, err: error }, "falha no fan-out multicanal");
   });
+
+  // Empurra ao vivo para quem estiver com o stream SSE aberto (Capítulo 8.2) — não
+  // bloqueia nem falha a criação caso ninguém esteja conectado no momento.
+  broadcastToTenant(input.tenantId, "notification", notification, input.userId ?? null);
 
   return notification;
 }

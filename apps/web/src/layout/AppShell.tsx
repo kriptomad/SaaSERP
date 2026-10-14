@@ -25,6 +25,7 @@ import { useAuth } from "../auth/AuthContext";
 import { ThemeToggleButton } from "../theme/ThemeToggleButton";
 import { fetchActiveModules } from "../api/client";
 import { NAV_GROUPS } from "./navigation";
+import { NotificationBell } from "../modules/notifications/NotificationBell";
 
 const DRAWER_WIDTH = 248;
 
@@ -139,6 +140,7 @@ export function AppShell() {
             )}
           </Typography>
           <ThemeToggleButton />
+          <NotificationBell />
           {isDesktop ? (
             <Button color="inherit" startIcon={<LogoutIcon />} onClick={clearSession} sx={{ ml: 1 }}>
               Sair
