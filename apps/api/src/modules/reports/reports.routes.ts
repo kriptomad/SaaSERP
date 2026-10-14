@@ -12,11 +12,12 @@
 //   - GET/PUT de `DashboardLayout` por usuário.
 // PENDENTE (flagado explicitamente): o disparo real do cron (`cronExpression`)
 // via BullMQ que de fato executa e envia o `ScheduledReport` por e-mail
-// (Capítulo 18.2 — nenhum worker ainda lê esta tabela), exportação para
-// PDF/XLSX (`@react-pdf/renderer`/`exceljs` não estão instalados), e o
-// suporte a dimensões com JOIN entre modelos no `DATASET_REGISTRY`
-// (Capítulo 18.5 — importação assistida de dados — continua como gap
-// totalmente separado, não coberto aqui).
+// (Capítulo 18.2 — nenhum worker ainda lê esta tabela), e o suporte a
+// dimensões com JOIN entre modelos no `DATASET_REGISTRY` (Capítulo 18.5 —
+// importação assistida de dados — continua como gap totalmente separado, não
+// coberto aqui). Exportação PDF/XLSX sob demanda via GET
+// /report-definitions/:id/export?format=pdf|xlsx JÁ IMPLEMENTADA
+// (report-export.service.ts, exceljs + pdfkit).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
@@ -26,6 +27,7 @@ import { executeReportDefinition, InvalidReportFieldError } from "./execute-repo
 import { DATASET_REGISTRY } from "./dataset-registry";
 import { buildAbcCurveReport, buildVariantAbcCurveReport } from "./abc-curve-report.service";
 import { buildCollectionTurnoverReport } from "./collection-turnover-report.service";
+import { buildReportPdf, buildReportXlsx } from "./report-export.service";
 
 export const reportsRouter = Router();
 
@@ -202,6 +204,47 @@ reportsRouter.get("/report-definitions/:id/execute", requireAuth, async (req: Re
       metrics: definition.metrics as string[],
     });
     return res.json({ success: true, data: rows, error: null });
+  } catch (err) {
+    if (err instanceof InvalidReportFieldError) {
+      return res.status(400).json({ success: false, data: null, error: { code: "INVALID_REPORT_FIELD", message: err.message } });
+    }
+    throw err;
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// EXPORTAÇÃO PDF/XLSX (Capítulo 18.2) — gera o arquivo em memória a partir das
+// mesmas linhas de /execute, nunca duplica a lógica de consulta/agregação.
+// ─────────────────────────────────────────────────────────────────────────
+
+reportsRouter.get("/report-definitions/:id/export", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requireRead(req, res))) return;
+  const { tenantId } = req.session!;
+  const format = req.query.format === "pdf" ? "pdf" : req.query.format === "xlsx" ? "xlsx" : null;
+  if (!format) {
+    return res.status(400).json({ success: false, data: null, error: { code: "INVALID_FORMAT", message: "Use ?format=pdf ou ?format=xlsx." } });
+  }
+  const definition = await prisma.reportDefinition.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!definition) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Definição de relatório não encontrada." } });
+  }
+  try {
+    const rows = await executeReportDefinition(prisma, tenantId, {
+      datasetKey: definition.datasetKey,
+      dimensions: definition.dimensions as string[],
+      metrics: definition.metrics as string[],
+    });
+    const safeFileName = definition.name.replace(/[^a-zA-Z0-9-_]+/g, "_").slice(0, 60) || "relatorio";
+    if (format === "xlsx") {
+      const buffer = await buildReportXlsx(definition.name, rows as Record<string, unknown>[]);
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeFileName}.xlsx"`);
+      return res.send(buffer);
+    }
+    const buffer = await buildReportPdf(definition.name, rows as Record<string, unknown>[]);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${safeFileName}.pdf"`);
+    return res.send(buffer);
   } catch (err) {
     if (err instanceof InvalidReportFieldError) {
       return res.status(400).json({ success: false, data: null, error: { code: "INVALID_REPORT_FIELD", message: err.message } });
