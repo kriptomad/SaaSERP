@@ -39,7 +39,7 @@ const TENANT_SCOPED_MODELS = new Set([
   // prismaUnscoped para contornar deliberadamente o isolamento, nunca o client
   // tenant-scoped. WebhookDelivery fica fora desta lista por não ter tenantId
   // próprio — seu isolamento vem por herança via endpointId -> TenantWebhookEndpoint.
-  "SupportTicket", "TenantApiKey", "TenantWebhookEndpoint",
+  "SupportTicket", "TenantApiKey", "TenantWebhookEndpoint", "LabelPrinterConfig",
   // NOTA: "SupportTicketMessage" fica FORA desta lista — não possui coluna tenantId
   // própria (schema real: id, ticketId, authorType, authorId, body, attachmentUrls,
   // createdAt); herda o tenant apenas via ticketId -> SupportTicket, mesmo padrão de

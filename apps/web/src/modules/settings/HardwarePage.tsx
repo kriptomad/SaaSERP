@@ -39,6 +39,17 @@ interface IntegrationCredentialSummary {
   lastTestMessage: string | null;
 }
 
+interface LabelPrinterConfig {
+  id: string;
+  name: string;
+  connectionType: "NETWORK" | "USB" | "BLUETOOTH";
+  networkHost: string | null;
+  networkPort: number | null;
+  labelWidthMm: number;
+  labelHeightMm: number;
+  isDefault: boolean;
+}
+
 export function HardwarePage() {
   const [config, setConfig] = useState<HardwareConfig>(() => loadHardwareConfig());
   const [printerMessage, setPrinterMessage] = useState<string | null>(null);
@@ -53,11 +64,25 @@ export function HardwarePage() {
   const [tefSaving, setTefSaving] = useState(false);
   const [tefTesting, setTefTesting] = useState(false);
 
+  const [labelPrinters, setLabelPrinters] = useState<LabelPrinterConfig[]>([]);
+  const [newPrinterName, setNewPrinterName] = useState("");
+  const [newPrinterHost, setNewPrinterHost] = useState("");
+  const [newPrinterPort, setNewPrinterPort] = useState("9100");
+  const [labelPrinterMessage, setLabelPrinterMessage] = useState<string | null>(null);
+
+  function reloadLabelPrinters() {
+    api
+      .get<LabelPrinterConfig[]>("/label-printers")
+      .then(setLabelPrinters)
+      .catch(() => undefined);
+  }
+
   useEffect(() => {
     api
       .get<IntegrationCredentialSummary[]>("/integration-credentials")
       .then((list) => setTefCredential(list.find((c) => c.provider === "TEF_CLISITEF") ?? null))
       .catch(() => undefined);
+    reloadLabelPrinters();
   }, []);
 
   function updateConfig(patch: Partial<HardwareConfig>) {
@@ -174,6 +199,42 @@ export function HardwarePage() {
     }
   }
 
+  async function handleAddLabelPrinter() {
+    setLabelPrinterMessage(null);
+    if (!newPrinterName || !newPrinterHost) {
+      setLabelPrinterMessage("Informe nome e host/IP da impressora.");
+      return;
+    }
+    try {
+      await api.post("/label-printers", {
+        name: newPrinterName,
+        connectionType: "NETWORK",
+        networkHost: newPrinterHost,
+        networkPort: Number(newPrinterPort) || 9100,
+        labelWidthMm: 40,
+        labelHeightMm: 25,
+        isDefault: labelPrinters.length === 0,
+      });
+      setNewPrinterName("");
+      setNewPrinterHost("");
+      setNewPrinterPort("9100");
+      reloadLabelPrinters();
+      setLabelPrinterMessage("Impressora de etiqueta adicionada.");
+    } catch (error) {
+      setLabelPrinterMessage(`Falha ao adicionar: ${(error as Error).message}`);
+    }
+  }
+
+  async function handleRemoveLabelPrinter(id: string) {
+    await api.delete(`/label-printers/${id}`);
+    reloadLabelPrinters();
+  }
+
+  async function handleSetDefaultLabelPrinter(id: string) {
+    await api.patch(`/label-printers/${id}`, { isDefault: true });
+    reloadLabelPrinters();
+  }
+
   return (
     <Box sx={{ p: 3, maxWidth: 800, mx: "auto" }}>
       <Typography variant="h5" sx={{ mb: 1 }}>
@@ -288,6 +349,48 @@ export function HardwarePage() {
             </Typography>
           )}
         </Stack>
+      </Paper>
+
+      <Paper sx={{ p: 2, mb: 3 }}>
+        <Typography variant="subtitle1" sx={{ mb: 2 }}>
+          Impressora de etiquetas ZPL (Zebra/compatível)
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Configuração por LOJA (vale para qualquer terminal) — a etiqueta é enviada direto pela rede para a porta
+          9100 da impressora. Sem impressora cadastrada, o botão "Imprimir etiqueta" do cadastro de produtos baixa o
+          arquivo .zpl para impressão manual.
+        </Typography>
+        <Stack spacing={1} sx={{ mb: 2 }}>
+          {labelPrinters.map((printer) => (
+            <Stack key={printer.id} direction="row" spacing={1} alignItems="center">
+              <Typography variant="body2" sx={{ flexGrow: 1 }}>
+                {printer.name} — {printer.networkHost}:{printer.networkPort} {printer.isDefault ? "(padrão)" : ""}
+              </Typography>
+              {!printer.isDefault && (
+                <Button size="small" onClick={() => handleSetDefaultLabelPrinter(printer.id)}>
+                  Tornar padrão
+                </Button>
+              )}
+              <Button size="small" color="error" onClick={() => handleRemoveLabelPrinter(printer.id)}>
+                Remover
+              </Button>
+            </Stack>
+          ))}
+          {labelPrinters.length === 0 && (
+            <Typography variant="body2" color="text.secondary">
+              Nenhuma impressora de etiqueta cadastrada.
+            </Typography>
+          )}
+        </Stack>
+        <Stack direction="row" spacing={1}>
+          <TextField label="Nome" size="small" value={newPrinterName} onChange={(e) => setNewPrinterName(e.target.value)} />
+          <TextField label="Host/IP" size="small" value={newPrinterHost} onChange={(e) => setNewPrinterHost(e.target.value)} />
+          <TextField label="Porta" size="small" value={newPrinterPort} onChange={(e) => setNewPrinterPort(e.target.value)} sx={{ width: 100 }} />
+          <Button variant="outlined" onClick={handleAddLabelPrinter}>
+            Adicionar
+          </Button>
+        </Stack>
+        {labelPrinterMessage && <Alert severity="info" sx={{ mt: 2 }}>{labelPrinterMessage}</Alert>}
       </Paper>
 
       <Divider sx={{ my: 2 }} />

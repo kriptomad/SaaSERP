@@ -33,6 +33,7 @@ import DeleteIcon from "@mui/icons-material/DeleteOutline";
 import EditIcon from "@mui/icons-material/Edit";
 import GridViewIcon from "@mui/icons-material/GridView";
 import SearchIcon from "@mui/icons-material/Search";
+import PrintIcon from "@mui/icons-material/Print";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   productsApi,
@@ -48,6 +49,7 @@ import { ConfirmDialog } from "../../shared/ui/ConfirmDialog";
 import { SupplierPicker } from "../../shared/lookups";
 import { money, parseDecimal, qty } from "../../shared/ui/format";
 import { VariantsDialog } from "../product-variants/VariantsDialog";
+import { printProductLabel } from "../catalog/label-printers-api";
 
 interface FormState {
   sku: string;
@@ -376,6 +378,19 @@ export function ProductsPage() {
                               </IconButton>
                             </Tooltip>
                           )}
+                          <Tooltip title="Imprimir etiqueta">
+                            <IconButton
+                              size="small"
+                              aria-label={`Imprimir etiqueta de ${p.name}`}
+                              onClick={() =>
+                                printProductLabel(p.id, undefined, 1)
+                                  .then((result) => toast.success(result.downloaded ? "Arquivo .zpl baixado." : "Etiqueta enviada para a impressora."))
+                                  .catch((error) => toast.error(errorMessage(error)))
+                              }
+                            >
+                              <PrintIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
                           <Tooltip title="Editar">
                             <IconButton size="small" aria-label={`Editar ${p.name}`} onClick={() => setFormState({ mode: "edit", id: p.id })}>
                               <EditIcon fontSize="small" />

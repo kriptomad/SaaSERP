@@ -26,6 +26,7 @@ import { personalInvestmentsRouter } from "./modules/personal-finance/personal-i
 import { personalTaxToolsRouter } from "./modules/personal-finance/personal-tax-tools.routes";
 import { purchaseOrdersRouter } from "./modules/purchasing/purchase-orders.routes";
 import { nfeXmlImportRouter } from "./modules/purchasing/nfe-xml-import.routes";
+import { labelPrintersRouter } from "./modules/catalog/label-printers.routes";
 import { inventoryCountRouter } from "./modules/purchasing/inventory-count.routes";
 import { schedulingRouter } from "./modules/scheduling/scheduling.routes";
 import { comandaRouter } from "./modules/comanda/comanda.routes";
@@ -176,6 +177,7 @@ app.use(personalInvestmentsRouter);
 app.use(personalTaxToolsRouter);
 app.use(purchaseOrdersRouter);
 app.use(nfeXmlImportRouter);
+app.use(labelPrintersRouter);
 app.use(inventoryCountRouter);
 app.use(schedulingRouter);
 app.use(comandaRouter);

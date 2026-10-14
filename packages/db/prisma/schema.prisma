@@ -180,6 +180,7 @@ model Tenant {
   childTenants                 Tenant[]                     @relation("TenantHierarchy")
   subscriptions                Subscription[]
   tenantModules                TenantModule[]
+  labelPrinterConfigs           LabelPrinterConfig[]
   // Licença Mestra (Capítulo 2.10) — controle técnico de acesso/offline do app,
   // DISTINTO da relação `subscriptions` acima (que é cobrança):
   tenantLicense                TenantLicense?
@@ -338,6 +339,28 @@ model Module {
 }
 
 /// Associação ativa entre Tenant e Module — fonte de verdade do Feature Gating (Capítulo 2.6).
+// Capítulo 8.5/4.1 — impressão de etiquetas ZPL (Zebra/compatíveis) para produtos
+// com código de barras. Config por impressora física do tenant (normalmente uma por
+// balcão/loja); `isDefault` resolve qual usar quando o chamador não especifica.
+model LabelPrinterConfig {
+  id             String   @id @default(uuid())
+  tenantId       String
+  name           String // ex.: "Zebra Balcão 1"
+  connectionType String // "NETWORK" | "USB" | "BLUETOOTH" — apenas NETWORK tem envio real implementado (raw socket porta 9100); USB/BLUETOOTH ficam disponíveis só para download do .zpl
+  networkHost    String?
+  networkPort    Int?     @default(9100)
+  labelWidthMm   Int      @default(40)
+  labelHeightMm  Int      @default(25)
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("label_printer_configs")
+}
+
 model TenantModule {
   id            String    @id @default(uuid())
   tenantId      String
