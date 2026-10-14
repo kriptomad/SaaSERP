@@ -85,3 +85,33 @@ export async function createRecurringSubscription(stripeCustomerId: string, pric
     expand: ["latest_invoice.payment_intent"],
   });
 }
+
+// Capítulo 2.7.6 — cancelamento self-service. `atPeriodEnd=true` agenda o fim da
+// cobrança para o fechamento do ciclo vigente (acesso mantido até lá); `false` cancela
+// e encerra o acesso imediatamente (usado só dentro da janela de arrependimento do
+// Art. 49 CDC, combinado com o reembolso integral da última cobrança).
+export async function cancelStripeSubscription(stripeSubscriptionId: string, atPeriodEnd: boolean) {
+  const stripe = await getStripeClient();
+  if (atPeriodEnd) {
+    return stripe.subscriptions.update(stripeSubscriptionId, { cancel_at_period_end: true });
+  }
+  return stripe.subscriptions.cancel(stripeSubscriptionId);
+}
+
+// Desfaz um cancelamento agendado para o fim do ciclo (ainda não efetivado no Stripe).
+export async function undoStripeScheduledCancellation(stripeSubscriptionId: string) {
+  const stripe = await getStripeClient();
+  return stripe.subscriptions.update(stripeSubscriptionId, { cancel_at_period_end: false });
+}
+
+// Reembolso integral da última fatura paga (Art. 49 CDC) — busca o PaymentIntent da
+// invoice mais recente da assinatura e emite o refund total via Stripe.
+export async function refundLatestStripeInvoice(stripeSubscriptionId: string): Promise<string | null> {
+  const stripe = await getStripeClient();
+  const invoices = await stripe.invoices.list({ subscription: stripeSubscriptionId, status: "paid", limit: 1 });
+  const invoice = invoices.data[0];
+  const paymentIntentId = typeof invoice?.payment_intent === "string" ? invoice.payment_intent : invoice?.payment_intent?.id;
+  if (!paymentIntentId) return null;
+  const refund = await stripe.refunds.create({ payment_intent: paymentIntentId });
+  return refund.id;
+}

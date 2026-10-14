@@ -37,6 +37,13 @@ export const QUEUE_NAMES = {
   // (`LoyaltyTransaction.expiresAt`), consumida por
   // `workers/expire-loyalty-points.worker.ts`.
   LOYALTY_POINTS_EXPIRATION: "loyalty-points-expiration",
+  // Capítulo 2.7.6 — reconciliação diária de cancelamentos agendados
+  // (`Subscription.cancelAtPeriodEnd=true` cujo `currentPeriodEnd` já passou),
+  // consumida por `workers/enforce-scheduled-cancellations.worker.ts`. Necessária
+  // porque o Asaas não suporta "cancelar no fim do ciclo" nativamente — o Stripe já
+  // cancela sozinho via `cancel_at_period_end`, mas este job cobre os dois provedores
+  // de forma uniforme e também fecha o `Tenant.status` local em ambos os casos.
+  SCHEDULED_SUBSCRIPTION_CANCELLATIONS: "scheduled-subscription-cancellations",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -56,5 +63,9 @@ export const suspendOverdueTenantsQueue = new Queue(QUEUE_NAMES.SUSPEND_OVERDUE_
 export const pluggySyncQueue = new Queue(QUEUE_NAMES.PLUGGY_SYNC, { connection: queueRedisConnection });
 
 export const loyaltyPointsExpirationQueue = new Queue(QUEUE_NAMES.LOYALTY_POINTS_EXPIRATION, {
+  connection: queueRedisConnection,
+});
+
+export const scheduledSubscriptionCancellationsQueue = new Queue(QUEUE_NAMES.SCHEDULED_SUBSCRIPTION_CANCELLATIONS, {
   connection: queueRedisConnection,
 });

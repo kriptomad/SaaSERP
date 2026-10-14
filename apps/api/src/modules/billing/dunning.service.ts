@@ -39,10 +39,18 @@ export async function handlePaymentFailure(tenantId: string, subscriptionId: str
 }
 
 export async function handlePaymentRecovered(tenantId: string, subscriptionId: string) {
+  const current = await prismaUnscoped.subscription.findUnique({ where: { id: subscriptionId }, select: { firstChargedAt: true } });
   await prismaUnscoped.$transaction([
     prismaUnscoped.subscription.update({
       where: { id: subscriptionId },
-      data: { failedPaymentAttempts: 0, nextRetryAt: null, status: "ACTIVE" },
+      data: {
+        failedPaymentAttempts: 0,
+        nextRetryAt: null,
+        status: "ACTIVE",
+        // Primeira cobrança bem-sucedida desta assinatura — base da janela de
+        // arrependimento do Art. 49 CDC (Capítulo 2.7.6). Nunca sobrescrita depois.
+        firstChargedAt: current?.firstChargedAt ?? new Date(),
+      },
     }),
     prismaUnscoped.tenant.update({ where: { id: tenantId }, data: { status: "ACTIVE", gracePeriodEndsAt: null } }),
   ]);

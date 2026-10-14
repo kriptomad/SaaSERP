@@ -15,7 +15,7 @@ import { invalidateTenantModuleCache } from "../../middlewares/gatekeeper.middle
 
 export const modulesRouter = Router();
 
-async function hasManageSubscriptionPermission(role: string, userId: string): Promise<boolean> {
+export async function hasManageSubscriptionPermission(role: string, userId: string): Promise<boolean> {
   const permissionCode = "billing:subscription:manage";
   const [defaultGrant, override] = await Promise.all([
     prisma.roleDefaultPermission.findUnique({

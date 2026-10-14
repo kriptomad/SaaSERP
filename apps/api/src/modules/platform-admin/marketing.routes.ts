@@ -171,15 +171,79 @@ marketingAdminRouter.post("/platform-admin/referrals/:id/convert", requirePlatfo
 });
 
 // Separado de /convert: a recompensa (crédito de fatura) é um ato posterior e auditado, nunca presumido.
+// Aplica de fato os dois benefícios do Capítulo 2.8 (antes só marcava `rewardAppliedAt`,
+// sem nenhum efeito em billing — bug crítico reportado na mega-auditoria):
+// 1) crédito de meses acumulados na Subscription do tenant QUE INDICOU
+//    (`Subscription.creditBalanceMonths`, consumido antes de qualquer cobrança futura).
+// 2) desconto no primeiro ciclo cobrado da Subscription do tenant INDICADO
+//    (`Subscription.firstCycleDiscountPercent`).
+// Valores parametrizáveis via painel admin → Infraestrutura (SystemParameter), com
+// defaults conservadores caso o admin nunca os configure.
+const DEFAULT_REFERRAL_REWARD_CREDIT_MONTHS = 1;
+const DEFAULT_REFERRAL_REFERRED_DISCOUNT_PERCENT = 20;
+
+async function resolveReferralRewardConfig(): Promise<{ creditMonths: number; referredDiscountPercent: number }> {
+  const [creditMonthsParam, discountParam] = await Promise.all([
+    prisma.systemParameter.findUnique({ where: { key: "REFERRAL_REWARD_CREDIT_MONTHS" } }),
+    prisma.systemParameter.findUnique({ where: { key: "REFERRAL_REFERRED_DISCOUNT_PERCENT" } }),
+  ]);
+  const creditMonths = creditMonthsParam ? Number(creditMonthsParam.value) : DEFAULT_REFERRAL_REWARD_CREDIT_MONTHS;
+  const referredDiscountPercent = discountParam ? Number(discountParam.value) : DEFAULT_REFERRAL_REFERRED_DISCOUNT_PERCENT;
+  return {
+    creditMonths: Number.isFinite(creditMonths) && creditMonths > 0 ? creditMonths : DEFAULT_REFERRAL_REWARD_CREDIT_MONTHS,
+    referredDiscountPercent:
+      Number.isFinite(referredDiscountPercent) && referredDiscountPercent > 0
+        ? referredDiscountPercent
+        : DEFAULT_REFERRAL_REFERRED_DISCOUNT_PERCENT,
+  };
+}
+
 marketingAdminRouter.post("/platform-admin/referrals/:id/reward-applied", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
-  const referral = await prisma.referral.findUnique({ where: { id: req.params.id } });
+  const referral = await prisma.referral.findUnique({
+    where: { id: req.params.id },
+    include: { referralCode: { select: { tenantId: true } } },
+  });
   if (!referral) return err(res, 404, "NOT_FOUND", "Indicação não encontrada.");
   if (referral.status !== "CONVERTED") return err(res, 409, "NOT_CONVERTED", "Só indicações CONVERTED recebem recompensa.");
   if (referral.rewardAppliedAt) return err(res, 409, "REWARD_ALREADY_APPLIED", "Recompensa já registrada para esta indicação.");
 
   const claimed = await prisma.referral.updateMany({ where: { id: referral.id, rewardAppliedAt: null }, data: { rewardAppliedAt: new Date() } });
   if (claimed.count === 0) return err(res, 409, "REWARD_ALREADY_APPLIED", "Recompensa já registrada para esta indicação.");
-  await writeAuditLog(req, "REFERRAL_REWARD_APPLIED", "Referral", referral.id, {});
+
+  const { creditMonths, referredDiscountPercent } = await resolveReferralRewardConfig();
+
+  // As duas Subscriptions mais recentes dos tenants envolvidos — nunca presume-se
+  // "a única", pois um tenant pode ter histórico de Subscriptions antigas (upgrade de
+  // provedor, por exemplo).
+  const [referrerSubscription, referredSubscription] = await Promise.all([
+    prisma.subscription.findFirst({ where: { tenantId: referral.referralCode.tenantId }, orderBy: { createdAt: "desc" } }),
+    prisma.subscription.findFirst({ where: { tenantId: referral.referredTenantId }, orderBy: { createdAt: "desc" } }),
+  ]);
+
+  await prisma.$transaction([
+    ...(referrerSubscription
+      ? [
+          prisma.subscription.update({
+            where: { id: referrerSubscription.id },
+            data: { creditBalanceMonths: { increment: creditMonths } },
+          }),
+        ]
+      : []),
+    ...(referredSubscription && referredSubscription.firstCycleDiscountPercent == null
+      ? [
+          prisma.subscription.update({
+            where: { id: referredSubscription.id },
+            data: { firstCycleDiscountPercent: referredDiscountPercent },
+          }),
+        ]
+      : []),
+  ]);
+
+  await writeAuditLog(req, "REFERRAL_REWARD_APPLIED", "Referral", referral.id, {
+    creditMonthsGrantedToReferrer: referrerSubscription ? creditMonths : 0,
+    firstCycleDiscountPercentGrantedToReferred:
+      referredSubscription && referredSubscription.firstCycleDiscountPercent == null ? referredDiscountPercent : 0,
+  });
   const updated = await prisma.referral.findUniqueOrThrow({ where: { id: referral.id } });
   return res.json({ success: true, data: updated, error: null });
 });

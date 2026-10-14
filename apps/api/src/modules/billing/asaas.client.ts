@@ -75,3 +75,14 @@ export function createAsaasSubscription(input: CreateAsaasSubscriptionInput) {
 export function refundAsaasPayment(paymentId: string) {
   return asaasRequest(`/payments/${paymentId}/refund`, { method: "POST" });
 }
+
+// Capítulo 2.7.6 — cancelamento self-service. O Asaas não tem agendamento de
+// cancelamento para o fim do ciclo (diferente do Stripe `cancel_at_period_end`):
+// cancela imediatamente a assinatura no provedor, então o caller nunca deve chamar
+// isto para o caso "agendar para o fim do período" — nesse caso o cancelamento real
+// no Asaas é disparado depois, quando o ciclo vigente efetivamente fecha (ver
+// enforceScheduledCancellations em subscription.routes.ts), e localmente só se marca
+// `cancelAtPeriodEnd=true` até lá.
+export function cancelAsaasSubscription(subscriptionId: string) {
+  return asaasRequest(`/subscriptions/${subscriptionId}`, { method: "DELETE" });
+}
