@@ -130,6 +130,19 @@ const TENANT_SCOPED_MODELS = new Set([
   // tenantLicenseId -> TenantLicense, mesmo padrão já documentado acima para
   // BillingEvent/LoyaltyTransaction/etc.
   "TenantLicense",
+  // GAP DE AUDITORIA FECHADO (Capítulo 7.2, Rodada 15 — mega-deep-audit): os 10
+  // modelos abaixo possuem coluna tenantId real e única (sem dupla referência a
+  // tenant), mas não constavam nesta lista — a rede de segurança fail-closed da
+  // extensão não os cobria. Nenhuma das ~34 chamadas reais a esses modelos vazava
+  // dado entre tenants (todas filtravam manualmente), mas o invariante "injeção
+  // automática em TODAS as operações" (Capítulo 7.2) estava quebrado para eles.
+  "HealthInsurancePlan", "ClientCreditPayment", "StoreCreditTransaction", "ProductExchange",
+  "SeasonalityWindow", "TechnicianCommissionRule", "ProfessionalWorkingHours",
+  "ServiceCommissionEntry", "VehicleConsignmentPayout",
+  // ImpersonationSession (Capítulo 13.2) possui tenantId único e simples, mesmo
+  // padrão de SupportTicket/TenantApiKey acima: o painel de plataforma, ao listar
+  // sessões de impersonação entre tenants, usa deliberadamente prismaUnscoped.
+  "ImpersonationSession",
 ]);
 
 // NOTA CRÍTICA: Tenant em si NUNCA deve constar nesta lista. O modelo Tenant não

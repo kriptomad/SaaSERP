@@ -59,6 +59,32 @@ export interface OfficialTaxDocument {
   generatedAt: string;
 }
 
+export interface FirmPortfolioClient {
+  engagementId: string;
+  clientTenantId: string;
+  clientTradeName: string;
+  clientSlug: string;
+  clientCnpj: string | null;
+  scopes: AccountingEngagementScope[];
+  grantedAt: string;
+  tasks: { pending: number; late: number; done: number };
+}
+
+export interface FirmPortfolioTaskQueueItem {
+  id: string;
+  clientTradeName: string;
+  clientSlug: string;
+  taskType: string;
+  competencia: string;
+  dueDate: string;
+  status: AccountingTaskStatus;
+}
+
+export interface FirmPortfolio {
+  clients: FirmPortfolioClient[];
+  taskQueue: FirmPortfolioTaskQueueItem[];
+}
+
 export const accountingOfficeApi = {
   getFirmProfile: () => api.get<AccountingFirmProfile | null>("/accounting-firm-profile"),
   saveFirmProfile: (input: AccountingFirmProfileInput) => api.put<AccountingFirmProfile>("/accounting-firm-profile", input),
@@ -75,6 +101,8 @@ export const accountingOfficeApi = {
 
   listOfficialDocuments: (params?: { documentType?: string; clientTenantId?: string }) =>
     api.get<OfficialTaxDocument[]>("/official-tax-documents", params),
+
+  getFirmPortfolio: () => api.get<FirmPortfolio>("/accounting-firm-portfolio"),
 };
 
 export const ENGAGEMENT_SCOPE_LABEL: Record<AccountingEngagementScope, string> = {

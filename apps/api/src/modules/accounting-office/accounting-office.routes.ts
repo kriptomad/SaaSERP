@@ -211,6 +211,75 @@ accountingOfficeRouter.post("/accounting-engagements/:id/revoke", requireAuth, a
 });
 
 // ─────────────────────────────────────────────────────────────────────────
+// CARTEIRA DE CLIENTES DO ESCRITÓRIO (Capítulo 21.18.6) — GAP DE AUDITORIA
+// FECHADO: a Bible exige que o próprio tenant ACCOUNTING_OFFICE tenha uma
+// visão agregada de todos os clientes vinculados + fila de tarefas
+// consolidada, em vez de depender da mesma tela genérica do lado cliente.
+// ─────────────────────────────────────────────────────────────────────────
+
+accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requireTaskRead(req, res))) return;
+  const { tenantId } = req.session!;
+
+  const engagements = await prisma.accountingEngagement.findMany({
+    where: { accountingFirmTenantId: tenantId, status: "ACTIVE" },
+    include: { clientTenant: { select: { id: true, tradeName: true, slug: true, cnpj: true } } },
+    orderBy: { grantedAt: "desc" },
+  });
+
+  const clientTenantIds = engagements.map((e) => e.clientTenantId);
+  const taskCounts = await prisma.accountingTask.groupBy({
+    by: ["clientTenantId", "status"],
+    where: { accountingFirmTenantId: tenantId, clientTenantId: { in: clientTenantIds } },
+    _count: { _all: true },
+  });
+
+  const countsByClient = new Map<string, { pending: number; late: number; done: number }>();
+  for (const row of taskCounts) {
+    const entry = countsByClient.get(row.clientTenantId) ?? { pending: 0, late: 0, done: 0 };
+    if (row.status === "PENDING" || row.status === "IN_PROGRESS" || row.status === "BLOCKED") entry.pending += row._count._all;
+    if (row.status === "LATE") entry.late += row._count._all;
+    if (row.status === "DONE") entry.done += row._count._all;
+    countsByClient.set(row.clientTenantId, entry);
+  }
+
+  const portfolio = engagements.map((e) => ({
+    engagementId: e.id,
+    clientTenantId: e.clientTenantId,
+    clientTradeName: e.clientTenant.tradeName,
+    clientSlug: e.clientTenant.slug,
+    clientCnpj: e.clientTenant.cnpj,
+    scopes: e.scopes,
+    grantedAt: e.grantedAt,
+    tasks: countsByClient.get(e.clientTenantId) ?? { pending: 0, late: 0, done: 0 },
+  }));
+
+  const pendingTasksQueue = await prisma.accountingTask.findMany({
+    where: { accountingFirmTenantId: tenantId, status: { in: ["PENDING", "IN_PROGRESS", "LATE", "BLOCKED"] } },
+    include: { clientTenant: { select: { tradeName: true, slug: true } } },
+    orderBy: { dueDate: "asc" },
+    take: 100,
+  });
+
+  return res.json({
+    success: true,
+    data: {
+      clients: portfolio,
+      taskQueue: pendingTasksQueue.map((t) => ({
+        id: t.id,
+        clientTradeName: t.clientTenant.tradeName,
+        clientSlug: t.clientTenant.slug,
+        taskType: t.taskType,
+        competencia: t.competencia,
+        dueDate: t.dueDate,
+        status: t.status,
+      })),
+    },
+    error: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // TAREFAS RECORRENTES (Capítulo 21.18.4 — geração automática PENDENTE;
 // aqui apenas leitura/atualização manual de status)
 // ─────────────────────────────────────────────────────────────────────────

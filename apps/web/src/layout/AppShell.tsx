@@ -52,10 +52,21 @@ export function AppShell() {
   });
   const activeModuleCodes = activeModulesQuery.data?.moduleCodes ?? [];
 
-  const groups = NAV_GROUPS.map((g) => ({
-    ...g,
-    items: g.items.filter((i) => !i.roles || (user && i.roles.includes(user.role))),
-  }))
+  // GAP DE AUDITORIA FECHADO (Capítulo 21.18.6/22.1): filtro por Tenant.tenantType —
+  // aplicado ANTES de montar os itens do grupo, pois grupos inteiros de varejo (PDV,
+  // Estoque, nichos) não fazem sentido para um escritório de contabilidade
+  // (ACCOUNTING_OFFICE) nem para uma residência (PERSONAL), e vice-versa (o grupo
+  // "Minha Carteira" só existe para ACCOUNTING_OFFICE).
+  const tenantType = (tenant?.tenantType as "BUSINESS" | "PERSONAL" | "ACCOUNTING_OFFICE" | undefined) ?? "BUSINESS";
+  const groups = NAV_GROUPS.filter((g) => !g.tenantTypes || g.tenantTypes.includes(tenantType))
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((i) => !i.tenantTypes || i.tenantTypes.includes(tenantType)),
+    }))
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((i) => !i.roles || (user && i.roles.includes(user.role))),
+    }))
     .map((g) => ({
       ...g,
       items: g.items.filter(

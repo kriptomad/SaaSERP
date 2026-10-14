@@ -56,18 +56,28 @@ export interface NavItem {
   // Papéis (UserRole) autorizados a ver este item no menu — omitido = visível para todos
   // os papéis autenticados. Usado pela Licença Mestra (Capítulo 2.10), restrita ao Owner.
   roles?: string[];
+  // Tipos de tenant (Tenant.tenantType) autorizados a ver este item — omitido = visível
+  // para qualquer tipo de tenant. GAP DE AUDITORIA FECHADO (Capítulo 21.18.6/22.1): antes
+  // desta correção, nenhum item de nav era filtrado por tenantType, então um escritório
+  // de contabilidade (ACCOUNTING_OFFICE) via o menu inteiro de varejo (PDV/Estoque/
+  // Compras/Comanda etc.), e um tenant pessoal (PERSONAL) via o mesmo menu de uma loja.
+  tenantTypes?: Array<"BUSINESS" | "PERSONAL" | "ACCOUNTING_OFFICE">;
 }
 
 export interface NavGroup {
   id: string;
   label: string;
   items: NavItem[];
+  // Mesma semântica de `NavItem.tenantTypes`, aplicada ao grupo inteiro — usado para
+  // esconder grupos inteiros de varejo/nicho de tenants não-BUSINESS.
+  tenantTypes?: Array<"BUSINESS" | "PERSONAL" | "ACCOUNTING_OFFICE">;
 }
 
 export const NAV_GROUPS: NavGroup[] = [
   {
     id: "core",
     label: "Geral",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "dashboard", label: "Dashboard", path: "/dashboard", icon: <DashboardIcon /> },
       { id: "pdv", label: "PDV", path: "/pdv", icon: <PointOfSaleIcon /> },
@@ -79,6 +89,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "cadastros",
     label: "Cadastros",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "clientes", label: "Clientes", path: "/cadastros/clientes", icon: <PeopleIcon /> },
       { id: "fornecedores", label: "Fornecedores", path: "/cadastros/fornecedores", icon: <LocalShippingIcon /> },
@@ -89,6 +100,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "estoque",
     label: "Estoque e Compras",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "estoque", label: "Estoque", path: "/estoque", icon: <InventoryIcon /> },
       { id: "movimentacoes", label: "Movimentações", path: "/estoque/movimentacoes", icon: <SwapVertIcon /> },
@@ -100,6 +112,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "financeiro",
     label: "Financeiro",
+    tenantTypes: ["BUSINESS", "ACCOUNTING_OFFICE"],
     items: [
       { id: "fluxo", label: "Fluxo de caixa / DRE", path: "/financeiro", icon: <InsightsIcon /> },
       { id: "pagar", label: "Contas a pagar", path: "/financeiro/pagar", icon: <ArrowCircleUpIcon /> },
@@ -109,6 +122,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "servicos",
     label: "Serviços",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "os", label: "Ordens de Serviço", path: "/os", icon: <BuildIcon />, moduleCodes: ["WORK_ORDER", "TIRE_WARRANTY"] },
       { id: "agenda", label: "Agenda", path: "/agenda", icon: <EventIcon />, moduleCodes: ["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"] },
@@ -119,12 +133,21 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "fidelidade",
     label: "Fidelidade",
+    tenantTypes: ["BUSINESS"],
     items: [{ id: "fidelidade", label: "Fidelidade e indicação", path: "/fidelidade", icon: <LoyaltyIcon /> }],
   },
   {
     id: "contabilidade",
     label: "Contabilidade",
     items: [{ id: "contabilidade", label: "Escritório contábil", path: "/contabilidade", icon: <AccountBalanceIcon /> }],
+  },
+  {
+    id: "contabilidade-escritorio",
+    label: "Minha Carteira",
+    tenantTypes: ["ACCOUNTING_OFFICE"],
+    items: [
+      { id: "carteira-clientes", label: "Carteira de Clientes", path: "/contabilidade/carteira", icon: <AccountBalanceIcon /> },
+    ],
   },
   {
     id: "administracao",
@@ -135,10 +158,11 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: "notificacoes", label: "Notificações", path: "/configuracoes/notificacoes", icon: <NotificationsIcon /> },
     ],
   },
-  { id: "mercado", label: "Mercado / Conveniência", items: [{ id: "curva-abc", label: "Curva ABC de produtos", path: "/relatorios/curva-abc", icon: <AssessmentIcon /> }] },
+  { id: "mercado", label: "Mercado / Conveniência", tenantTypes: ["BUSINESS"], items: [{ id: "curva-abc", label: "Curva ABC de produtos", path: "/relatorios/curva-abc", icon: <AssessmentIcon /> }] },
   {
     id: "assistencia-tecnica",
     label: "Assistência Técnica",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "os-relatorios", label: "Relatórios de O.S. (comissão/garantia)", path: "/os/relatorios", icon: <AssessmentIcon />, moduleCode: "WORK_ORDER" },
     ],
@@ -146,11 +170,13 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "adega",
     label: "Adega / Bebidas",
+    tenantTypes: ["BUSINESS"],
     items: [{ id: "cascos", label: "Conta-corrente de cascos", path: "/adega/cascos", icon: <WineBarIcon />, moduleCode: "LIQUOR_LEDGER" }],
   },
   {
     id: "padaria",
     label: "Padaria / Confeitaria",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "fichas-tecnicas", label: "Fichas Técnicas (BOM)", path: "/fichas-tecnicas", icon: <BakeryDiningIcon />, moduleCode: "RECIPE_BOM" },
       { id: "producao", label: "Produção / perdas", path: "/producao", icon: <DonutLargeIcon />, moduleCode: "RECIPE_BOM" },
@@ -159,6 +185,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "farmacia",
     label: "Farmácia / Drogaria",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "receitas", label: "Retenção de receitas", path: "/farmacia/receitas", icon: <LocalPharmacyIcon />, moduleCode: "PHARMACY_SNGPC" },
       { id: "validades", label: "Lotes a vencer", path: "/farmacia/validades", icon: <EventBusyIcon />, moduleCode: "PHARMACY_SNGPC" },
@@ -167,6 +194,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "varejo",
     label: "Varejo Geral",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "credito", label: "Conta-corrente (crediário)", path: "/cadastros/clientes/credito", icon: <CreditScoreIcon /> },
       { id: "giro-variantes", label: "Giro de estoque por grade", path: "/varejo/giro-variantes", icon: <PaymentsIcon /> },
@@ -175,6 +203,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "moda",
     label: "Moda / Calçados",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "consulta-variantes", label: "Consulta rápida de saldo (grade)", path: "/varejo/consulta-variantes", icon: <InventoryIcon />, moduleCode: "FASHION_VARIANTS" },
       { id: "giro-colecao", label: "Giro por coleção/estação", path: "/relatorios/giro-colecao", icon: <InsightsIcon />, moduleCode: "FASHION_VARIANTS" },
@@ -184,6 +213,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "otica",
     label: "Ótica",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "optica-laboratorio", label: "Laboratório óptico", path: "/optica/laboratorio", icon: <VisibilityIcon />, moduleCode: "OPTICAL_LAB" },
       { id: "optica-convenios", label: "Convênios", path: "/optica/convenios", icon: <LocalHospitalIcon />, moduleCode: "OPTICAL_LAB" },
@@ -192,6 +222,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "papelaria",
     label: "Papelaria / Presentes",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "sazonalidade", label: "Janelas de sazonalidade", path: "/sazonalidade", icon: <CardGiftcardIcon />, moduleCode: "GIFT_PERSONALIZATION" },
       { id: "sazonalidade-liquidacao", label: "Liquidação pós-sazonalidade", path: "/sazonalidade/liquidacao", icon: <CardGiftcardIcon />, moduleCode: "GIFT_PERSONALIZATION" },
@@ -201,6 +232,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "material-construcao",
     label: "Material de Construção / Ferragens",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "ferragens-faturamento", label: "Faturamento mensal (profissionais)", path: "/ferragens/faturamento", icon: <ConstructionIcon />, moduleCode: "CONSTRUCTION_BULK_UNITS" },
     ],
@@ -208,9 +240,12 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "setor-automotivo",
     label: "Setor Automotivo",
+    tenantTypes: ["BUSINESS"],
     items: [
       { id: "pneus-garantia", label: "Garantia de pneus por lote", path: "/pneus/garantia", icon: <TireRepairIcon />, moduleCode: "TIRE_WARRANTY" },
       { id: "estetica-fila", label: "Fila de atendimento (lava-rápido)", path: "/estetica-automotiva/fila", icon: <LocalCarWashIcon />, moduleCode: "CAR_WASH_QUEUE" },
+      { id: "oficina-os", label: "Ordens de Serviço (Oficina)", path: "/os", icon: <BuildIcon />, moduleCode: "AUTO_REPAIR_SHOP" },
+      { id: "veiculos-estoque", label: "Estoque de veículos (consignação)", path: "/cadastros/prontuarios", icon: <PetsIcon />, moduleCode: "VEHICLE_DEALERSHIP" },
     ],
   },
 ];

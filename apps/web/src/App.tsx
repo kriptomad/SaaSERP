@@ -32,6 +32,7 @@ import { ClientRecordsPage } from "./modules/client-records/ClientRecordsPage";
 import { OpticalLabPage } from "./modules/optical/OpticalLabPage";
 import { HealthInsurancePage } from "./modules/optical/HealthInsurancePage";
 import { AccountingOfficePage } from "./modules/accounting-office/AccountingOfficePage";
+import { FirmPortfolioPage } from "./modules/accounting-office/FirmPortfolioPage";
 import { LicensingPage } from "./modules/licensing/LicensingPage";
 import { HardwarePage } from "./modules/settings/HardwarePage";
 import { NotificationSettingsPage } from "./modules/notifications/NotificationSettingsPage";
@@ -131,6 +132,7 @@ export function App() {
             <Route path="/comanda" element={<ComandaPage />} />
             <Route path="/cadastros/prontuarios" element={<ClientRecordsPage />} />
             <Route path="/contabilidade" element={<AccountingOfficePage />} />
+            <Route path="/contabilidade/carteira" element={<FirmPortfolioPage />} />
             <Route path="/configuracoes/hardware" element={<HardwarePage />} />
             <Route path="/configuracoes/notificacoes" element={<NotificationSettingsPage />} />
             <Route path="/relatorios/curva-abc" element={<AbcCurveReportPage />} />

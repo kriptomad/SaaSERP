@@ -21,11 +21,23 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireAnyModule } from "../../middlewares/gatekeeper.middleware";
 import { calculateTax } from "../fiscal/tax-engine.service";
 import { resolveTaxReformPhase } from "../fiscal/tax-reform-phase.service";
 import { consumeRecipeForComandaItem, MissingIngredientStockError } from "../../services/production/consume-recipe-for-comanda-item.service";
 
 export const comandaRouter = Router();
+
+// GAP DE AUDITORIA FECHADO (Capítulo 2.6/11.1): "Comanda Eletrônica" é a tela
+// operacional central do módulo pago IFOOD_INTEGRATION (Lanchonete/Restaurante),
+// e é reaproveitada por SALON_BOOKING (Salão de Beleza) e CAR_WASH_QUEUE
+// (Lava-Rápido) para atendimento por comanda de serviço. Antes desta correção,
+// nenhuma rota de comanda exigia `requireModule`/`requireAnyModule` — qualquer
+// tenant, mesmo sem nenhum desses 3 módulos contratados, conseguia abrir mesas e
+// lançar comandas, e quem pagava pelo módulo não tinha nenhum gate garantindo a
+// entrega real da funcionalidade.
+comandaRouter.use(requireAuth, requireAnyModule(["IFOOD_INTEGRATION", "SALON_BOOKING", "CAR_WASH_QUEUE"]));
+
 
 async function hasPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
   const [defaultGrant, override] = await Promise.all([
