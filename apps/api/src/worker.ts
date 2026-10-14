@@ -10,6 +10,7 @@ import { startWhatsAppNotificationsWorker } from "./workers/whatsapp-notificatio
 import { startPluggySyncWorker } from "./workers/pluggy-sync.worker";
 import { startExpireLoyaltyPointsWorker, scheduleExpireLoyaltyPointsJob } from "./workers/expire-loyalty-points.worker";
 import { startEnforceScheduledCancellationsWorker, scheduleEnforceScheduledCancellationsJob } from "./workers/enforce-scheduled-cancellations.worker";
+import { startWebhookDeliveryWorker } from "./workers/webhook-delivery.worker";
 
 async function main() {
   const log = createModuleLogger("worker");
@@ -22,8 +23,9 @@ async function main() {
   await scheduleExpireLoyaltyPointsJob();
   const enforceScheduledCancellationsWorker = startEnforceScheduledCancellationsWorker();
   await scheduleEnforceScheduledCancellationsJob();
+  const webhookDeliveryWorker = startWebhookDeliveryWorker();
 
-  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker]) {
+  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker]) {
     worker.on("completed", (job) => {
       log.info({ queue: job.queueName, jobId: job.id, result: job.returnvalue }, "job concluído");
     });

@@ -35,6 +35,8 @@ import {
 } from "./focus-nfe-credential";
 import { notifyTenant } from "../notifications/notify.service";
 import { withCircuitBreaker } from "../../lib/circuit-breaker";
+import { dispatchWebhookEvent } from "../../lib/webhook-dispatch";
+import { createModuleLogger } from "../../lib/logger";
 
 const FOCUS_NFE_BREAKER = "focus-nfe";
 
@@ -295,6 +297,18 @@ export async function emitFiscalDocument(
         focusNfeStatusSefaz: typeof body.status_sefaz === "string" ? body.status_sefaz : null,
         focusNfeMensagemSefaz: typeof body.mensagem_sefaz === "string" ? body.mensagem_sefaz : null,
       },
+    });
+    // Capítulo 15.4 — webhook de saída "fiscal_document.authorized": não bloqueia a
+    // autorização do documento fiscal caso o enfileiramento do dispatch falhe (mesmo
+    // princípio de close-sale.service.ts/sale.completed).
+    await dispatchWebhookEvent(params.tenantId, "fiscal_document.authorized", {
+      fiscalDocumentId: fiscalDocument.id,
+      saleId: fiscalDocument.saleId,
+      accessKey,
+      focusNfeNumero: typeof body.numero === "string" ? body.numero : null,
+      focusNfeSerie: typeof body.serie === "string" ? body.serie : null,
+    }).catch((error) => {
+      createModuleLogger("emit-fiscal-document").error({ fiscalDocumentId: fiscalDocument.id, err: error }, "falha ao enfileirar webhook fiscal_document.authorized");
     });
     return { authorized: true, accessKey, rejectionReason: null };
   }

@@ -12,6 +12,8 @@ import { deductStockFefoWithinTx } from "../../services/stock/deduct-stock-fefo.
 import { InsufficientStockError } from "../../services/stock/deduct-stock-fefo.service";
 import { enqueueFiscalEmission } from "../fiscal/queues/fiscal-emission.queue";
 import { accrueLoyaltyPoints } from "../loyalty/accrue-loyalty-points.service";
+import { dispatchWebhookEvent } from "../../lib/webhook-dispatch";
+import { createModuleLogger } from "../../lib/logger";
 
 // Capítulo 11.2 — Ótica: prazo de entrega do laboratório é descrito em DIAS ÚTEIS
 // (1-2 para lente de prateleira, 3-10+ para personalizada) — aproximação simples de
@@ -599,6 +601,18 @@ export async function closeSaleAndEmitFiscalDocument(prisma: TenantScopedPrismaC
   const result = await closeSale(prisma, input);
   if (!result.isReplay && result.fiscalDocument) {
     await enqueueFiscalEmission({ fiscalDocumentId: result.fiscalDocument.id, tenantId: input.tenantId });
+    // Capítulo 15.4 — webhook de saída "sale.completed" (ver schema.prisma,
+    // TenantWebhookEndpoint.eventTypes). Não bloqueia o fechamento da venda caso o
+    // próprio enfileiramento do dispatch falhe (ex.: Redis fora do ar) — o fluxo
+    // crítico (venda registrada) nunca pode depender de uma integração opcional.
+    await dispatchWebhookEvent(input.tenantId, "sale.completed", {
+      saleId: result.sale.id,
+      totalAmount: result.sale.totalAmount,
+      channel: result.sale.channel,
+      closedAt: result.sale.createdAt,
+    }).catch((error) => {
+      createModuleLogger("close-sale").error({ saleId: result.sale.id, err: error }, "falha ao enfileirar webhook sale.completed");
+    });
   }
   return result;
 }

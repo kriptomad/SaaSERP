@@ -46,6 +46,12 @@ export const QUEUE_NAMES = {
   // cancela sozinho via `cancel_at_period_end`, mas este job cobre os dois provedores
   // de forma uniforme e também fecha o `Tenant.status` local em ambos os casos.
   SCHEDULED_SUBSCRIPTION_CANCELLATIONS: "scheduled-subscription-cancellations",
+  // Capítulo 15.4 — disparo real de webhooks de saída (TenantWebhookEndpoint),
+  // consumida por `workers/webhook-delivery.worker.ts`. Produzida por
+  // `lib/webhook-dispatch.ts` sempre que um serviço de domínio chama
+  // `dispatchWebhookEvent()` após o commit do evento (ex.: venda fechada, NF-e
+  // autorizada) — nunca síncrono dentro da transação que gerou o evento.
+  WEBHOOK_DELIVERY: "webhook-delivery",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -71,3 +77,5 @@ export const loyaltyPointsExpirationQueue = new Queue(QUEUE_NAMES.LOYALTY_POINTS
 export const scheduledSubscriptionCancellationsQueue = new Queue(QUEUE_NAMES.SCHEDULED_SUBSCRIPTION_CANCELLATIONS, {
   connection: queueRedisConnection,
 });
+
+export const webhookDeliveryQueue = new Queue(QUEUE_NAMES.WEBHOOK_DELIVERY, { connection: queueRedisConnection });
