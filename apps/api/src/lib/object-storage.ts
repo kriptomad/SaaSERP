@@ -27,6 +27,7 @@ export const STORAGE_CATEGORIES = {
   avatars: { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"], maxBytes: 5 * 1024 * 1024 },
   "fiscal-xml": { allowedMimeTypes: ["text/xml", "application/xml"], maxBytes: 2 * 1024 * 1024 },
   "client-record-photos": { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"], maxBytes: 15 * 1024 * 1024 },
+  "official-tax-documents": { allowedMimeTypes: ["text/plain", "application/xml"], maxBytes: 20 * 1024 * 1024 },
 } as const;
 export type StorageCategory = keyof typeof STORAGE_CATEGORIES;
 
@@ -149,6 +150,39 @@ export async function presignObjectDownload(tenantId: string, storageKey: string
   const command = new GetObjectCommand({ Bucket: config.bucket, Key: storageKey });
   const downloadUrl = await getSignedUrl(client, command, { expiresIn: PRESIGNED_DOWNLOAD_EXPIRES_SECONDS });
   return { downloadUrl, expiresInSeconds: PRESIGNED_DOWNLOAD_EXPIRES_SECONDS };
+}
+
+export interface PutObjectDirectInput {
+  tenantId: string;
+  category: StorageCategory;
+  fileName: string;
+  mimeType: string;
+  body: string | Buffer;
+}
+
+/**
+ * Upload DIRETO pelo backend (sem presigned URL) — usado para arquivos que o
+ * próprio servidor gera (ex.: SPED ECD/DEFIS, Capítulo 21.18.5), nunca enviados
+ * pelo navegador. Diferente de `presignObjectUpload`, aqui o binário/texto passa
+ * pela memória do processo Node uma única vez (arquivos de declaração fiscal são
+ * tipicamente pequenos — KB a poucos MB — o custo é aceitável).
+ */
+export async function putObjectDirect(input: PutObjectDirectInput): Promise<{ storageKey: string }> {
+  const categoryDef = STORAGE_CATEGORIES[input.category];
+  if (!categoryDef.allowedMimeTypes.includes(input.mimeType as never)) {
+    throw new Error(`Tipo de arquivo não permitido para "${input.category}": ${input.mimeType}.`);
+  }
+  const { client, config } = await getR2Client();
+  const storageKey = `tenants/${input.tenantId}/${input.category}/${crypto.randomUUID()}-${sanitizeFileName(input.fileName)}`;
+  await client.send(
+    new PutObjectCommand({
+      Bucket: config.bucket,
+      Key: storageKey,
+      Body: input.body,
+      ContentType: input.mimeType,
+    }),
+  );
+  return { storageKey };
 }
 
 /** Teste de conexão real usado por `test-integration-credential.ts` (HeadBucket — não lista nem baixa nada, só confirma credencial + bucket). */

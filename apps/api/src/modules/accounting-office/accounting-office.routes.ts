@@ -13,13 +13,18 @@
 //     de auditoria real.
 //   - CRUD de leitura/atualização de `AccountingTask` (sem geração automática
 //     via cron — Capítulo 21.18.4, PENDENTE).
-//   - Listagem de `OfficialTaxDocument` (sem geração real de ECD/ECF/SPED —
-//     Capítulo 21.18.5, PENDENTE).
+//   - Geração real de ECD (SPED Contábil, blocos 0/I/J/9) e DEFIS (receita
+//     bruta mensal real) — `sped-ecd.service.ts`. ECF/EFD-Reinf/DCTFWeb/
+//     Informe de Rendimentos do Sócio permanecem PENDENTES (Capítulo
+//     21.18.5/21.18.10/21.18.11/21.18.12) — exigem dado-fonte de folha/
+//     eSocial/sócios que este schema não modela; ver justificativa completa
+//     no cabeçalho de `sped-ecd.service.ts`.
 //   - CRUD de `AccountingFirmProfile` (perfil público do escritório no
 //     marketplace — Capítulo 21.18.6, sem busca/listagem pública ainda).
 // PENDENTE (flagado explicitamente, não escondido): cron de geração de
-// tarefas (21.18.4), geração real de ECD/ECF/EFD-Reinf/DCTFWeb/DEFIS
-// (21.18.5/21.18.10/21.18.11), marketplace de busca pública + reviews
+// tarefas (21.18.4), geração real de ECF/EFD-Reinf/DCTFWeb/Informe de
+// Rendimentos do Sócio (21.18.5/21.18.10/21.18.11/21.18.12 — dado-fonte
+// inexistente no schema), marketplace de busca pública + reviews
 // (21.18.6/21.18.9), espelhamento automático de honorário em AP/AR
 // (21.18.8), módulo sócios/pró-labore/IRPF (21.18.12).
 import { Router, Request, Response } from "express";
@@ -35,6 +40,8 @@ import {
   EngagementAcceptanceExpiredError,
   NoActiveEngagementError,
 } from "../../services/accounting-office/engagement.service";
+import { generateSpedEcd, generateDefis, NoActiveLayoutVersionError } from "../../services/accounting-office/sped-ecd.service";
+import { putObjectDirect, presignObjectDownload } from "../../lib/object-storage";
 
 export const accountingOfficeRouter = Router();
 
@@ -77,6 +84,15 @@ async function requireDocumentRead(req: Request, res: Response): Promise<boolean
   const { userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "accounting-office:document:read"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar documentos oficiais." } });
+    return false;
+  }
+  return true;
+}
+
+async function requireDocumentWrite(req: Request, res: Response): Promise<boolean> {
+  const { userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "accounting-office:document:write"))) {
+    res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite gerar documentos oficiais." } });
     return false;
   }
   return true;
@@ -326,8 +342,14 @@ accountingOfficeRouter.patch("/accounting-tasks/:id", requireAuth, async (req: R
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// DOCUMENTOS OFICIAIS (Capítulo 21.18.5 — geração real de ECD/ECF PENDENTE;
-// aqui apenas listagem de documentos já existentes)
+// DOCUMENTOS OFICIAIS (Capítulo 21.18.5) — GAP DE AUDITORIA FECHADO NESTA
+// RODADA: geração real de ECD (SPED Contábil Digital, blocos 0/I/J/9 a partir
+// dos saldos reais por conta contábil, mesma base de dados da DRE real) e
+// DEFIS (receita bruta mensal real do ano-calendário). EFD-Reinf/DCTFWeb/
+// Informe de Rendimentos do Sócio permanecem PENDENTES — exigem dado-fonte
+// de folha/eSocial/sócios que este schema não modela (ver
+// `sped-ecd.service.ts`, comentário de cabeçalho, para a justificativa
+// honesta e completa do que fica fora de escopo e por quê).
 // ─────────────────────────────────────────────────────────────────────────
 
 accountingOfficeRouter.get("/official-tax-documents", requireAuth, async (req: Request, res: Response) => {
@@ -357,3 +379,125 @@ accountingOfficeRouter.get("/official-tax-documents", requireAuth, async (req: R
   });
   return res.json({ success: true, data: documents, error: null });
 });
+
+const generateDocumentSchema = z.object({
+  clientTenantId: z.string().uuid().optional(), // omitido quando o próprio tenant gera para si (Caminho B, sem escritório contratado)
+  documentType: z.enum(["ECD", "DEFIS"]),
+  // ECD exige período (competência contábil); DEFIS exige apenas o ano-calendário.
+  competenciaInicio: z.string().datetime().optional(),
+  competenciaFim: z.string().datetime().optional(),
+  calendarYear: z.number().int().min(2000).max(2100).optional(),
+});
+
+/**
+ * Gera de fato o arquivo (ECD/DEFIS), faz upload para R2 e persiste o
+ * `OfficialTaxDocument` com status GENERATED. Caminho A (contador) exige
+ * vínculo ATIVO com o tenant-cliente; Caminho B (lojista autogerando) não
+ * exige vínculo nenhum.
+ */
+accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requireDocumentWrite(req, res))) return;
+  const { tenantId } = req.session!;
+
+  const parsed = generateDocumentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+
+  let ownerTenantId = tenantId;
+  let generatedByAccountingFirmTenantId: string | null = null;
+  if (parsed.data.clientTenantId && parsed.data.clientTenantId !== tenantId) {
+    try {
+      await assertAccountingAccess(tenantId, parsed.data.clientTenantId);
+    } catch (err) {
+      if (err instanceof NoActiveEngagementError) {
+        return res.status(403).json({ success: false, data: null, error: { code: "NO_ACTIVE_ENGAGEMENT", message: err.message } });
+      }
+      throw err;
+    }
+    ownerTenantId = parsed.data.clientTenantId;
+    generatedByAccountingFirmTenantId = tenantId;
+  }
+
+  try {
+    let content: string;
+    let layoutVersion: string;
+    let competenciaInicio: Date;
+    let competenciaFim: Date;
+
+    if (parsed.data.documentType === "ECD") {
+      if (!parsed.data.competenciaInicio || !parsed.data.competenciaFim) {
+        return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "ECD exige competenciaInicio e competenciaFim." } });
+      }
+      competenciaInicio = new Date(parsed.data.competenciaInicio);
+      competenciaFim = new Date(parsed.data.competenciaFim);
+      const result = await generateSpedEcd(ownerTenantId, competenciaInicio, competenciaFim);
+      content = result.content;
+      layoutVersion = result.layoutVersion;
+    } else {
+      if (!parsed.data.calendarYear) {
+        return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "DEFIS exige calendarYear." } });
+      }
+      competenciaInicio = new Date(Date.UTC(parsed.data.calendarYear, 0, 1));
+      competenciaFim = new Date(Date.UTC(parsed.data.calendarYear, 11, 31, 23, 59, 59));
+      const result = await generateDefis(ownerTenantId, parsed.data.calendarYear);
+      content = result.content;
+      layoutVersion = result.layoutVersion;
+    }
+
+    const fileName = `${parsed.data.documentType}-${competenciaInicio.toISOString().slice(0, 10)}-${competenciaFim.toISOString().slice(0, 10)}.txt`;
+    const { storageKey } = await putObjectDirect({
+      tenantId: ownerTenantId,
+      category: "official-tax-documents",
+      fileName,
+      mimeType: "text/plain",
+      body: content,
+    });
+
+    const document = await prisma.officialTaxDocument.create({
+      data: {
+        tenantId: ownerTenantId,
+        generatedByAccountingFirmTenantId,
+        documentType: parsed.data.documentType,
+        layoutVersion,
+        competenciaInicio,
+        competenciaFim,
+        fileUrl: storageKey,
+        status: "GENERATED",
+      },
+    });
+
+    return res.status(201).json({ success: true, data: document, error: null });
+  } catch (err) {
+    if (err instanceof NoActiveLayoutVersionError) {
+      return res.status(422).json({ success: false, data: null, error: { code: "NO_ACTIVE_LAYOUT_VERSION", message: err.message } });
+    }
+    throw err;
+  }
+});
+
+/** URL assinada de download do arquivo gerado (reaproveita o mesmo presign de leitura do R2 usado em `storage.routes.ts`). */
+accountingOfficeRouter.get("/official-tax-documents/:id/download", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requireDocumentRead(req, res))) return;
+  const { tenantId } = req.session!;
+  const document = await prisma.officialTaxDocument.findUnique({ where: { id: req.params.id } });
+  if (!document) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Documento não encontrado." } });
+  }
+  let allowed = document.tenantId === tenantId;
+  if (!allowed && document.generatedByAccountingFirmTenantId === tenantId) allowed = true;
+  if (!allowed) {
+    try {
+      await assertAccountingAccess(tenantId, document.tenantId);
+      allowed = true;
+    } catch {
+      allowed = false;
+    }
+  }
+  if (!allowed) {
+    return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Você não tem acesso a este documento." } });
+  }
+  const { downloadUrl, expiresInSeconds } = await presignObjectDownload(document.tenantId, document.fileUrl);
+  return res.json({ success: true, data: { downloadUrl, expiresInSeconds }, error: null });
+});
+

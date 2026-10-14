@@ -92,6 +92,7 @@ INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES 
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'OWNER'::"UserRole", 'accounting-office:task:read') ON CONFLICT (role, "permissionCode") DO NOTHING;
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'OWNER'::"UserRole", 'accounting-office:task:write') ON CONFLICT (role, "permissionCode") DO NOTHING;
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'OWNER'::"UserRole", 'accounting-office:document:read') ON CONFLICT (role, "permissionCode") DO NOTHING;
+INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'OWNER'::"UserRole", 'accounting-office:document:write') ON CONFLICT (role, "permissionCode") DO NOTHING;
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'OWNER'::"UserRole", 'licensing:license:read') ON CONFLICT (role, "permissionCode") DO NOTHING;
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'OWNER'::"UserRole", 'licensing:license:manage') ON CONFLICT (role, "permissionCode") DO NOTHING;
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'OWNER'::"UserRole", 'work-order:commission:manage') ON CONFLICT (role, "permissionCode") DO NOTHING;
@@ -150,6 +151,7 @@ INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES 
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'MANAGER'::"UserRole", 'accounting-office:task:read') ON CONFLICT (role, "permissionCode") DO NOTHING;
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'MANAGER'::"UserRole", 'accounting-office:task:write') ON CONFLICT (role, "permissionCode") DO NOTHING;
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'MANAGER'::"UserRole", 'accounting-office:document:read') ON CONFLICT (role, "permissionCode") DO NOTHING;
+INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'MANAGER'::"UserRole", 'accounting-office:document:write') ON CONFLICT (role, "permissionCode") DO NOTHING;
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'MANAGER'::"UserRole", 'work-order:commission:manage') ON CONFLICT (role, "permissionCode") DO NOTHING;
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'MANAGER'::"UserRole", 'liquor-ledger:ledger:read') ON CONFLICT (role, "permissionCode") DO NOTHING;
 INSERT INTO public.role_default_permissions (id, role, "permissionCode") VALUES (gen_random_uuid(), 'MANAGER'::"UserRole", 'liquor-ledger:ledger:write') ON CONFLICT (role, "permissionCode") DO NOTHING;

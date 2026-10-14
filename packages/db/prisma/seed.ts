@@ -411,6 +411,7 @@ const OWNER_PERMISSIONS = [
   "accounting-office:task:read",
   "accounting-office:task:write",
   "accounting-office:document:read",
+  "accounting-office:document:write",
   // Licença Mestra (Capítulo 2.10) — exclusivamente Owner: ativação/renovação/trial da
   // licença mestra é decisão de dono do negócio, nunca do Manager/operação do dia a dia
   // (mesmo tratamento dado a "billing:subscription:manage" acima).
@@ -485,6 +486,7 @@ const MANAGER_PERMISSIONS = [
   "accounting-office:task:read",
   "accounting-office:task:write",
   "accounting-office:document:read",
+  "accounting-office:document:write",
   // Capítulo 4.2/4.3/4.5 — MANAGER administra comissão, cascos e receita/validade no
   // dia a dia da loja (OWNER também tem via matriz acima; CASHIER só o necessário no balcão).
   "work-order:commission:manage",
