@@ -14,6 +14,13 @@ import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { parseNfeXml, matchNfeItemsToCatalog, findSupplierByDocument, InvalidNfeXmlError } from "./nfe-xml-import.service";
+import { isFeatureEnabled } from "../../lib/feature-flags";
+
+// Rollout progressivo (Capítulo 15.2) — feature nova (ver nfe-xml-import.service.ts),
+// liberada por padrão para tenants cadastrados pelo painel admin em
+// FeatureFlag.enabledForTenantIds durante o beta, depois ampliada via
+// `rolloutPercent` sem precisar de novo deploy.
+const NFE_XML_IMPORT_FLAG = "NFE_XML_IMPORT";
 
 export const nfeXmlImportRouter = Router();
 
@@ -38,6 +45,9 @@ const previewSchema = z.object({ xml: z.string().min(1) });
 
 nfeXmlImportRouter.post("/purchase-orders/import-nfe/preview", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireStockWrite(req, res))) return;
+  if (!(await isFeatureEnabled(NFE_XML_IMPORT_FLAG, req.session!.tenantId))) {
+    return res.status(403).json({ success: false, data: null, error: { code: "FEATURE_NOT_ENABLED", message: "O import de XML de NF-e ainda não está disponível para este tenant." } });
+  }
   const parsedBody = previewSchema.safeParse(req.body);
   if (!parsedBody.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsedBody.error.message } });
@@ -83,6 +93,9 @@ const confirmSchema = z.object({
 
 nfeXmlImportRouter.post("/purchase-orders/import-nfe/confirm", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireStockWrite(req, res))) return;
+  if (!(await isFeatureEnabled(NFE_XML_IMPORT_FLAG, req.session!.tenantId))) {
+    return res.status(403).json({ success: false, data: null, error: { code: "FEATURE_NOT_ENABLED", message: "O import de XML de NF-e ainda não está disponível para este tenant." } });
+  }
   const parsedBody = confirmSchema.safeParse(req.body);
   if (!parsedBody.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsedBody.error.message } });
