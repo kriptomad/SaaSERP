@@ -8,8 +8,9 @@
 // navegador.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { createModuleLogger } from "../../lib/logger";
 import {
   closeSaleAndEmitFiscalDocument,
   SerialNotFoundError,
@@ -47,6 +48,7 @@ import {
 } from "../fiscal/cancel-fiscal-document.service";
 
 export const salesRouter = Router();
+const log = createModuleLogger("sales.routes");
 
 async function hasPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
   const [defaultGrant, override] = await Promise.all([
@@ -174,50 +176,93 @@ salesRouter.post("/sales", requireAuth, async (req: Request, res: Response) => {
       error: null,
     });
   } catch (err) {
-    if (err instanceof InsufficientStockError) {
-      return res.status(409).json({ success: false, data: null, error: { code: "INSUFFICIENT_STOCK", message: err.message } });
-    }
-    if (err instanceof CashRegisterNotFoundError) {
-      return res.status(404).json({ success: false, data: null, error: { code: "CASH_REGISTER_NOT_FOUND", message: err.message } });
-    }
-    if (err instanceof SerialNotFoundError) {
-      return res.status(404).json({ success: false, data: null, error: { code: "SERIAL_NOT_FOUND", message: err.message } });
-    }
-    if (err instanceof SerialNotReadyForSaleError) {
-      return res.status(409).json({ success: false, data: null, error: { code: "SERIAL_NOT_READY", message: err.message } });
-    }
-    if (err instanceof VariantRequiredError) {
-      return res.status(400).json({ success: false, data: null, error: { code: "VARIANT_REQUIRED", message: err.message } });
-    }
-    if (err instanceof VariantNotFoundError) {
-      return res.status(404).json({ success: false, data: null, error: { code: "VARIANT_NOT_FOUND", message: err.message } });
-    }
-    if (err instanceof InsufficientVariantStockError) {
-      return res.status(409).json({ success: false, data: null, error: { code: "INSUFFICIENT_VARIANT_STOCK", message: err.message } });
-    }
-    if (err instanceof PrescriptionRequiredError) {
-      return res.status(400).json({ success: false, data: null, error: { code: "PRESCRIPTION_REQUIRED", message: err.message } });
-    }
-    if (err instanceof ClientRequiredForStoreCreditError) {
-      return res.status(400).json({ success: false, data: null, error: { code: "CLIENT_REQUIRED_FOR_STORE_CREDIT", message: err.message } });
-    }
-    if (err instanceof CreditLimitExceededError) {
-      return res.status(409).json({ success: false, data: null, error: { code: "CREDIT_LIMIT_EXCEEDED", message: err.message } });
-    }
-    if (err instanceof HealthInsurancePlanRequiredError) {
-      return res.status(400).json({ success: false, data: null, error: { code: "HEALTH_INSURANCE_PLAN_REQUIRED", message: err.message } });
-    }
-    if (err instanceof OpticalPrescriptionRequiredError) {
-      return res.status(400).json({ success: false, data: null, error: { code: "OPTICAL_PRESCRIPTION_REQUIRED", message: err.message } });
-    }
-    if (err instanceof ConsignmentSupplierRequiredError) {
-      return res.status(400).json({ success: false, data: null, error: { code: "CONSIGNMENT_SUPPLIER_REQUIRED", message: err.message } });
-    }
-    if (err instanceof KitCompositionMissingError) {
-      return res.status(400).json({ success: false, data: null, error: { code: "KIT_COMPOSITION_MISSING", message: err.message } });
-    }
-    throw err;
+    const resolved = resolveSaleCloseError(err);
+    if (!resolved) throw err;
+    // Qualquer erro de negócio recuperável (estoque, série, variação, convênio,
+    // crédito etc.) durante o fechamento é persistido aqui, upsertando pela mesma
+    // idempotencyKey do payload — cobre tanto a tentativa original quanto os
+    // retries automáticos do Background Sync, sem duplicar o registro. Dá
+    // visibilidade central (qualquer gestor, qualquer terminal) a vendas do PDV
+    // offline que nunca vão conseguir ser sincronizadas sem intervenção manual.
+    await prisma.failedOfflineSaleSync
+      .upsert({
+        where: { tenantId_idempotencyKey: { tenantId, idempotencyKey: input.idempotencyKey } },
+        create: {
+          tenantId,
+          idempotencyKey: input.idempotencyKey,
+          cashRegisterId: input.cashRegisterId,
+          cashierId: userId,
+          payload: input as unknown as Prisma.InputJsonValue,
+          errorCode: resolved.code,
+          errorMessage: resolved.message,
+        },
+        update: { errorCode: resolved.code, errorMessage: resolved.message },
+      })
+      .catch((logError) => {
+        // Nunca deixa a persistência do log de reconciliação derrubar a resposta
+        // de erro original ao cliente.
+        log.error({ tenantId, err: logError }, "falha ao registrar FailedOfflineSaleSync");
+      });
+    return res.status(resolved.status).json({ success: false, data: null, error: { code: resolved.code, message: resolved.message } });
   }
+});
+
+function resolveSaleCloseError(err: unknown): { status: number; code: string; message: string } | null {
+  if (err instanceof InsufficientStockError) return { status: 409, code: "INSUFFICIENT_STOCK", message: err.message };
+  if (err instanceof CashRegisterNotFoundError) return { status: 404, code: "CASH_REGISTER_NOT_FOUND", message: err.message };
+  if (err instanceof SerialNotFoundError) return { status: 404, code: "SERIAL_NOT_FOUND", message: err.message };
+  if (err instanceof SerialNotReadyForSaleError) return { status: 409, code: "SERIAL_NOT_READY", message: err.message };
+  if (err instanceof VariantRequiredError) return { status: 400, code: "VARIANT_REQUIRED", message: err.message };
+  if (err instanceof VariantNotFoundError) return { status: 404, code: "VARIANT_NOT_FOUND", message: err.message };
+  if (err instanceof InsufficientVariantStockError) return { status: 409, code: "INSUFFICIENT_VARIANT_STOCK", message: err.message };
+  if (err instanceof PrescriptionRequiredError) return { status: 400, code: "PRESCRIPTION_REQUIRED", message: err.message };
+  if (err instanceof ClientRequiredForStoreCreditError) return { status: 400, code: "CLIENT_REQUIRED_FOR_STORE_CREDIT", message: err.message };
+  if (err instanceof CreditLimitExceededError) return { status: 409, code: "CREDIT_LIMIT_EXCEEDED", message: err.message };
+  if (err instanceof HealthInsurancePlanRequiredError) return { status: 400, code: "HEALTH_INSURANCE_PLAN_REQUIRED", message: err.message };
+  if (err instanceof OpticalPrescriptionRequiredError) return { status: 400, code: "OPTICAL_PRESCRIPTION_REQUIRED", message: err.message };
+  if (err instanceof ConsignmentSupplierRequiredError) return { status: 400, code: "CONSIGNMENT_SUPPLIER_REQUIRED", message: err.message };
+  if (err instanceof KitCompositionMissingError) return { status: 400, code: "KIT_COMPOSITION_MISSING", message: err.message };
+  return null;
+}
+
+// GAP DE AUDITORIA ENCONTRADO E CORRIGIDO (rodada 3, Capítulo 8.3): lista/resolve
+// os registros de FailedOfflineSaleSync criados acima — fecha o gap de o gestor não
+// ter nenhuma visibilidade central das vendas offline que falharam em sincronizar
+// em qualquer terminal do tenant.
+salesRouter.get("/sales/failed-offline-syncs", requireAuth, async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "pdv:sale:create"))) {
+    return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite ver vendas offline pendentes de reconciliação." } });
+  }
+  const onlyUnresolved = req.query.status !== "all";
+  const records = await prisma.failedOfflineSaleSync.findMany({
+    where: { tenantId, ...(onlyUnresolved ? { resolvedAt: null } : {}) },
+    orderBy: { createdAt: "desc" },
+    take: 200,
+  });
+  return res.json({ success: true, data: records, error: null });
+});
+
+const resolveFailedSyncSchema = z.object({ resolutionNote: z.string().min(3) });
+
+salesRouter.patch("/sales/failed-offline-syncs/:id/resolve", requireAuth, async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "pdv:sale:create"))) {
+    return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite resolver vendas offline pendentes de reconciliação." } });
+  }
+  const parsed = resolveFailedSyncSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+  }
+  const existing = await prisma.failedOfflineSaleSync.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!existing) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Registro não encontrado." } });
+  }
+  const updated = await prisma.failedOfflineSaleSync.update({
+    where: { id: existing.id },
+    data: { resolvedAt: new Date(), resolvedByUserId: userId, resolutionNote: parsed.data.resolutionNote },
+  });
+  return res.json({ success: true, data: updated, error: null });
 });
 
 // GAP DE AUDITORIA ENCONTRADO E CORRIGIDO: refundSale (Capítulo 6.8 — dupla

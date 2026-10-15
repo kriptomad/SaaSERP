@@ -94,6 +94,12 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: "dashboard", label: "Dashboard", path: "/dashboard", icon: <DashboardIcon /> },
       { id: "pdv", label: "PDV", path: "/pdv", icon: <PointOfSaleIcon /> },
       { id: "pdv-vendas", label: "Histórico de vendas", path: "/pdv/vendas", icon: <ReceiptLongIcon /> },
+      {
+        id: "pdv-vendas-offline-pendentes",
+        label: "Vendas offline pendentes",
+        path: "/pdv/vendas-offline-pendentes",
+        icon: <EventBusyIcon />,
+      },
       { id: "caixa", label: "Caixa", path: "/caixa", icon: <PointOfSaleOutlinedIcon /> },
       { id: "comanda", label: "Comanda", path: "/comanda", icon: <ReceiptLongIcon /> },
     ],

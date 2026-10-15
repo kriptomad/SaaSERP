@@ -47,7 +47,25 @@ export interface SaleDetail {
   fiscalDocuments: SaleFiscalDocumentSummary[];
 }
 
+export interface FailedOfflineSaleSync {
+  id: string;
+  idempotencyKey: string;
+  cashRegisterId: string;
+  cashierId: string;
+  payload: unknown;
+  errorCode: string;
+  errorMessage: string;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedByUserId: string | null;
+  resolutionNote: string | null;
+}
+
 export const salesApi = {
   list: (before?: string) => api.get<SaleListRow[]>("/sales", before ? { before } : undefined),
   get: (id: string) => api.get<SaleDetail>(`/sales/${id}`),
+  listFailedOfflineSyncs: (status: "pending" | "all" = "pending") =>
+    api.get<FailedOfflineSaleSync[]>("/sales/failed-offline-syncs", { status }),
+  resolveFailedOfflineSync: (id: string, resolutionNote: string) =>
+    api.patch<FailedOfflineSaleSync>(`/sales/failed-offline-syncs/${id}/resolve`, { resolutionNote }),
 };

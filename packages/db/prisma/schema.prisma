@@ -1479,6 +1479,33 @@ model Payment {
   @@map("payments")
 }
 
+// Capítulo 8.3 — GAP DE AUDITORIA (rodada 3): quando uma venda registrada
+// otimisticamente no PDV offline (Dexie/IndexedDB) falha ao sincronizar por um erro
+// de negócio real (estoque esgotado por outro terminal, série/variação inválida
+// etc.), o erro só existia no IndexedDB daquele navegador/terminal específico —
+// nenhum gestor conseguia ver, em um único lugar, TODAS as vendas offline que
+// falharam em sincronizar em QUALQUER terminal do tenant. Este registro é a
+// contraparte server-side, criada pela própria API ao rejeitar o replay, para dar
+// visibilidade e permitir reconciliação manual central.
+model FailedOfflineSaleSync {
+  id              String    @id @default(uuid())
+  tenantId        String
+  idempotencyKey  String // mesmo localId gerado no Dexie do terminal de origem
+  cashRegisterId  String
+  cashierId       String
+  payload         Json // corpo original enviado pelo terminal, para permitir reprocessar manualmente
+  errorCode       String
+  errorMessage    String
+  createdAt       DateTime  @default(now())
+  resolvedAt      DateTime?
+  resolvedByUserId String?
+  resolutionNote  String?
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, resolvedAt])
+  @@map("failed_offline_sale_syncs")
+}
+
 enum CashRegisterStatus {
   OPEN
   CLOSED

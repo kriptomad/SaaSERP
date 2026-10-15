@@ -8,6 +8,7 @@ import { StatusPage } from "./pages/StatusPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { PosPage } from "./modules/market/pos/PosPage";
 import { SalesHistoryPage } from "./modules/market/sales/SalesHistoryPage";
+import { FailedOfflineSyncsPage } from "./modules/market/sales/FailedOfflineSyncsPage";
 import { AppShell } from "./layout/AppShell";
 import { ClientsPage, SuppliersPage } from "./modules/registrations/PartiesPage";
 import { ProductsPage } from "./modules/registrations/ProductsPage";
@@ -151,6 +152,7 @@ export function App() {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/pdv" element={<PosPage />} />
             <Route path="/pdv/vendas" element={<SalesHistoryPage />} />
+            <Route path="/pdv/vendas-offline-pendentes" element={<FailedOfflineSyncsPage />} />
             <Route path="/cadastros/clientes" element={<ClientsPage />} />
             <Route path="/cadastros/fornecedores" element={<SuppliersPage />} />
             <Route path="/cadastros/produtos" element={<ProductsPage />} />
