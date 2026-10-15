@@ -6,6 +6,11 @@ import { AppBar, Box, Button, Tab, Tabs, Toolbar, Typography } from "@mui/materi
 import { usePlatformAdminAuth } from "./PlatformAdminAuthContext";
 
 const TABS = [
+  { path: "/platform-admin/tenants", label: "Tenants" },
+  { path: "/platform-admin/receita", label: "Receita (MRR)" },
+  { path: "/platform-admin/modulos", label: "Módulos" },
+  { path: "/platform-admin/parametros", label: "Parâmetros" },
+  { path: "/platform-admin/audit-log", label: "Audit Log" },
   { path: "/platform-admin/infraestrutura", label: "Infraestrutura & Credenciais" },
   { path: "/platform-admin/marketing", label: "Marketing" },
 ];

@@ -28,6 +28,7 @@ import { fetchActiveModules } from "../api/client";
 import { NAV_GROUPS } from "./navigation";
 import { NotificationBell } from "../modules/notifications/NotificationBell";
 import { CommandPalette } from "../shared/CommandPalette";
+import { ImpersonationBanner } from "./ImpersonationBanner";
 
 const DRAWER_WIDTH = 248;
 
@@ -128,6 +129,9 @@ export function AppShell() {
 
   return (
     <Box sx={{ display: "flex", minHeight: "100vh" }}>
+      <Box sx={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: theme.zIndex.drawer + 2 }}>
+        <ImpersonationBanner />
+      </Box>
       <AppBar
         position="fixed"
         color="inherit"

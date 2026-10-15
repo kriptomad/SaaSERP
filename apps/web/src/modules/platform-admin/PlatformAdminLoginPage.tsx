@@ -82,7 +82,7 @@ export function PlatformAdminLoginPage() {
         verifyToken,
       );
       setSession(result.data.token, result.data.admin);
-      navigate("/platform-admin/infraestrutura", { replace: true });
+      navigate("/platform-admin/tenants", { replace: true });
     } catch (err) {
       setError((err as Error).message);
     } finally {

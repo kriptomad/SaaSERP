@@ -26,6 +26,7 @@ import { z } from "zod";
 import crypto from "node:crypto";
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { requirePlatformAdminAuth, requireSuperAdmin } from "./platform-admin-auth.middleware";
+import { signSessionToken } from "../auth/jwt.service";
 
 export const platformAdminRouter = Router();
 
@@ -85,6 +86,132 @@ platformAdminRouter.patch("/platform-admin/tenants/:id/status", requirePlatformA
   const updated = await prisma.tenant.update({ where: { id: tenant.id }, data: { status: parsed.data.status } });
   await writeAuditLog(req, "TENANT_STATUS_CHANGED", "Tenant", tenant.id, { from: tenant.status, to: parsed.data.status, reason: parsed.data.reason });
   return res.json({ success: true, data: updated, error: null });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// IMPERSONATION (Capítulo 13.1) — entrar como o próprio lojista para dar suporte
+// ou preview comercial, sem conhecer/alterar sua senha. Sempre exige justificativa,
+// sempre audita, sempre expira sozinha (curta, 30min) mesmo se o admin esquecer de
+// encerrar, e o próprio tenant pode encerrá-la a qualquer momento
+// (POST /auth/impersonation/end) — nenhum dos dois lados fica refém do outro.
+// ─────────────────────────────────────────────────────────────────────────
+
+const startImpersonationSchema = z.object({ reason: z.string().min(5) });
+const IMPERSONATION_SESSION_TTL_MINUTES = 30;
+
+platformAdminRouter.post("/platform-admin/tenants/:tenantId/impersonate", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
+  const parsed = startImpersonationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Informe uma justificativa (mínimo 5 caracteres)." } });
+  }
+  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId } });
+  if (!tenant) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Tenant não encontrado." } });
+  }
+  // Impersona sempre o OWNER ativo — nunca um papel mais restrito, para o suporte
+  // enxergar a tela exatamente como o dono vê, incluindo áreas gated por role.
+  const owner = await prisma.user.findFirst({ where: { tenantId: tenant.id, role: "OWNER", active: true }, orderBy: { createdAt: "asc" } });
+  if (!owner) {
+    return res.status(409).json({ success: false, data: null, error: { code: "NO_OWNER_USER", message: "Este tenant não possui um usuário OWNER ativo para impersonar." } });
+  }
+
+  const expiresAt = new Date(Date.now() + IMPERSONATION_SESSION_TTL_MINUTES * 60_000);
+  const session = await prisma.impersonationSession.create({
+    data: { platformAdminUserId: req.platformAdminSession!.platformAdminUserId, tenantId: tenant.id, reason: parsed.data.reason, expiresAt },
+  });
+
+  const token = signSessionToken(
+    { userId: owner.id, tenantId: tenant.id, role: owner.role as any, impersonation: { platformAdminUserId: req.platformAdminSession!.platformAdminUserId, sessionId: session.id } },
+    `${IMPERSONATION_SESSION_TTL_MINUTES}m`,
+  );
+  await writeAuditLog(req, "IMPERSONATION_STARTED", "Tenant", tenant.id, { impersonationSessionId: session.id, reason: parsed.data.reason, impersonatedUserId: owner.id });
+
+  // Formato compatível com `AuthResponse` do frontend tenant (mesmo shape do login
+  // normal) — o painel de plataforma usa isso para montar a URL `?sso=` consumida
+  // por `consumeSsoFromQuery()` em apps/web/src/api/client.ts, exatamente o mesmo
+  // mecanismo já usado pelo shell desktop para SSO.
+  return res.json({
+    success: true,
+    data: {
+      impersonationSessionId: session.id,
+      expiresAt,
+      token,
+      tenant: { id: tenant.id, slug: tenant.slug, tradeName: tenant.tradeName, status: tenant.status, tenantType: tenant.tenantType, cnpj: tenant.cnpj },
+      user: { id: owner.id, name: owner.name, email: owner.email, role: owner.role },
+    },
+    error: null,
+  });
+});
+
+platformAdminRouter.get("/platform-admin/impersonation-sessions", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+  const { tenantId } = req.query as { tenantId?: string };
+  const sessions = await prisma.impersonationSession.findMany({
+    where: { ...(tenantId ? { tenantId } : {}) },
+    include: { tenant: { select: { tradeName: true, slug: true } }, platformAdminUser: { select: { name: true, email: true } } },
+    orderBy: { startedAt: "desc" },
+    take: 100,
+  });
+  return res.json({ success: true, data: sessions, error: null });
+});
+
+// Encerramento forçado pelo lado do painel (ex.: o admin terminou o atendimento
+// antes do tenant fechar a aba) — complementar ao POST /auth/impersonation/end que
+// o PRÓPRIO tenant pode chamar a qualquer momento.
+platformAdminRouter.post("/platform-admin/impersonation-sessions/:id/end", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+  const session = await prisma.impersonationSession.findUnique({ where: { id: req.params.id } });
+  if (!session) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Sessão de impersonation não encontrada." } });
+  }
+  const updated = await prisma.impersonationSession.update({ where: { id: session.id }, data: { endedAt: new Date() } });
+  await writeAuditLog(req, "IMPERSONATION_ENDED", "Tenant", session.tenantId, { impersonationSessionId: session.id });
+  return res.json({ success: true, data: updated, error: null });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// DASHBOARD DE RECEITA (MRR) — Capítulo 13.3. Calcula sempre a partir das
+// assinaturas reais (`Subscription`/`Plan`), nunca de um número hardcoded ou
+// estimado: MRR é a soma do `basePrice` do plano de cada assinatura ACTIVE
+// (TRIAL/PAST_DUE/SUSPENDED/CANCELLED não contam como receita recorrente
+// confirmada — mesmo critério usado por qualquer ferramenta de billing real).
+// ─────────────────────────────────────────────────────────────────────────
+
+platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
+  const subscriptions = await prisma.subscription.findMany({
+    include: { plan: { select: { id: true, code: true, label: true, basePrice: true, audience: true } } },
+  });
+
+  const mrrByPlan = new Map<string, { planCode: string; planLabel: string; activeCount: number; mrr: number }>();
+  let totalMrr = 0;
+  const countByStatus: Record<string, number> = { TRIAL: 0, ACTIVE: 0, PAST_DUE: 0, SUSPENDED: 0, CANCELLED: 0 };
+
+  for (const sub of subscriptions) {
+    countByStatus[sub.status] = (countByStatus[sub.status] ?? 0) + 1;
+    if (sub.status !== "ACTIVE") continue;
+    const planPrice = Number(sub.plan.basePrice);
+    totalMrr += planPrice;
+    const bucket = mrrByPlan.get(sub.plan.id) ?? { planCode: sub.plan.code, planLabel: sub.plan.label, activeCount: 0, mrr: 0 };
+    bucket.activeCount += 1;
+    bucket.mrr += planPrice;
+    mrrByPlan.set(sub.plan.id, bucket);
+  }
+
+  // Churn do mês corrente: assinaturas canceladas cujo `cancelRequestedAt` caiu
+  // dentro do mês atual — aproximação real (não estimada) de churn mensal.
+  const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  const churnedThisMonth = subscriptions.filter((s) => s.status === "CANCELLED" && s.cancelRequestedAt && s.cancelRequestedAt >= startOfMonth).length;
+
+  return res.json({
+    success: true,
+    data: {
+      totalMrr,
+      arr: totalMrr * 12,
+      countByStatus,
+      byPlan: Array.from(mrrByPlan.values()),
+      churnedThisMonth,
+      totalSubscriptions: subscriptions.length,
+    },
+    error: null,
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

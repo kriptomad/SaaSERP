@@ -20,6 +20,7 @@ const API_BASE_URL = resolveApiBaseUrl();
 const TOKEN_STORAGE_KEY = "filitech.session.token";
 const SSO_TENANT_KEY = "filitech.session.tenant";
 const SSO_USER_KEY = "filitech.session.user";
+const SSO_IMPERSONATION_KEY = "filitech.session.impersonation";
 
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -43,14 +44,28 @@ export function getStoredUser(): AuthResponse["user"] | null {
   return raw ? (JSON.parse(raw) as AuthResponse["user"]) : null;
 }
 
+// Capítulo 13.1 — presente apenas quando esta janela foi aberta por impersonation a
+// partir do painel de plataforma (via `?sso=`); usado pelo AppShell para exibir o
+// aviso "Sessão de suporte" com botão de encerrar.
+export function getStoredImpersonation(): AuthResponse["impersonation"] | null {
+  const raw = sessionStorage.getItem(SSO_IMPERSONATION_KEY);
+  return raw ? (JSON.parse(raw) as AuthResponse["impersonation"]) : null;
+}
+
 export function setStoredSession(response: AuthResponse | null): void {
   setStoredToken(response?.token ?? null);
   if (response) {
     sessionStorage.setItem(SSO_TENANT_KEY, JSON.stringify(response.tenant));
     sessionStorage.setItem(SSO_USER_KEY, JSON.stringify(response.user));
+    if (response.impersonation) {
+      sessionStorage.setItem(SSO_IMPERSONATION_KEY, JSON.stringify(response.impersonation));
+    } else {
+      sessionStorage.removeItem(SSO_IMPERSONATION_KEY);
+    }
   } else {
     sessionStorage.removeItem(SSO_TENANT_KEY);
     sessionStorage.removeItem(SSO_USER_KEY);
+    sessionStorage.removeItem(SSO_IMPERSONATION_KEY);
   }
 }
 
@@ -151,6 +166,9 @@ export interface AuthResponse {
   token: string;
   tenant: { id: string; slug: string; tradeName: string; status: string; tenantType: string; cnpj: string | null };
   user: { id: string; name: string; email: string; role: string };
+  // Capítulo 13.1 — presente somente quando este AuthResponse foi gerado por
+  // impersonation no painel de plataforma (nunca em login/signup normais).
+  impersonation?: { sessionId: string; expiresAt: string };
 }
 
 export function signup(input: SignupInput): Promise<AuthResponse> {
@@ -163,6 +181,12 @@ export function login(input: LoginInput): Promise<AuthResponse> {
 
 export function fetchMe(): Promise<{ session: { tenantId: string; userId: string; role: string } }> {
   return request("/me");
+}
+
+// Capítulo 13.1 — encerra a sessão de impersonation atual (se houver). Chamado pelo
+// banner do AppShell; também encerrável do lado do painel de plataforma.
+export function endImpersonation(): Promise<{ ended: boolean }> {
+  return api.post("/auth/impersonation/end");
 }
 
 // Capítulo 4 — feature-flipping por nicho: lista de códigos de módulo (ex.: WORK_ORDER,

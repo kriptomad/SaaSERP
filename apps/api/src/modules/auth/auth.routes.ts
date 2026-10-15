@@ -8,6 +8,7 @@ import { prismaUnscoped } from "@filitech/db";
 import { hashPassword, verifyPassword } from "./password.service";
 import { signSessionToken } from "./jwt.service";
 import { enforceRateLimit, resetRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
+import { authMiddleware, requireAuth } from "../../middlewares/auth.middleware";
 
 export const authRouter = Router();
 
@@ -161,4 +162,20 @@ authRouter.post("/login", async (req, res) => {
     user: { id: user.id, name: user.name, email: user.email, role: user.role },
   };
   return res.json({ success: true, data: authPayload, error: null, ...authPayload });
+});
+
+// Capítulo 13.1 — qualquer usuário autenticado consegue encerrar sua PRÓPRIA sessão
+// de impersonation a qualquer momento (não exige papel OWNER: o objetivo é dar ao
+// lojista controle total sobre uma sessão de suporte aberta em seu nome). Idempotente:
+// chamar de novo depois de já encerrada apenas confirma, sem erro.
+authRouter.post("/impersonation/end", authMiddleware, requireAuth, async (req, res) => {
+  const sessionId = req.session?.impersonation?.sessionId;
+  if (!sessionId) {
+    return res.status(409).json({ success: false, data: null, error: { code: "NOT_IMPERSONATING", message: "Esta sessão não é uma sessão de impersonation." } });
+  }
+  await prismaUnscoped.impersonationSession.updateMany({
+    where: { id: sessionId, endedAt: null },
+    data: { endedAt: new Date() },
+  });
+  return res.json({ success: true, data: { ended: true }, error: null });
 });

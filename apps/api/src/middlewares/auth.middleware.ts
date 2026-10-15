@@ -11,6 +11,7 @@ declare module "express-serve-static-core" {
       tenantId: string;
       userId: string;
       role: string;
+      impersonation?: { platformAdminUserId: string; sessionId: string };
     };
   }
 }
@@ -24,7 +25,7 @@ export function authMiddleware(req: Request, _res: Response, next: NextFunction)
   const token = header.slice("Bearer ".length);
   try {
     const claims = verifySessionToken(token);
-    req.session = { tenantId: claims.tenantId, userId: claims.userId, role: claims.role };
+    req.session = { tenantId: claims.tenantId, userId: claims.userId, role: claims.role, impersonation: claims.impersonation };
   } catch {
     // Token inválido/expirado: segue sem sessão, rota protegida decide o que fazer.
   }
