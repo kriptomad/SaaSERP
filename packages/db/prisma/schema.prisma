@@ -2775,6 +2775,24 @@ model PlatformSecret {
   @@map("platform_secrets")
 }
 
+// Capítulo 10.3 — histórico de backups criptografados do banco (platform-wide, nunca
+// isolado por tenant — um único `pg_dump`/dump lógico cobre todos os tenants de uma
+// vez). Não entra em TENANT_SCOPED_MODELS por não ter `tenantId`.
+model DatabaseBackupLog {
+  id              String   @id @default(uuid())
+  startedAt       DateTime @default(now())
+  finishedAt      DateTime?
+  status          String // "RUNNING" | "SUCCESS" | "FAILED"
+  storageKey      String? // chave do objeto .enc no R2 (platform/database-backups/...)
+  fileSizeBytes   BigInt?
+  errorMessage    String?
+  triggeredBy     String // "cron" | platformAdminUserId (disparo manual)
+  encryptionKeyId String? // identifica qual BACKUP_ENCRYPTION_KEY cifrou o arquivo (rotação futura)
+
+  @@index([status, startedAt])
+  @@map("database_backup_logs")
+}
+
 model DiscountCoupon {
   id               String   @id @default(uuid())
   code             String   @unique

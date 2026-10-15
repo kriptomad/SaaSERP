@@ -16,6 +16,7 @@ import { startPersonalBillRemindersWorker, schedulePersonalBillRemindersJob } fr
 import { startDataExportGenerationWorker } from "./workers/data-export-generation.worker";
 import { startDataImportValidationWorker } from "./workers/data-import-validation.worker";
 import { startDataImportExecutionWorker } from "./workers/data-import-execution.worker";
+import { startEncryptedDatabaseBackupWorker, scheduleEncryptedDatabaseBackupJob } from "./workers/encrypted-database-backup.worker";
 
 async function main() {
   const log = createModuleLogger("worker");
@@ -38,8 +39,10 @@ async function main() {
   const dataExportGenerationWorker = startDataExportGenerationWorker();
   const dataImportValidationWorker = startDataImportValidationWorker();
   const dataImportExecutionWorker = startDataImportExecutionWorker();
+  const encryptedDatabaseBackupWorker = startEncryptedDatabaseBackupWorker();
+  await scheduleEncryptedDatabaseBackupJob();
 
-  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker]) {
+  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker]) {
     worker.on("completed", (job) => {
       log.info({ queue: job.queueName, jobId: job.id, result: job.returnvalue }, "job concluído");
     });

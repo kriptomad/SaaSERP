@@ -40,6 +40,10 @@ export const STORAGE_CATEGORIES = {
   // Capítulo 18.5 — relatório de erros por linha (CSV) gerado pela etapa de
   // validação, upload direto pelo backend.
   "data-import-reports": { allowedMimeTypes: ["text/csv"], maxBytes: 10 * 1024 * 1024 },
+  // Capítulo 10.3 — dump completo do banco, já cifrado em AES-256-GCM antes do
+  // upload (o arquivo em si é binário opaco — ".enc" não é um mimetype IANA real,
+  // mas identifica inequivocamente "já cifrado" para quem navegar o bucket).
+  "database-backups": { allowedMimeTypes: ["application/octet-stream"], maxBytes: 5 * 1024 * 1024 * 1024 },
 } as const;
 export type StorageCategory = keyof typeof STORAGE_CATEGORIES;
 
@@ -197,6 +201,52 @@ export async function putObjectDirect(input: PutObjectDirectInput): Promise<{ st
   return { storageKey };
 }
 
+export interface PutPlatformObjectDirectInput {
+  category: Extract<StorageCategory, "database-backups">;
+  fileName: string;
+  mimeType: string;
+  body: Buffer;
+}
+
+/**
+ * Upload DIRETO de um artefato de PLATAFORMA (não pertence a nenhum tenant
+ * específico — ex.: o dump completo do banco, Capítulo 10.3). Usa o prefixo
+ * `platform/<categoria>/...` em vez de `tenants/<tenantId>/...`, e por isso nunca
+ * passa pela checagem `isTenantStorageKey` usada nos demais helpers — só rotas
+ * `requireSuperAdmin` do painel admin devem chamar/servir este tipo de objeto.
+ */
+export async function putPlatformObjectDirect(input: PutPlatformObjectDirectInput): Promise<{ storageKey: string }> {
+  const categoryDef = STORAGE_CATEGORIES[input.category];
+  if (!categoryDef.allowedMimeTypes.includes(input.mimeType as never)) {
+    throw new Error(`Tipo de arquivo não permitido para "${input.category}": ${input.mimeType}.`);
+  }
+  if (input.body.byteLength > categoryDef.maxBytes) {
+    throw new Error(`Arquivo de ${input.body.byteLength} bytes excede o máximo de ${categoryDef.maxBytes} bytes para "${input.category}".`);
+  }
+  const { client, config } = await getR2Client();
+  const storageKey = `platform/${input.category}/${crypto.randomUUID()}-${sanitizeFileName(input.fileName)}`;
+  await client.send(
+    new PutObjectCommand({
+      Bucket: config.bucket,
+      Key: storageKey,
+      Body: input.body,
+      ContentType: input.mimeType,
+    }),
+  );
+  return { storageKey };
+}
+
+/** URL assinada de LEITURA para um objeto de plataforma (ex.: baixar um backup específico no painel admin) — sem checagem de tenant, restrito a rotas `requireSuperAdmin`. */
+export async function presignPlatformObjectDownload(storageKey: string): Promise<{ downloadUrl: string; expiresInSeconds: number }> {
+  if (!storageKey.startsWith("platform/")) {
+    throw new Error("Chave de armazenamento inválida para objeto de plataforma.");
+  }
+  const { client, config } = await getR2Client();
+  const command = new GetObjectCommand({ Bucket: config.bucket, Key: storageKey });
+  const downloadUrl = await getSignedUrl(client, command, { expiresIn: PRESIGNED_DOWNLOAD_EXPIRES_SECONDS });
+  return { downloadUrl, expiresInSeconds: PRESIGNED_DOWNLOAD_EXPIRES_SECONDS };
+}
+
 /** Teste de conexão real usado por `test-integration-credential.ts` (HeadBucket — não lista nem baixa nada, só confirma credencial + bucket). */
 export async function testR2Connection(): Promise<{ success: boolean; message: string }> {
   try {
@@ -215,8 +265,7 @@ export async function testR2Connection(): Promise<{ success: boolean; message: s
  * exportação total, Capítulo 18.4). Nunca usado para servir um download ao
  * navegador — isso continua sendo `presignObjectDownload` (URL assinada direta no R2).
  */
-export async function getObjectDirect(storageKey: string): Promise<Buffer> {
-  const { client, config } = await getR2Client();
+export async function getObjectDirect(storageKey: string): Promise<Buffer> {  const { client, config } = await getR2Client();
   const result = await client.send(new GetObjectCommand({ Bucket: config.bucket, Key: storageKey }));
   const body = result.Body;
   if (!body) {

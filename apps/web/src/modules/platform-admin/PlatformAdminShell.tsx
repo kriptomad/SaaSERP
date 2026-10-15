@@ -11,6 +11,7 @@ const TABS = [
   { path: "/platform-admin/modulos", label: "Módulos" },
   { path: "/platform-admin/parametros", label: "Parâmetros" },
   { path: "/platform-admin/audit-log", label: "Audit Log" },
+  { path: "/platform-admin/backups", label: "Backups" },
   { path: "/platform-admin/infraestrutura", label: "Infraestrutura & Credenciais" },
   { path: "/platform-admin/marketing", label: "Marketing" },
 ];

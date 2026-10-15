@@ -23,7 +23,7 @@ const cache = new Map<string, { value: string | null; expiresAt: number }>();
 export interface PlatformSecretDefinition {
   key: string;
   label: string;
-  group: "Stripe" | "Asaas" | "Licenciamento" | "Rede" | "Armazenamento (R2)" | "Open Finance (Pluggy)";
+  group: "Stripe" | "Asaas" | "Licenciamento" | "Rede" | "Armazenamento (R2)" | "Open Finance (Pluggy)" | "Backup";
   description: string;
   /** Nome da variável de ambiente usada como fallback/compatibilidade — quase sempre igual a `key`. */
   envFallback: string;
@@ -148,6 +148,14 @@ export const PLATFORM_SECRET_REGISTRY: PlatformSecretDefinition[] = [
     group: "Open Finance (Pluggy)",
     description: "A Pluggy não assina/autentica as requisições de webhook (confirmado na documentação oficial — não existe header de assinatura HMAC equivalente ao do Stripe/iFood). A proteção real aqui é um segredo gerado por nós e embutido como query string (`?token=...`) na `webhookUrl` cadastrada no painel/Connect Token da Pluggy; esta rota compara o `token` recebido contra este valor (comparação timing-safe) antes de processar qualquer evento.",
     envFallback: "PLUGGY_WEBHOOK_TOKEN",
+  },
+  {
+    key: "BACKUP_ENCRYPTION_KEY",
+    label: "Backup — Chave de criptografia (AES-256-GCM)",
+    group: "Backup",
+    description: "Chave de 32 bytes em hexadecimal (64 caracteres hex) usada para cifrar o dump completo do banco antes de subir ao R2 (Capítulo 10.3). Gere com `node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"`. Trocar esta chave torna backups antigos ilegíveis — nunca remover sem antes restaurar/arquivar os backups existentes.",
+    envFallback: "BACKUP_ENCRYPTION_KEY",
+    placeholder: "64 caracteres hexadecimais",
   },
 ];
 

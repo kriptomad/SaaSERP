@@ -76,6 +76,11 @@ export const QUEUE_NAMES = {
   // `workers/data-import-execution.worker.ts`. Job sob demanda, enfileirado por
   // `POST /data-import/jobs/:id/confirm`.
   DATA_IMPORT_EXECUTION: "data-import-execution",
+  // Capítulo 10.3 — backup criptografado sem downtime do banco inteiro (dump lógico
+  // via Prisma, já que o runtime de produção é uma imagem Docker distroless sem
+  // `pg_dump`/shell — ver nota em `workers/encrypted-database-backup.worker.ts`),
+  // consumida por esse worker. Cron diário 03:00 + disparo manual pelo painel admin.
+  DATABASE_BACKUP: "database-backup",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -123,3 +128,5 @@ export const dataImportValidationQueue = new Queue(QUEUE_NAMES.DATA_IMPORT_VALID
 export const dataImportExecutionQueue = new Queue(QUEUE_NAMES.DATA_IMPORT_EXECUTION, {
   connection: queueRedisConnection,
 });
+
+export const databaseBackupQueue = new Queue(QUEUE_NAMES.DATABASE_BACKUP, { connection: queueRedisConnection });

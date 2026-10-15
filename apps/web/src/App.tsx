@@ -70,6 +70,7 @@ import { RevenueDashboardPage } from "./modules/platform-admin/RevenueDashboardP
 import { ModuleCatalogPage } from "./modules/platform-admin/ModuleCatalogPage";
 import { AuditLogViewerPage } from "./modules/platform-admin/AuditLogViewerPage";
 import { SystemParametersPage } from "./modules/platform-admin/SystemParametersPage";
+import { DatabaseBackupsPage } from "./modules/platform-admin/DatabaseBackupsPage";
 import { PersonalDashboardPage } from "./modules/personal-finance/PersonalDashboardPage";
 import { PersonalAccountsPage } from "./modules/personal-finance/PersonalAccountsPage";
 import { PersonalTransactionsPage } from "./modules/personal-finance/PersonalTransactionsPage";
@@ -125,6 +126,7 @@ export function App() {
               <Route path="/platform-admin/modulos" element={<ModuleCatalogPage />} />
               <Route path="/platform-admin/audit-log" element={<AuditLogViewerPage />} />
               <Route path="/platform-admin/parametros" element={<SystemParametersPage />} />
+              <Route path="/platform-admin/backups" element={<DatabaseBackupsPage />} />
             </Route>
             <Route
             element={
