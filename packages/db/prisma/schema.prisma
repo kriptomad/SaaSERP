@@ -173,6 +173,12 @@ model Tenant {
   // automaticamente em `close-sale.service.ts` para toda venda de produto com
   // `Product.opticsCategory` preenchido (FRAME ou LENS).
   opticalAdditionalWarrantyDays Int          @default(0)
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 5, Capítulo 9.3): cache do id de cliente
+  // do tenant em cada PSP, resolvido (ou criado, na primeira vez) pelo endpoint real de
+  // checkout (`POST /api/billing/checkout`) — evita recriar o customer/duplicar cadastro
+  // a cada tentativa de contratação de plano.
+  stripeCustomerId              String?
+  asaasCustomerId               String?
   createdAt                     DateTime     @default(now())
   updatedAt                     DateTime     @updatedAt
 
@@ -392,6 +398,13 @@ model TenantModule {
 
 enum SubscriptionStatus {
   TRIAL
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 5, Capítulo 9.3): estado transitório entre
+  // "lojista clicou em contratar" e "pagamento confirmado pelo PSP" — a assinatura real
+  // só nasce (externalSubscriptionId verdadeiro + status ACTIVE) quando o webhook de
+  // conclusão do Checkout chega; nunca marcamos como TRIAL/ACTIVE antes disso, para o
+  // gatekeeper/tenantLockoutMiddleware nunca liberar acesso baseado num pagamento ainda
+  // não confirmado.
+  PENDING_CHECKOUT
   ACTIVE
   PAST_DUE
   SUSPENDED
@@ -428,6 +441,14 @@ model Subscription {
   // Programa de Indicação (Capítulo 2.8):
   creditBalanceMonths          Int                @default(0) // meses de crédito acumulados por indicações convertidas — consumidos antes de qualquer débito no cartão
   firstCycleDiscountPercent    Int? // desconto aplicado apenas ao primeiro ciclo cobrado, quando este tenant foi um indicado
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 5, Capítulo 9.3): módulos selecionados no
+  // Checkout mas ainda não confirmados pelo PSP — persistidos aqui enquanto
+  // status = PENDING_CHECKOUT, para que o webhook de conclusão saiba exatamente quais
+  // `TenantModule` ativar (e com qual preço) sem depender de reconstruir o carrinho a
+  // partir do payload bruto do evento do provedor. Esvaziado assim que a ativação
+  // acontece (nunca uma fonte de verdade duradoura — `TenantModule.active` é quem vale
+  // depois da confirmação).
+  pendingModuleCodes           String[]           @default([])
   createdAt                    DateTime           @default(now())
   updatedAt                    DateTime           @updatedAt
 

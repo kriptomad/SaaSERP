@@ -106,6 +106,70 @@ export async function removeModuleFromStripeSubscription(subscriptionItemId: str
   await stripe.subscriptionItems.del(subscriptionItemId);
 }
 
+// Resolve (ou cria, na primeira vez) o Customer Stripe deste tenant — cacheado em
+// `Tenant.stripeCustomerId` pelo chamador (checkout.routes.ts) para nunca duplicar o
+// cadastro numa segunda tentativa de checkout.
+export async function findOrCreateStripeCustomer(existingId: string | null, email: string, name: string): Promise<string> {
+  const stripe = await getStripeClient();
+  if (existingId) {
+    try {
+      const existing = await stripe.customers.retrieve(existingId);
+      if (!existing.deleted) return existingId;
+    } catch {
+      // customer id cacheado não existe mais no Stripe (ex.: troca de conta/ambiente) — recria abaixo.
+    }
+  }
+  const created = await stripe.customers.create({ email, name });
+  return created.id;
+}
+
+export interface StripeCheckoutLineItem {
+  moduleCode: string | null; // null = item do plano base
+  label: string;
+  monthlyPriceBrl: number;
+}
+
+// Capítulo 9.3 — Checkout hospedado do Stripe para a contratação inicial de
+// plano+módulos (nunca coleta dados de cartão diretamente na nossa API: o
+// pagador preenche tudo na página hospedada do próprio Stripe).
+export async function createStripeCheckoutSession(input: {
+  customerId: string;
+  items: StripeCheckoutLineItem[];
+  successUrl: string;
+  cancelUrl: string;
+  metadata: Record<string, string>;
+}) {
+  const stripe = await getStripeClient();
+  const line_items = await Promise.all(
+    input.items.map(async (item) => {
+      const query = item.moduleCode ? `metadata['moduleCode']:'${item.moduleCode}'` : `metadata['moduleCode']:'PLAN_BASE'`;
+      const existingProducts = await stripe.products.search({ query, limit: 1 });
+      const product =
+        existingProducts.data[0] ??
+        (await stripe.products.create({ name: `Filitech ERP — ${item.label}`, metadata: { moduleCode: item.moduleCode ?? "PLAN_BASE" } }));
+      return {
+        price_data: {
+          currency: "brl",
+          product: product.id,
+          unit_amount: Math.round(item.monthlyPriceBrl * 100),
+          recurring: { interval: "month" as const },
+        },
+        quantity: 1,
+      };
+    }),
+  );
+
+  return stripe.checkout.sessions.create({
+    mode: "subscription",
+    customer: input.customerId,
+    line_items,
+    success_url: input.successUrl,
+    cancel_url: input.cancelUrl,
+    metadata: input.metadata,
+    subscription_data: { metadata: input.metadata },
+  });
+}
+
 // Passo 2 — assinatura recorrente com cobrança automática (Capítulo 2.7.3).
 export async function createRecurringSubscription(stripeCustomerId: string, priceId: string, paymentMethodId: string) {
   const stripe = await getStripeClient();

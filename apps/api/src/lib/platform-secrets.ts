@@ -75,6 +75,14 @@ export const PLATFORM_SECRET_REGISTRY: PlatformSecretDefinition[] = [
     envFallback: "ASAAS_WEBHOOK_TOKEN",
   },
   {
+    key: "APP_BASE_URL",
+    label: "URL base do painel (frontend)",
+    group: "Rede",
+    description: "Origem pública do SPA do tenant (ex.: https://app.filitecherp.com.br), usada para montar as URLs de sucesso/cancelamento do Checkout de assinatura (Stripe Checkout Session / Asaas Checkout, Capítulo 9.3) para onde o lojista é redirecionado após o pagamento.",
+    envFallback: "APP_BASE_URL",
+    placeholder: "https://app.filitecherp.com.br",
+  },
+  {
     key: "CORS_ORIGIN",
     label: "Origens CORS permitidas",
     group: "Rede",

@@ -1,0 +1,184 @@
+// apps/api/src/modules/billing/checkout.routes.ts
+// Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 9.3 — contrato real de
+// `POST /api/billing/checkout` (até a mega-audit rodada 5 esta rota não existia:
+// a calculadora de assinatura dinâmica da landing nunca finalizava compra de
+// verdade). Converte um tenant em TRIAL (sem nenhuma Subscription ainda — ver
+// auth.routes.ts signup) na sua primeira contratação paga de plano+módulos, OU
+// reabre uma tentativa anterior não concluída do mesmo tenant.
+//
+// NUNCA coleta dado de cartão diretamente: o pagamento é sempre feito na página
+// hospedada do próprio PSP (Stripe Checkout Session / Asaas Checkout), que só
+// confirma a contratação de fato via webhook (webhooks.routes.ts) — por isso a
+// Subscription criada aqui nasce em status PENDING_CHECKOUT com um id interino
+// (`pending:<uuid>`) em vez do id real do provedor, só promovido a ACTIVE quando
+// o pagamento é efetivamente confirmado.
+import { randomUUID } from "node:crypto";
+import { Router, Request, Response } from "express";
+import { z } from "zod";
+import { prisma } from "@filitech/db";
+import { requireAuth } from "../../middlewares/auth.middleware";
+import { hasManageSubscriptionPermission } from "./modules.routes";
+import { findOrCreateStripeCustomer, createStripeCheckoutSession, StripeCheckoutLineItem } from "./stripe.client";
+import { createAsaasCustomer, createAsaasCheckout } from "./asaas.client";
+import { getPlatformSecret } from "../../lib/platform-secrets";
+import { createModuleLogger } from "../../lib/logger";
+
+export const checkoutRouter = Router();
+
+const log = createModuleLogger("billing-checkout");
+
+const err = (res: Response, status: number, code: string, message: string) =>
+  res.status(status).json({ success: false, data: null, error: { code, message } });
+
+const checkoutSchema = z.object({
+  planCode: z.string().min(1),
+  selectedModuleCodes: z.array(z.string().min(1)).default([]),
+  billingCycle: z.literal("MONTHLY").default("MONTHLY"),
+  paymentGateway: z.enum(["STRIPE", "ASAAS"]),
+});
+
+async function resolveAppBaseUrl(): Promise<string> {
+  return (await getPlatformSecret("APP_BASE_URL")) ?? "https://app.filitecherp.com.br";
+}
+
+// POST /api/billing/checkout
+checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+
+  if (!(await hasManageSubscriptionPermission(role, userId))) {
+    return err(res, 403, "FORBIDDEN", "Seu nível de acesso não permite contratar/alterar a assinatura.");
+  }
+
+  const parsed = checkoutSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+  }
+  const input = parsed.data;
+
+  const [tenant, owner, plan] = await Promise.all([
+    prisma.tenant.findUnique({ where: { id: tenantId } }),
+    prisma.user.findFirst({ where: { tenantId, role: "OWNER" }, orderBy: { createdAt: "asc" } }),
+    prisma.plan.findUnique({ where: { code: input.planCode } }),
+  ]);
+  if (!tenant) return err(res, 404, "NOT_FOUND", "Tenant não encontrado.");
+  if (!owner) return err(res, 500, "OWNER_NOT_FOUND", "Nenhum usuário OWNER encontrado para este tenant.");
+  if (!plan || !plan.active) return err(res, 404, "PLAN_NOT_FOUND", `Plano "${input.planCode}" não existe ou foi descontinuado.`);
+
+  const existingActive = await prisma.subscription.findFirst({
+    where: { tenantId, status: { in: ["ACTIVE", "PAST_DUE"] } },
+  });
+  if (existingActive) {
+    return err(
+      res,
+      409,
+      "ALREADY_SUBSCRIBED",
+      "Este tenant já possui uma assinatura ativa — use a troca de plano/ativação de módulos em vez de um novo checkout.",
+    );
+  }
+
+  const uniqueModuleCodes = Array.from(new Set(input.selectedModuleCodes));
+  const modules = uniqueModuleCodes.length
+    ? await prisma.module.findMany({ where: { code: { in: uniqueModuleCodes } } })
+    : [];
+  const foundCodes = new Set(modules.map((m) => m.code));
+  const invalidCodes = uniqueModuleCodes.filter((c) => !foundCodes.has(c));
+  if (invalidCodes.length > 0) {
+    return err(res, 404, "MODULE_NOT_FOUND", `Módulo(s) inexistente(s): ${invalidCodes.join(", ")}.`);
+  }
+  const inactiveCodes = modules.filter((m) => !m.active).map((m) => m.code);
+  if (inactiveCodes.length > 0) {
+    return err(res, 409, "MODULE_DISCONTINUED", `Módulo(s) descontinuado(s): ${inactiveCodes.join(", ")}.`);
+  }
+
+  // Módulos já inclusos de graça no plano (Plan.includedModules) nunca entram como
+  // linha de cobrança extra — só o que o lojista selecionou FORA do que já é incluso.
+  const billableModules = modules.filter((m) => !plan.includedModules.includes(m.code));
+  const breakdown = [
+    { code: plan.code, label: `${plan.label} (base)`, price: Number(plan.basePrice) },
+    ...billableModules.map((m) => ({ code: m.code, label: m.label, price: Number(m.monthlyPrice) })),
+  ];
+  const computedMrr = breakdown.reduce((sum, item) => sum + item.price, 0);
+
+  // Descarta qualquer tentativa anterior não concluída deste tenant — nunca acumula
+  // linhas órfãs em PENDING_CHECKOUT (o lojista pode mudar de ideia de plano/módulos
+  // e tentar de novo quantas vezes quiser antes de efetivamente pagar).
+  await prisma.subscription.deleteMany({ where: { tenantId, status: "PENDING_CHECKOUT" } });
+
+  const pendingSubscription = await prisma.subscription.create({
+    data: {
+      tenantId,
+      planId: plan.id,
+      provider: input.paymentGateway.toLowerCase(),
+      externalSubscriptionId: `pending:${randomUUID()}`,
+      status: "PENDING_CHECKOUT",
+      pendingModuleCodes: billableModules.map((m) => m.code),
+    },
+  });
+
+  const appBaseUrl = await resolveAppBaseUrl();
+  const successUrl = `${appBaseUrl}/billing/checkout/success?subscriptionId=${pendingSubscription.id}`;
+  const cancelUrl = `${appBaseUrl}/billing/checkout/cancelled?subscriptionId=${pendingSubscription.id}`;
+
+  try {
+    let checkoutRedirectUrl: string;
+
+    if (input.paymentGateway === "STRIPE") {
+      const customerId = await findOrCreateStripeCustomer(tenant.stripeCustomerId, owner.email, tenant.tradeName);
+      if (customerId !== tenant.stripeCustomerId) {
+        await prisma.tenant.update({ where: { id: tenantId }, data: { stripeCustomerId: customerId } });
+      }
+
+      const items: StripeCheckoutLineItem[] = [
+        { moduleCode: null, label: `${plan.label} (base)`, monthlyPriceBrl: Number(plan.basePrice) },
+        ...billableModules.map((m) => ({ moduleCode: m.code, label: m.label, monthlyPriceBrl: Number(m.monthlyPrice) })),
+      ];
+
+      const session = await createStripeCheckoutSession({
+        customerId,
+        items,
+        successUrl,
+        cancelUrl,
+        metadata: { pendingSubscriptionId: pendingSubscription.id, tenantId, planCode: plan.code },
+      });
+      if (!session.url) throw new Error("Stripe não retornou uma URL de checkout.");
+      checkoutRedirectUrl = session.url;
+    } else {
+      let customerId = tenant.asaasCustomerId;
+      if (!customerId) {
+        const created = await createAsaasCustomer({
+          name: tenant.legalName,
+          cpfCnpj: tenant.cnpj ?? "",
+          email: owner.email,
+          externalReference: tenantId,
+        });
+        customerId = created.id;
+        await prisma.tenant.update({ where: { id: tenantId }, data: { asaasCustomerId: customerId } });
+      }
+
+      const nextDueDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10); // D+1 — Asaas exige nextDueDate futura
+      const checkout = await createAsaasCheckout({
+        customer: customerId,
+        items: breakdown.map((item) => ({ name: item.label, value: item.price })),
+        totalValue: computedMrr,
+        nextDueDate,
+        successUrl,
+        cancelUrl,
+        expiredUrl: cancelUrl,
+        externalReference: pendingSubscription.id,
+      });
+      checkoutRedirectUrl = checkout.link;
+    }
+
+    return res.status(201).json({
+      success: true,
+      data: { subscriptionId: pendingSubscription.id, computedMrr, breakdown, checkoutRedirectUrl },
+      error: null,
+    });
+  } catch (caughtErr) {
+    // Falha ao criar a sessão no provedor: nunca deixa uma linha PENDING_CHECKOUT órfã
+    // sem nenhum checkout de fato associado a ela.
+    await prisma.subscription.delete({ where: { id: pendingSubscription.id } }).catch(() => undefined);
+    log.error({ tenantId, paymentGateway: input.paymentGateway, err: caughtErr }, "falha ao criar checkout de assinatura");
+    return err(res, 502, "CHECKOUT_PROVIDER_ERROR", "Não foi possível iniciar o checkout com o provedor de pagamento. Tente novamente em instantes.");
+  }
+});

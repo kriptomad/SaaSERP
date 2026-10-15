@@ -5,6 +5,7 @@
 // nichos mostrando módulos/planos por nicho, e possibilidade de montar plano
 // à la carte somando módulos avulsos.
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   AppBar,
   Box,
@@ -29,6 +30,7 @@ import CloudOffIcon from "@mui/icons-material/CloudOff";
 import ShieldIcon from "@mui/icons-material/Shield";
 import { motion, AnimatePresence } from "framer-motion";
 import { NICHES, MODULE_CATALOG, findPlan, findModule } from "../content/catalog";
+import { savePendingCheckout } from "../content/pendingCheckout";
 import { ThemeToggleButton } from "../theme/ThemeToggleButton";
 
 const GAP_SOLUTIONS = [
@@ -59,6 +61,7 @@ function fadeUp(delay = 0) {
 }
 
 export function LandingPage() {
+  const navigate = useNavigate();
   const [activeNicheId, setActiveNicheId] = useState(NICHES[0].id);
   const [extraModuleCodes, setExtraModuleCodes] = useState<string[]>([]);
 
@@ -75,6 +78,16 @@ export function LandingPage() {
 
   function toggleExtraModule(code: string) {
     setExtraModuleCodes((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]));
+  }
+
+  // Capítulo 9.3 — a calculadora pública não finaliza a compra sozinha (nenhum
+  // checkout real acontece sem sessão autenticada): guarda a escolha e manda o
+  // visitante para o cadastro; após criar a conta, o SignupPage o leva direto para
+  // a tela de assinatura (BillingPage), que consome POST /api/billing/checkout com
+  // esta mesma seleção pré-preenchida.
+  function goToSignupWithSelection(planCode: string, moduleCodes: string[]) {
+    savePendingCheckout({ planCode, moduleCodes });
+    navigate("/signup");
   }
 
   return (
@@ -244,7 +257,12 @@ export function LandingPage() {
                       <Typography variant="caption" color="text.secondary">
                         10 usuários inclusos — cada usuário adicional custa +R$ 35,00/mês
                       </Typography>
-                      <Button href="/signup" fullWidth variant="contained" sx={{ mt: 2 }}>
+                      <Button
+                        fullWidth
+                        variant="contained"
+                        sx={{ mt: 2 }}
+                        onClick={() => goToSignupWithSelection(activeNiche.comboPlanCode, activeNiche.moduleCodes)}
+                      >
                         Assinar plano {activeNiche.label}
                       </Button>
                     </CardContent>
@@ -299,7 +317,15 @@ export function LandingPage() {
               <Typography variant="body1">Total estimado</Typography>
               <Typography variant="h4" fontWeight={800}>R$ {estimatedTotal.toFixed(2)}<Typography component="span" variant="body2">/mês</Typography></Typography>
             </Stack>
-            <Button href="/signup" fullWidth size="large" variant="contained" sx={{ mt: 3 }}>
+            <Button
+              fullWidth
+              size="large"
+              variant="contained"
+              sx={{ mt: 3 }}
+              onClick={() =>
+                goToSignupWithSelection(activeNiche.comboPlanCode, Array.from(new Set([...activeNiche.moduleCodes, ...extraModuleCodes])))
+              }
+            >
               Começar com este plano
             </Button>
           </CardContent>

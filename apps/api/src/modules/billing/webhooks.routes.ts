@@ -10,6 +10,52 @@ import { prismaUnscoped } from "@filitech/db";
 import { getStripeClient } from "./stripe.client";
 import { getPlatformSecret } from "../../lib/platform-secrets";
 import { handlePaymentFailure, handlePaymentRecovered } from "./dunning.service";
+import { invalidateTenantModuleCache } from "../../middlewares/gatekeeper.middleware";
+import { createModuleLogger } from "../../lib/logger";
+
+const log = createModuleLogger("billing-webhooks");
+
+// Capítulo 9.3 — promove a Subscription interina (PENDING_CHECKOUT, id local) para a
+// assinatura real (ACTIVE, externalSubscriptionId do provedor) na primeira confirmação
+// de pagamento do Checkout, e ativa de uma vez todos os módulos que o lojista escolheu
+// na calculadora (`pendingModuleCodes`). Compartilhado pelos dois webhooks (Stripe e
+// Asaas) — cada um só precisa resolver `pendingSubscriptionId`/`externalSubscriptionId`/
+// `currentPeriodEnd` do jeito específico do seu payload antes de chamar isto.
+async function activatePendingSubscription(
+  pendingSubscriptionId: string,
+  externalSubscriptionId: string,
+  currentPeriodEnd: Date | null,
+  moduleItemIds: Record<string, string>,
+): Promise<{ tenantId: string } | null> {
+  const pending = await prismaUnscoped.subscription.findUnique({ where: { id: pendingSubscriptionId } });
+  if (!pending || pending.status !== "PENDING_CHECKOUT") {
+    return null; // já processado (reentrega do webhook) ou nunca existiu
+  }
+
+  await prismaUnscoped.$transaction(async (tx) => {
+    await tx.subscription.update({
+      where: { id: pendingSubscriptionId },
+      data: {
+        externalSubscriptionId,
+        status: "ACTIVE",
+        firstChargedAt: new Date(),
+        currentPeriodEnd,
+        pendingModuleCodes: [],
+      },
+    });
+    for (const moduleCode of pending.pendingModuleCodes) {
+      await tx.tenantModule.upsert({
+        where: { tenantId_moduleCode: { tenantId: pending.tenantId, moduleCode } },
+        update: { active: true, deactivatedAt: null, stripeSubscriptionItemId: moduleItemIds[moduleCode] ?? null },
+        create: { tenantId: pending.tenantId, moduleCode, active: true, stripeSubscriptionItemId: moduleItemIds[moduleCode] ?? null },
+      });
+    }
+  });
+
+  await invalidateTenantModuleCache(pending.tenantId);
+  log.info({ tenantId: pending.tenantId, subscriptionId: pendingSubscriptionId, moduleCodes: pending.pendingModuleCodes }, "assinatura ativada via checkout");
+  return { tenantId: pending.tenantId };
+}
 
 export const stripeWebhookRouter = Router();
 export const asaasWebhookRouter = Router();
@@ -49,6 +95,42 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
     event = stripe.webhooks.constructEvent(req.body, signature, endpointSecret);
   } catch (err) {
     return res.status(400).json({ error: { code: "INVALID_SIGNATURE", message: (err as Error).message } });
+  }
+
+  // Capítulo 9.3 — conclusão do Checkout hospedado: tratado ANTES do lookup genérico
+  // por externalSubscriptionId abaixo porque a Subscription local ainda está com o id
+  // interino `pending:<uuid>` neste momento (só este evento sabe o id real do Stripe).
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object as import("stripe").Stripe.Checkout.Session;
+    const pendingSubscriptionId = session.metadata?.pendingSubscriptionId;
+    const realSubscriptionId = typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
+    if (!pendingSubscriptionId || !realSubscriptionId) {
+      return res.json({ received: true, ignored: "missing-checkout-metadata" });
+    }
+
+    const isNew = await recordBillingEventOnce("stripe", event.id, pendingSubscriptionId, event.type, session);
+    if (!isNew) {
+      return res.json({ received: true, duplicate: true });
+    }
+
+    try {
+      const stripeSubscription = await stripe.subscriptions.retrieve(realSubscriptionId);
+      const currentPeriodEnd = new Date(stripeSubscription.current_period_end * 1000);
+      const moduleItemIds: Record<string, string> = {};
+      for (const item of stripeSubscription.items.data) {
+        const product = item.price.product;
+        const productId = typeof product === "string" ? product : product.id;
+        const fullProduct = await stripe.products.retrieve(productId);
+        const moduleCode = fullProduct.metadata?.moduleCode;
+        if (moduleCode && moduleCode !== "PLAN_BASE") moduleItemIds[moduleCode] = item.id;
+      }
+      await activatePendingSubscription(pendingSubscriptionId, realSubscriptionId, currentPeriodEnd, moduleItemIds);
+    } catch (err) {
+      await releaseBillingEvent("stripe", event.id);
+      return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
+    }
+
+    return res.json({ received: true });
   }
 
   const object = event.data.object as { subscription?: string; id?: string };
@@ -110,7 +192,10 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
     return res.status(401).json({ error: { code: "INVALID_WEBHOOK_TOKEN" } });
   }
 
-  const { event: eventType, payment } = req.body as { event: string; payment?: { subscription?: string; id: string } };
+  const {
+    event: eventType,
+    payment,
+  } = req.body as { event: string; payment?: { subscription?: string; id: string; externalReference?: string; value?: number; nextDueDate?: string } };
 
   if (!payment?.subscription) {
     // Sem referência de assinatura: pode ser uma cobrança avulsa de Boleto/Pix emitida
@@ -141,6 +226,31 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
   });
 
   if (!subscription) {
+    // Capítulo 9.3 — conclusão do Checkout hospedado: a Subscription local ainda tem o
+    // id interino `pending:<uuid>` (nunca igual a `payment.subscription`, o id real do
+    // Asaas), então o lookup acima sempre falha neste primeiro evento — resolvemos pelo
+    // `externalReference` que `checkout.routes.ts` grava como sendo o id LOCAL da
+    // Subscription pendente (ver `createAsaasCheckout({ externalReference: ... })`).
+    if (payment.externalReference && (eventType === "PAYMENT_RECEIVED" || eventType === "PAYMENT_CONFIRMED")) {
+      const isNewPending = await recordBillingEventOnce("asaas", `${eventType}:${payment.id}`, payment.externalReference, eventType, req.body);
+      if (!isNewPending) {
+        return res.json({ received: true, duplicate: true });
+      }
+      try {
+        const nextDueDate = payment.nextDueDate ? new Date(payment.nextDueDate) : null;
+        const currentPeriodEnd = nextDueDate
+          ? new Date(nextDueDate.getFullYear(), nextDueDate.getMonth() + 1, nextDueDate.getDate())
+          : null;
+        const activated = await activatePendingSubscription(payment.externalReference, payment.subscription!, currentPeriodEnd, {});
+        if (!activated) {
+          return res.json({ received: true, ignored: "unknown-pending-subscription" });
+        }
+      } catch (err) {
+        await releaseBillingEvent("asaas", `${eventType}:${payment.id}`);
+        return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
+      }
+      return res.json({ received: true });
+    }
     return res.json({ received: true, ignored: "unknown-subscription" });
   }
 

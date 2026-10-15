@@ -15,6 +15,7 @@ import { stripeWebhookRouter, asaasWebhookRouter } from "./modules/billing/webho
 import { ifoodWebhookRouter } from "./modules/integrations/ifood-webhook.routes";
 import { modulesRouter } from "./modules/billing/modules.routes";
 import { subscriptionRouter } from "./modules/billing/subscription.routes";
+import { checkoutRouter } from "./modules/billing/checkout.routes";
 import { salesRouter } from "./modules/sales/sales.routes";
 import { usersRouter } from "./modules/users/users.routes";
 import { productsRouter } from "./modules/products/products.routes";
@@ -229,6 +230,7 @@ app.get("/me", requireAuth, (req, res) => {
 
 app.use(modulesRouter);
 app.use(subscriptionRouter);
+app.use(checkoutRouter);
 app.use(salesRouter);
 app.use(usersRouter);
 app.use(productsRouter);

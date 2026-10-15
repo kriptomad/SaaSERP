@@ -95,6 +95,43 @@ export function updateAsaasSubscriptionValue(subscriptionId: string, newValue: n
   return asaasRequest(`/subscriptions/${subscriptionId}`, { method: "PUT", body: JSON.stringify({ value: newValue }) });
 }
 
+// Capítulo 9.3 — Checkout hospedado do Asaas para a contratação inicial de
+// plano+módulos. Diferente do Stripe, o Asaas não modela "vários itens
+// recorrentes" na mesma assinatura: `items` aqui é só o detalhamento visual da
+// página de pagamento, o valor efetivamente cobrado é `subscription.value`
+// (soma de tudo, mesma filosofia de `updateAsaasSubscriptionValue` acima).
+export interface AsaasCheckoutInput {
+  customer: string;
+  items: Array<{ name: string; value: number }>;
+  totalValue: number;
+  nextDueDate: string; // YYYY-MM-DD
+  successUrl: string;
+  cancelUrl: string;
+  expiredUrl: string;
+  externalReference: string;
+}
+
+export interface AsaasCheckoutResponse {
+  id: string;
+  link: string;
+}
+
+export function createAsaasCheckout(input: AsaasCheckoutInput): Promise<AsaasCheckoutResponse> {
+  return asaasRequest("/checkouts", {
+    method: "POST",
+    body: JSON.stringify({
+      billingTypes: ["CREDIT_CARD", "PIX"],
+      chargeTypes: ["RECURRENT"],
+      minutesToExpire: 60,
+      customer: input.customer,
+      externalReference: input.externalReference,
+      callback: { successUrl: input.successUrl, cancelUrl: input.cancelUrl, expiredUrl: input.expiredUrl },
+      items: input.items.map((item) => ({ name: item.name, quantity: 1, value: item.value })),
+      subscription: { cycle: "MONTHLY", nextDueDate: input.nextDueDate, value: input.totalValue },
+    }),
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Capítulo 9/17 — cobranças de Boleto/Pix emitidas pelo PRÓPRIO lojista aos
 // seus clientes finais (PaymentCharge), distinto da cobrança de assinatura

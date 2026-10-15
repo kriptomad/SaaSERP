@@ -8,6 +8,7 @@ import { ThemeToggleButton } from "../theme/ThemeToggleButton";
 import { formatCnpjMask, isValidCnpj, normalizeCnpj } from "../shared/validation/br-documents";
 import { validatePasswordPolicy } from "../shared/validation/password-strength";
 import { PasswordStrengthMeter } from "../shared/validation/PasswordStrengthMeter";
+import { peekPendingCheckout } from "../content/pendingCheckout";
 
 const TENANT_TYPES = [
   { value: "BUSINESS", label: "Empresa (loja/comércio)" },
@@ -92,7 +93,10 @@ export function SignupPage() {
     try {
       const response = await signup({ ...form, cnpj: form.cnpj ? normalizeCnpj(form.cnpj) : undefined, termsAccepted: true as const });
       setSession(response);
-      navigate("/dashboard");
+      // Capítulo 9.3 — se o visitante veio da calculadora da landing com um plano/
+      // módulos já escolhidos, leva direto para a assinatura em vez do dashboard vazio
+      // (sem isso, aquela escolha nunca chegaria a virar uma assinatura de verdade).
+      navigate(peekPendingCheckout() ? "/configuracoes/cobranca" : "/dashboard");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Falha ao conectar com o servidor.");
     } finally {
