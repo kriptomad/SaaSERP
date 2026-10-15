@@ -4,7 +4,7 @@ import { api } from "../../../api/client";
 
 export interface SaleFiscalDocumentSummary {
   id: string;
-  type: "NFCE" | "NFE_SAIDA" | "NFE_ENTRADA";
+  type: "NFCE" | "NFE_SAIDA" | "NFE_ENTRADA" | "NFSE";
   status: "PENDING" | "AUTHORIZED" | "REJECTED" | "CANCELLED" | "NOT_CONTRACTED";
   accessKey: string | null;
   qrCodeUrl: string | null;

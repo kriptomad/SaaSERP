@@ -47,6 +47,13 @@ interface TaxRuleLike {
   cstCsosn?: string | null;
   icmsBaseReductionPercent: Prisma.Decimal | null;
   icmsInterestadualAliquota: Prisma.Decimal | null;
+  // CORREÇÃO DE AUDITORIA (Capítulo 21.8) — consumidos apenas por `calculateIss`
+  // abaixo; precisavam ser declarados aqui para acesso tipado, embora a linha
+  // Prisma já os retornasse (o `findFirst` nunca usa `select`, portanto a coluna
+  // sempre volta na query — faltava só o tipo estrutural enxergar o campo).
+  issAliquota?: Prisma.Decimal | null;
+  issRetidoNaFonte?: boolean;
+  nbs?: string | null;
 }
 
 // Interface estrutural deliberadamente desacoplada dos tipos genéricos gerados pela
@@ -153,6 +160,59 @@ export async function calculateTax(
     cbsAmount: input.grossAmount.mul((rule.cbsAliquota ?? new Prisma.Decimal(0)).div(100)),
     selectiveTaxAmount: input.grossAmount.mul((rule.selectiveTaxAliquota ?? new Prisma.Decimal(0)).div(100)),
     appliedRules: [{ ruleId: rule.id, legalReference: rule.legalReference }],
+  };
+}
+
+// CORREÇÃO DE AUDITORIA (Capítulo 21.8): ISS municipal nunca era calculado em
+// lugar nenhum do sistema — `comanda.routes.ts` só criava `ServiceCommissionEntry`
+// (comissão do profissional) para item de serviço, sem nenhum tributo. Espelha a
+// mesma precedência em cascata de `calculateTax` (regra mais específica vence a
+// mais genérica), trocando apenas `ncm` por `nbs` (Nomenclatura Brasileira de
+// Serviços — equivalente do NCM para serviço). Fail-closed: nunca retorna ISS
+// zerado silenciosamente por falta de regra cadastrada.
+export interface IssCalculationInput {
+  tenantId: string;
+  nbs: string | null; // null = cai direto para a regra genérica do nicho (mesmo padrão de `ncm: null` em calculateTax)
+  uf: string;
+  nicheCode: string;
+  grossAmount: Prisma.Decimal;
+}
+
+export interface IssCalculationResult {
+  issAmount: Prisma.Decimal;
+  issRetidoNaFonte: boolean;
+  appliedRule: { ruleId: string; legalReference: string };
+}
+
+export async function calculateIss(
+  prisma: TaxEngineClient,
+  input: IssCalculationInput,
+): Promise<IssCalculationResult> {
+  const rule = await prisma.taxRule.findFirst({
+    where: {
+      OR: [{ tenantId: input.tenantId }, { tenantId: null }],
+      AND: [
+        { OR: [{ nbs: input.nbs }, { nbs: null }] },
+        { OR: [{ uf: input.uf }, { uf: null }] },
+        { OR: [{ nicheCode: input.nicheCode }, { nicheCode: null }] },
+        { issAliquota: { not: null } },
+        { effectiveFrom: { lte: new Date() } },
+        { OR: [{ effectiveTo: null }, { effectiveTo: { gte: new Date() } }] },
+      ],
+    },
+    orderBy: [{ nbs: "desc" }, { uf: "desc" }, { nicheCode: "desc" }],
+  });
+
+  if (!rule || rule.issAliquota == null) {
+    throw new Error(
+      `Nenhuma TaxRule com alíquota de ISS cadastrada para NBS ${input.nbs ?? "(genérico)"} / UF ${input.uf} / nicho ${input.nicheCode} — item de serviço bloqueado até o cadastro da regra municipal (Cadastros > Regras Fiscais).`,
+    );
+  }
+
+  return {
+    issAmount: input.grossAmount.mul(rule.issAliquota.div(100)),
+    issRetidoNaFonte: rule.issRetidoNaFonte ?? false,
+    appliedRule: { ruleId: rule.id, legalReference: rule.legalReference },
   };
 }
 

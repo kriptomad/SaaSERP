@@ -10,21 +10,22 @@
 // adicionado a `SaleItem` (ver Capítulo 5, model SaleItem).
 // Reaproveita "pdv:comanda:read"/"pdv:comanda:write" (novo, seedado nesta
 // correção) por estar no mesmo domínio operacional de caixa/PDV.
-// PENDÊNCIA EXPLÍCITA: o fechamento de uma Comanda com itens mistos
-// (produto + serviço) hoje gera apenas UM FiscalDocument NFC-e cobrindo os
-// itens de produto; a emissão de NFS-e para os itens de serviço (ISS
-// municipal, que tem motor de cálculo próprio ainda não implementado no
-// Capítulo 21 — ver comentário em tax-engine.service.ts) não está automatizada
-// e precisa ser emitida manualmente pelo lojista enquanto o motor de ISS não
-// existir.
+// CORREÇÃO DE AUDITORIA (Capítulo 21.8): o fechamento de uma Comanda com itens
+// mistos (produto + serviço) gerava apenas UM FiscalDocument NFC-e cobrindo os
+// itens de produto; itens de serviço nunca tinham ISS calculado nem NFS-e
+// emitida — ver `calculateIss` (tax-engine.service.ts) e a emissão real via
+// Focus NFe em `emit-fiscal-document.service.ts`. Fechado: cada item de
+// serviço agora gera um FiscalDocument NFSE próprio (enfileirado no mesmo
+// job BullMQ `fiscal-emission` da NFC-e), parelho ao produto.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireAnyModule } from "../../middlewares/gatekeeper.middleware";
-import { calculateTax } from "../fiscal/tax-engine.service";
+import { calculateTax, calculateIss } from "../fiscal/tax-engine.service";
 import { resolveTaxReformPhase } from "../fiscal/tax-reform-phase.service";
 import { consumeRecipeForComandaItem, MissingIngredientStockError } from "../../services/production/consume-recipe-for-comanda-item.service";
+import { enqueueFiscalEmission } from "../fiscal/queues/fiscal-emission.queue";
 
 export const comandaRouter = Router();
 
@@ -225,14 +226,23 @@ comandaRouter.post("/comandas/:id/close", requireAuth, async (req: Request, res:
         if (comanda.status !== "OPEN") throw new Error("INVALID_STATUS");
         if (comanda.items.length === 0) throw new Error("COMANDA_EMPTY");
 
-        const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { taxRegime: true } });
+        const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { taxRegime: true, uf: true } });
         let totalAmount = new Prisma.Decimal(0);
         let legacyIcmsTotal = new Prisma.Decimal(0);
         let legacyPisCofinsTotal = new Prisma.Decimal(0);
         let ibsTotal = new Prisma.Decimal(0);
         let cbsTotal = new Prisma.Decimal(0);
         let selectiveTaxTotal = new Prisma.Decimal(0);
+        let issTotal = new Prisma.Decimal(0);
+        // Conservador por design: um único FiscalDocument NFSE agrega todos os
+        // itens de serviço da comanda (mesmo padrão de agregação da NFC-e acima);
+        // se QUALQUER serviço envolvido exigir retenção na fonte pelo tomador,
+        // marcamos o documento inteiro como retido — nunca o contrário (declarar
+        // "sem retenção" quando ao menos um item realmente exige retenção seria
+        // uma omissão fiscal real, não apenas uma simplificação de UI).
+        let issRetidoNaFonte = false;
         let hasProductItem = false;
+        let hasServiceItem = false;
         const saleItemsData: Prisma.SaleItemCreateManySaleInput[] = [];
         // Capítulo 11.6 — comissão por serviço: calculada aqui (fechamento+pagamento
         // da comanda), nunca no lançamento do item nem no agendamento. Guardamos o
@@ -267,6 +277,24 @@ comandaRouter.post("/comandas/:id/close", requireAuth, async (req: Request, res:
             ibsTotal = ibsTotal.plus(taxResult.ibsAmount);
             cbsTotal = cbsTotal.plus(taxResult.cbsAmount);
             selectiveTaxTotal = selectiveTaxTotal.plus(taxResult.selectiveTaxAmount);
+          }
+
+          if (item.serviceId) {
+            hasServiceItem = true;
+            const service = await tx.service.findFirstOrThrow({ where: { id: item.serviceId, tenantId } });
+            // `nbs: null` cai direto para a regra genérica do nicho — `Service` não
+            // cadastra NBS individual (mesmo padrão de `ncm: null` acima para
+            // produto sem NCM específico); o cadastro fino por NBS fica disponível
+            // via TaxRule (Cadastros > Regras Fiscais) quando o lojista precisar.
+            const issResult = await calculateIss(tx, {
+              tenantId,
+              nbs: null,
+              uf: tenant.uf ?? "SP",
+              nicheCode: service.nicheTag,
+              grossAmount: lineGross,
+            });
+            issTotal = issTotal.plus(issResult.issAmount);
+            issRetidoNaFonte = issRetidoNaFonte || issResult.issRetidoNaFonte;
           }
 
           saleItemsData.push({
@@ -345,12 +373,43 @@ comandaRouter.post("/comandas/:id/close", requireAuth, async (req: Request, res:
           });
         }
 
+        // CORREÇÃO DE AUDITORIA (Capítulo 21.8) — NFSE própria para os itens de
+        // serviço da comanda (mão de obra de salão/lava-rápido/restaurante),
+        // paralela à NFCE acima (que cobre só mercadoria). Emitida pelo mesmo
+        // worker `fiscal-emission` via Focus NFe (ver emit-fiscal-document.service.ts).
+        let serviceFiscalDocument = null;
+        if (hasServiceItem) {
+          serviceFiscalDocument = await tx.fiscalDocument.create({
+            data: {
+              tenantId,
+              type: "NFSE",
+              status: "PENDING",
+              saleId: sale.id,
+              issAmount: issTotal,
+              issRetidoNaFonte,
+              totalTaxesApprox: issTotal,
+              taxRegimeSnapshot: tenant.taxRegime,
+              faseReformaTributaria: resolveTaxReformPhase(new Date()),
+            },
+          });
+        }
+
         const closedComanda = await tx.comanda.update({ where: { id: comanda.id }, data: { status: "CLOSED", closedAt: new Date(), saleId: sale.id } });
 
-        return { comanda: closedComanda, sale, fiscalDocument };
+        return { comanda: closedComanda, sale, fiscalDocument, serviceFiscalDocument };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
+    // Fora da transação (commit já confirmado) — mesmo princípio de
+    // close-sale.service.ts/closeSaleAndEmitFiscalDocument: nunca emitir de forma
+    // síncrona dentro da transação de banco, para não segurar o lock de estoque
+    // esperando resposta de rede externa (SEFAZ/Focus NFe).
+    if (result.fiscalDocument) {
+      await enqueueFiscalEmission({ fiscalDocumentId: result.fiscalDocument.id, tenantId });
+    }
+    if (result.serviceFiscalDocument) {
+      await enqueueFiscalEmission({ fiscalDocumentId: result.serviceFiscalDocument.id, tenantId });
+    }
     return res.json({ success: true, data: result, error: null });
   } catch (err: any) {
     const code = err?.message ?? "CLOSE_FAILED";

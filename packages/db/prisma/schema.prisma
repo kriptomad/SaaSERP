@@ -168,6 +168,13 @@ model Tenant {
   // distinta de `Product.originUf` (Capítulo 21.2, origem fiscal por mercadoria).
   inscricaoEstadual             String?
   uf                            String?
+  // CORREÇÃO DE AUDITORIA (Capítulo 21.8) — Inscrição Municipal, obrigatória para
+  // emitir NFS-e (ISS) junto à Focus NFe (`prestador.inscricao_municipal`); nunca
+  // confundir com `inscricaoEstadual` (ICMS/estadual). Opcional no schema porque
+  // tenants PERSONAL (Capítulo 22) e tenants cujo nicho nunca vende serviço (ex.:
+  // mercado puro) não precisam cadastrá-la — a ausência bloqueia só a emissão de
+  // NFS-e especificamente, nunca o sistema inteiro.
+  inscricaoMunicipal             String?
   // Capítulo 11.2 — Ótica: dias de garantia CONTRATUAL adicional configurável pela
   // loja, somados (nunca substituindo) à garantia legal de 90 dias do CDC — aplicada
   // automaticamente em `close-sale.service.ts` para toda venda de produto com
@@ -1803,6 +1810,11 @@ enum FiscalDocumentType {
   NFCE
   NFE_SAIDA
   NFE_ENTRADA
+  // CORREÇÃO DE AUDITORIA (Capítulo 21.8): ISS municipal (mão de obra de
+  // comanda/O.S.) nunca era calculado nem emitido em lugar nenhum do sistema —
+  // os campos `TaxRule.issAliquota`/`issRetidoNaFonte`/`nbs` existiam no schema
+  // mas nenhum código os lia. NFSE fecha este gap (ver emit-fiscal-document.service.ts).
+  NFSE
 }
 
 enum FiscalDocumentStatus {
@@ -1865,6 +1877,13 @@ model FiscalDocument {
   difalAmount                  Decimal?              @db.Decimal(12, 2) // DIFAL devido à UF de destino em venda interestadual a consumidor final não contribuinte
   monofasicoSegregatedRevenue  Decimal?              @db.Decimal(12, 2) // receita de itens com PIS/COFINS monofásico (já tributados na origem) — excluída da base do DAS/apuração
   usedVehicleIcmsAmount        Decimal?              @db.Decimal(12, 2) // ICMS com base de cálculo reduzida de revenda de veículo usado (Capítulo 21.12)
+  // CORREÇÃO DE AUDITORIA (Capítulo 21.8) — ISS municipal sobre itens de serviço
+  // (comanda/O.S.), calculado por `calculateIss` (tax-engine.service.ts) e emitido
+  // como NFSE real via Focus NFe (emit-fiscal-document.service.ts). Nulo em
+  // qualquer FiscalDocument que não seja do tipo NFSE.
+  issAmount                    Decimal?              @db.Decimal(12, 2)
+  issRetidoNaFonte             Boolean               @default(false) // snapshot: true quando o tomador (nunca o prestador) é o responsável legal pelo recolhimento
+  focusNfeCodigoVerificacao    String? // "codigo_verificacao" devolvido pela Focus NFe na emissão de NFS-e — usado na validação pública da nota pelo tomador
   createdAt                    DateTime              @default(now())
   updatedAt                    DateTime              @updatedAt
 

@@ -5,9 +5,13 @@ import { TenantScopedPrismaClient } from "@filitech/db";
 import { transmitFiscalEvent } from "./transmit-fiscal-event";
 
 // Prazos reais da SEFAZ (padrão nacional, cada UF pode SÓ reduzir, nunca ampliar).
-// FiscalDocumentType real do schema é { NFCE, NFE_SAIDA, NFE_ENTRADA } — NFE_ENTRADA
-// (nota de compra recebida) nunca é cancelada por este fluxo (o emitente é o
-// fornecedor, não o tenant), por isso não recebe prazo de cancelamento próprio aqui.
+// FiscalDocumentType real do schema é { NFCE, NFE_SAIDA, NFE_ENTRADA, NFSE } —
+// NFE_ENTRADA (nota de compra recebida) nunca é cancelada por este fluxo (o
+// emitente é o fornecedor, não o tenant); NFSE (ISS, Capítulo 21.8) tem prazo e
+// procedimento de cancelamento definidos por cada prefeitura (sem padrão nacional
+// único como o Ajuste SINIEF da NFC-e) — cancelamento de NFS-e fica documentado
+// como gap de escopo explícito (`CancellationNotApplicableToDocumentTypeError`
+// abaixo), nunca tratado silenciosamente como NFC-e.
 //
 // CORREÇÃO DE AUDITORIA (pesquisa web confirmada): o Ajuste SINIEF 07/2018 reduziu o
 // prazo de cancelamento da NFC-e de 24h para apenas 30 MINUTOS após a autorização de

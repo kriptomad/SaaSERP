@@ -34,11 +34,21 @@ import { ThermalPrinterService, PRINTER_PROFILES } from "../../../shared/hardwar
 import { buildReceipt, translatePaymentMethod } from "../../../shared/hardware/receipt-layout";
 
 const FISCAL_STATUS_LABEL: Record<string, { label: string; color: "success" | "warning" | "error" | "default" }> = {
-  AUTHORIZED: { label: "NFC-e autorizada", color: "success" },
-  PENDING: { label: "Emissão pendente", color: "warning" },
-  REJECTED: { label: "Rejeitada pela SEFAZ", color: "error" },
-  CANCELLED: { label: "Cancelada", color: "default" },
-  NOT_CONTRACTED: { label: "Emissão fiscal não contratada", color: "default" },
+  AUTHORIZED: { label: "autorizada", color: "success" },
+  PENDING: { label: "emissão pendente", color: "warning" },
+  REJECTED: { label: "rejeitada", color: "error" },
+  CANCELLED: { label: "cancelada", color: "default" },
+  NOT_CONTRACTED: { label: "emissão fiscal não contratada", color: "default" },
+};
+
+// CORREÇÃO DE AUDITORIA (Capítulo 21.8): uma venda de comanda pode gerar DOIS
+// documentos fiscais (NFCE de mercadoria + NFSE de serviço/ISS) — o rótulo
+// precisa indicar de qual documento se trata, nunca assumir "NFC-e" para tudo.
+const FISCAL_DOCUMENT_TYPE_LABEL: Record<string, string> = {
+  NFCE: "NFC-e",
+  NFE_SAIDA: "NF-e",
+  NFE_ENTRADA: "NF-e (entrada)",
+  NFSE: "NFS-e",
 };
 
 export function SalesHistoryPage() {
@@ -53,7 +63,10 @@ export function SalesHistoryPage() {
       setReprintMessage("Nenhuma impressora térmica configurada em Configurações > Hardware.");
       return;
     }
-    const doc = row.fiscalDocuments[0];
+    // O cupom térmico é sempre da NFC-e (mercadoria) — uma comanda fechada com
+    // itens de serviço também pode ter um FiscalDocument NFSE (Capítulo 21.8),
+    // que nunca é impresso no cupom de balcão (ISS não é tributo de mercadoria).
+    const doc = row.fiscalDocuments.find((d) => d.type === "NFCE") ?? row.fiscalDocuments[0];
     try {
       const detail = await salesApi.get(row.id);
       const printer = new ThermalPrinterService(PRINTER_PROFILES[config.printerModel]);
@@ -110,8 +123,6 @@ export function SalesHistoryPage() {
               </TableHead>
               <TableBody>
                 {rows.map((row) => {
-                  const doc = row.fiscalDocuments[0];
-                  const fiscalInfo = doc ? FISCAL_STATUS_LABEL[doc.status] : undefined;
                   return (
                     <TableRow key={row.id}>
                       <TableCell>{new Date(row.createdAt).toLocaleString("pt-BR")}</TableCell>
@@ -119,8 +130,21 @@ export function SalesHistoryPage() {
                       <TableCell align="right">R$ {money(Number(row.totalAmount))}</TableCell>
                       <TableCell>{translatePaymentMethod(row.paymentMethod)}</TableCell>
                       <TableCell>
-                        {fiscalInfo ? (
-                          <Chip size="small" label={fiscalInfo.label} color={fiscalInfo.color} />
+                        {row.fiscalDocuments.length > 0 ? (
+                          <Stack direction="row" spacing={0.5} flexWrap="wrap">
+                            {row.fiscalDocuments.map((fiscalDoc) => {
+                              const statusInfo = FISCAL_STATUS_LABEL[fiscalDoc.status];
+                              const typeLabel = FISCAL_DOCUMENT_TYPE_LABEL[fiscalDoc.type] ?? fiscalDoc.type;
+                              return (
+                                <Chip
+                                  key={fiscalDoc.id}
+                                  size="small"
+                                  label={`${typeLabel} ${statusInfo?.label ?? fiscalDoc.status}`}
+                                  color={statusInfo?.color ?? "default"}
+                                />
+                              );
+                            })}
+                          </Stack>
                         ) : (
                           <Chip size="small" label="Sem documento" variant="outlined" />
                         )}

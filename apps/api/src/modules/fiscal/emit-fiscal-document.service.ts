@@ -140,7 +140,7 @@ export async function emitFiscalDocument(
       sale: {
         include: {
           client: true,
-          items: { include: { product: true } },
+          items: { include: { product: true, service: true } },
         },
       },
     },
@@ -154,13 +154,13 @@ export async function emitFiscalDocument(
     };
   }
 
-  if (fiscalDocument.type !== "NFCE") {
+  if (fiscalDocument.type !== "NFCE" && fiscalDocument.type !== "NFSE") {
     // NF-e modelo 55 (entrada/saída de mercadoria entre empresas, Capítulo 21.8/21.17)
     // segue um contrato de payload diferente (destinatário PJ obrigatório, duplicatas,
     // transporte) ainda não portado para este worker — documentado honestamente como
     // gap de escopo, nunca silenciosamente tratado como NFC-e.
     throw new Error(
-      `Emissão automática via Focus NFe implementada apenas para NFC-e nesta fase — FiscalDocument ${fiscalDocument.id} é do tipo ${fiscalDocument.type}.`,
+      `Emissão automática via Focus NFe implementada apenas para NFC-e/NFS-e nesta fase — FiscalDocument ${fiscalDocument.id} é do tipo ${fiscalDocument.type}.`,
     );
   }
 
@@ -172,12 +172,12 @@ export async function emitFiscalDocument(
 
   const tenant = await prisma.tenant.findUniqueOrThrow({
     where: { id: params.tenantId },
-    select: { cnpj: true, uf: true, taxRegime: true },
+    select: { cnpj: true, uf: true, taxRegime: true, inscricaoMunicipal: true },
   });
 
   if (!tenant.cnpj) {
     throw new Error(
-      "Tenant sem CNPJ cadastrado — impossível emitir NFC-e (tenants PERSONAL, Capítulo 22, nunca emitem documento fiscal; isto indica uma venda fechada incorretamente para um tenant sem perfil fiscal).",
+      "Tenant sem CNPJ cadastrado — impossível emitir NFC-e/NFS-e (tenants PERSONAL, Capítulo 22, nunca emitem documento fiscal; isto indica uma venda fechada incorretamente para um tenant sem perfil fiscal).",
     );
   }
 
@@ -190,12 +190,16 @@ export async function emitFiscalDocument(
   const decrypted = decryptFocusNfeCredential(credential);
   const basicAuth = Buffer.from(`${decrypted.token}:`).toString("base64");
 
+  if (fiscalDocument.type === "NFSE") {
+    return emitNfseDocument(prisma, { tenantId: params.tenantId, fiscalDocument, tenant, basicAuth });
+  }
+
   const sale = fiscalDocument.sale;
   const isSimplesNacional = tenant.taxRegime === "SIMPLES_NACIONAL";
 
   // Apenas itens de produto compõem a NFC-e (mercadoria) — itens de serviço (mão de
-  // obra de O.S., Capítulo 21.8) são tributados por ISS/NFS-e municipal, fora do
-  // escopo deste worker (gap documentado acima no bloco `type !== "NFCE"`).
+  // obra de comanda/O.S., Capítulo 21.8) são tributados por ISS/NFS-e municipal,
+  // emitidos em um FiscalDocument NFSE próprio (ver `emitNfseDocument` abaixo).
   const productItems = sale.items.filter((item) => item.productId && item.product);
   if (productItems.length === 0) {
     throw new Error(
@@ -379,6 +383,174 @@ export async function emitFiscalDocument(
     severity: "CRITICAL",
     title: "NFC-e rejeitada pela SEFAZ",
     body: `A nota fiscal da venda ${sale.id} foi rejeitada: ${rejectionReason}`,
+    linkRoute: "/vendas/historico",
+    sourceType: "FISCAL_DOCUMENT",
+    sourceId: fiscalDocument.id,
+  });
+
+  return { authorized: false, accessKey: null, rejectionReason };
+}
+
+// Mapeamento best-effort nicho → item da Lista de Serviços anexa à LC 116/2003
+// (base nacional usada pela maioria dos municípios atendidos pela Focus NFe).
+// Documentado como aproximação honesta: municípios com lista própria divergente
+// exigem ajuste manual pelo lojista direto no painel Focus NFe — nunca travamos
+// a emissão por isso, pois a prefeitura aceita reclassificação posterior sem
+// invalidar a nota já autorizada.
+const NICHE_TAG_TO_ITEM_LISTA_SERVICO: Record<string, string> = {
+  BEAUTY_SALON: "06.01", // barbeiros, cabeleireiros, manicuros, pedicuros, estética e congêneres
+  CAR_DETAILING: "14.01", // lubrificação, limpeza, lustração, lavagem e conservação de veículos
+  AUTOMOTIVE_WORKSHOP: "14.01", // conserto, revisão e manutenção de veículos
+  PETSHOP: "06.01", // banho/tosa — tratado como congênere de estética (subitem adotado pela maioria dos municípios)
+};
+const DEFAULT_ITEM_LISTA_SERVICO = "14.01";
+
+/**
+ * Emite a NFS-e real junto à Focus NFe para itens de serviço (ISS municipal,
+ * Capítulo 21.8), consumida pelo mesmo worker/fila `fiscal-emission` que já
+ * emite NFC-e. Contrato confirmado via documentação oficial Focus NFe
+ * (doc.focusnfe.com.br/reference/emitir_nfse): POST /v2/nfse?ref={referencia},
+ * mesma autenticação/idempotência (`already_processed`) da NFC-e, porém síncrono
+ * apenas em parte — municípios cujo webservice é mais lento podem responder
+ * "processando_autorizacao" e a nota é consultada depois via GET; tratamos esse
+ * status aqui mantendo o documento em PENDING (nunca como erro) para o próximo
+ * ciclo do worker reconsultar.
+ */
+async function emitNfseDocument(
+  prisma: TenantScopedPrismaClient,
+  params: {
+    tenantId: string;
+    fiscalDocument: Prisma.FiscalDocumentGetPayload<{ include: { sale: { include: { client: true; items: { include: { product: true; service: true } } } } } }>;
+    tenant: { cnpj: string | null; uf: string | null; taxRegime: string; inscricaoMunicipal: string | null };
+    basicAuth: string;
+  },
+): Promise<FiscalDocumentEmissionResult> {
+  const { fiscalDocument, tenant, basicAuth } = params;
+  const sale = fiscalDocument.sale!;
+
+  if (!tenant.inscricaoMunicipal) {
+    throw new FiscalDataValidationError(
+      "Tenant sem Inscrição Municipal cadastrada — impossível emitir NFS-e (ISS). Preencha a Inscrição Municipal em Configurações > Empresa antes de fechar comandas com itens de serviço.",
+    );
+  }
+
+  const serviceItems = sale.items.filter((item) => item.serviceId && item.service);
+  if (serviceItems.length === 0) {
+    throw new Error(
+      `Venda ${sale.id} não possui nenhum item de serviço — NFS-e não se aplica; o fechamento desta venda não deveria ter criado um FiscalDocument do tipo NFSE.`,
+    );
+  }
+
+  const valorServicos = serviceItems.reduce((acc, item) => acc.plus(item.totalPrice), new Prisma.Decimal(0));
+  const descricaoServico = serviceItems.map((item) => `${Number(item.quantity)}x ${item.service!.name}`).join("; ");
+  const itemListaServico = NICHE_TAG_TO_ITEM_LISTA_SERVICO[serviceItems[0].service!.nicheTag] ?? DEFAULT_ITEM_LISTA_SERVICO;
+  // Alíquota efetiva = ISS total já calculado (comanda.routes.ts/calculateIss) ÷
+  // valor bruto dos serviços — nunca recalculada aqui a partir de uma TaxRule
+  // nova, para que o valor transmitido à prefeitura seja idêntico ao que já foi
+  // persistido/auditado no fechamento da venda (fonte única da verdade).
+  const aliquotaIss = fiscalDocument.issAmount && valorServicos.greaterThan(0) ? Number(fiscalDocument.issAmount.div(valorServicos).mul(100)) : 0;
+
+  const payload: Record<string, unknown> = {
+    data_emissao: new Date().toISOString(),
+    prestador: { cnpj: onlyDigits(tenant.cnpj!), inscricao_municipal: tenant.inscricaoMunicipal },
+    servico: {
+      item_lista_servico: itemListaServico,
+      discriminacao: descricaoServico,
+      valor_servicos: Number(valorServicos),
+      aliquota: aliquotaIss,
+      iss_retido: fiscalDocument.issRetidoNaFonte,
+    },
+  };
+
+  if (sale.client?.document) {
+    const digits = onlyDigits(sale.client.document);
+    const tomador: Record<string, unknown> = {};
+    if (digits.length === 11) tomador.cpf = digits;
+    else if (digits.length === 14) tomador.cnpj = digits;
+    if (sale.client.name) tomador.razao_social = sale.client.name;
+    payload.tomador = tomador;
+  }
+
+  const referencia = fiscalDocument.focusNfeReference ?? fiscalDocument.id;
+  if (!fiscalDocument.focusNfeReference) {
+    await prisma.fiscalDocument.update({ where: { id: fiscalDocument.id }, data: { focusNfeReference: referencia } });
+  }
+
+  const response = await withCircuitBreaker(FOCUS_NFE_BREAKER, () =>
+    fetch(`https://api.focusnfe.com.br/v2/nfse?ref=${encodeURIComponent(referencia)}`, {
+      method: "POST",
+      headers: { Authorization: `Basic ${basicAuth}`, Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+
+  let body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+
+  if (body.codigo === "already_processed") {
+    const queryResponse = await withCircuitBreaker(FOCUS_NFE_BREAKER, () =>
+      fetch(`https://api.focusnfe.com.br/v2/nfse/${encodeURIComponent(referencia)}`, {
+        method: "GET",
+        headers: { Authorization: `Basic ${basicAuth}`, Accept: "application/json" },
+      }),
+    );
+    body = (await queryResponse.json().catch(() => ({}))) as Record<string, unknown>;
+  }
+
+  const status = typeof body.status === "string" ? body.status : null;
+
+  // Alguns municípios processam a NFS-e de forma assíncrona (webservice mais
+  // lento que o padrão síncrono da NFC-e) — a Focus NFe retorna
+  // "processando_autorizacao" enquanto aguarda a prefeitura. Mantemos o
+  // documento em PENDING (nunca rejeitado/autorizado) para o BullMQ tentar
+  // novamente via backoff, nunca travando o job como falha definitiva.
+  if (status === "processando_autorizacao") {
+    throw new Error(
+      `NFS-e ${fiscalDocument.id} ainda em processamento pela prefeitura (status "processando_autorizacao") — nova tentativa será feita automaticamente pelo BullMQ.`,
+    );
+  }
+
+  if (status === "autorizado") {
+    const accessKey = typeof body.chave === "string" ? body.chave : null;
+    await prisma.fiscalDocument.update({
+      where: { id: fiscalDocument.id },
+      data: {
+        status: "AUTHORIZED",
+        accessKey,
+        authorizedAt: new Date(),
+        focusNfeNumero: typeof body.numero === "string" ? body.numero : null,
+        focusNfeSerie: typeof body.serie === "string" ? body.serie : null,
+        focusNfeCodigoVerificacao: typeof body.codigo_verificacao === "string" ? body.codigo_verificacao : null,
+      },
+    });
+    await dispatchWebhookEvent(params.tenantId, "fiscal_document.authorized", {
+      fiscalDocumentId: fiscalDocument.id,
+      saleId: fiscalDocument.saleId,
+      accessKey,
+      focusNfeNumero: typeof body.numero === "string" ? body.numero : null,
+    }).catch((error) => {
+      createModuleLogger("emit-fiscal-document").error({ fiscalDocumentId: fiscalDocument.id, err: error }, "falha ao enfileirar webhook fiscal_document.authorized (NFS-e)");
+    });
+    return { authorized: true, accessKey, rejectionReason: null };
+  }
+
+  const rejectionReason =
+    typeof body.mensagem === "string"
+      ? body.mensagem
+      : Array.isArray(body.erros)
+        ? JSON.stringify(body.erros)
+        : `Falha HTTP ${response.status} sem corpo de erro interpretável.`;
+
+  await prisma.fiscalDocument.update({
+    where: { id: fiscalDocument.id },
+    data: { status: "REJECTED", rejectionReason },
+  });
+
+  await notifyTenant({
+    tenantId: params.tenantId,
+    category: "FISCAL_DOCUMENT_REJECTED",
+    severity: "CRITICAL",
+    title: "NFS-e rejeitada pela prefeitura",
+    body: `A nota fiscal de serviço da venda ${sale.id} foi rejeitada: ${rejectionReason}`,
     linkRoute: "/vendas/historico",
     sourceType: "FISCAL_DOCUMENT",
     sourceId: fiscalDocument.id,
