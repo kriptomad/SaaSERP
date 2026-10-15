@@ -2,12 +2,18 @@
 // Gerencia o child_process do backend (apps/api) quando o shell está em modo HOST.
 // IMPORTANTE: isto reaproveita apps/api tal como está — não existe reimplementação
 // do servidor Express aqui. Em dev, roda `tsx watch src/server.ts` dentro do próprio
-// workspace do monorepo. Em produção (app empacotado), espera encontrar um build de
-// apps/api copiado para `resources/api` pelo processo de empacotamento (ver
-// `extraResources` em package.json) — documentado como pendência em README.md,
-// pois empacotar o Node + node_modules nativos (argon2, etc.) de um segundo processo
-// dentro de um instalador Electron exige um passo de "sidecar" dedicado que não foi
-// validado neste ambiente sandbox.
+// workspace do monorepo. Em produção (app empacotado), o backend real (dist/server.cjs
+// + node_modules de produção + cliente Prisma gerado) é montado em `resources/api` pelo
+// script `scripts/prepare-api-resources.mjs` ANTES do `electron-builder` rodar (ver
+// `package:win` em package.json e `extraResources` abaixo) — gap da Rodada 4 fechado.
+//
+// NODE-API em vez de Electron GUI: em app empacotado, `process.execPath` aponta para o
+// binário do próprio Electron, não para um Node.js "puro". Para rodá-lo como um
+// interpretador Node comum (em vez de abrir uma segunda janela do Chromium), é
+// obrigatório setar `ELECTRON_RUN_AS_NODE=1` no ambiente do child_process — sem essa
+// variável o spawn abaixo falharia silenciosamente em produção. Módulos nativos N-API
+// (ex. `argon2`, via prebuild-install) continuam funcionando normalmente sob esse modo,
+// pois N-API é estável entre o Node embutido no Electron e builds "puras" do Node.
 import { ChildProcess, spawn } from "node:child_process";
 import path from "node:path";
 import { app } from "electron";
@@ -34,8 +40,6 @@ export function getBackendState(): BackendState {
 
 function resolveApiEntry(): { command: string; args: string[]; cwd: string } {
   if (app.isPackaged) {
-    // Pendência documentada: build de produção depende de `resources/api/dist/server.cjs`
-    // existir (copiado via extraResources no empacotamento do apps/api). Ver README.md.
     const apiRoot = path.join(process.resourcesPath, "api");
     return { command: process.execPath, args: [path.join(apiRoot, "dist", "server.cjs")], cwd: apiRoot };
   }
@@ -59,6 +63,11 @@ export function startBackend(network: NetworkConfig): BackendState {
       cwd,
       env: {
         ...process.env,
+        // Obrigatório em produção (ver comentário de topo do arquivo): faz o binário do
+        // Electron se comportar como um interpretador Node puro para este child_process,
+        // em vez de tentar abrir uma segunda janela do Chromium. Inofensivo em dev
+        // (`command` já é o binário `tsx`, não o Electron, então a env é ignorada por ele).
+        ELECTRON_RUN_AS_NODE: "1",
         PORT: String(network.port),
         HOST: network.bindAddress,
         DATABASE_URL: network.databaseUrl,

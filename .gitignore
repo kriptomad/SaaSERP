@@ -9,6 +9,7 @@ build/
 **/build/
 apps/desktop/dist-electron/
 apps/desktop/release/
+apps/desktop/resources-build/
 
 # --- Ambiente / segredos ---
 .env

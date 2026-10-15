@@ -32,9 +32,9 @@ Isso exigiu uma pequena extensão em `apps/web/src/api/client.ts`
 ## Dois modos de instalação
 
 - **HOST**: o shell sobe `apps/api` localmente via `child_process` (dev: `tsx watch
-  src/server.ts`, igual ao `npm run api:dev` da raiz; produção: pendência, ver
-  "Limitações" abaixo), com IP de bind/porta configuráveis, e serve os demais PCs da
-  loja na rede local. Abre um dashboard com ping periódico em `/health` e nas rotas
+  src/server.ts`, igual ao `npm run api:dev` da raiz; produção: binário buildado +
+  `node_modules` de produção empacotados como sidecar, ver "Empacotamento" abaixo), com
+  IP de bind/porta configuráveis, e serve os demais PCs da loja na rede local. Abre um dashboard com ping periódico em `/health` e nas rotas
   críticas (`/auth`, `/sales`, `/cash-registers/current`), status do child_process e
   configuração de pasta/agendamento de backup.
 - **CLIENT (usuário)**: não sobe nada localmente — só pergunta IP:porta do PC HOST,
@@ -124,18 +124,40 @@ assim que a rede volta.
 
 ## Empacotamento (.exe)
 
-`npm run package:win` usa `electron-builder` (NSIS) — integra bem com Vite porque o
-renderer já é um build Vite padrão (`dist/`) e o electron-builder só precisa apontar
-para essa pasta mais o `dist-electron/` compilado via `tsc`. **Não foi gerado o `.exe`
-final neste ambiente** (ver limitações abaixo) — o `package.json` já declara
-`extraResources` copiando `apps/web/dist` para `resources/web` no pacote final, mas o
-empacotamento de `apps/api` (incluindo seus `node_modules` nativos, ex. `argon2`) como um
-processo "sidecar" dentro do instalador **ainda é uma pendência real**: hoje
-`backend-manager.ts` sabe rodar `apps/api` em dev (via `tsx watch` dentro do próprio
-monorepo) e já tem o caminho de produção esperado (`resources/api/dist/server.cjs`), mas
-falta o passo de build que efetivamente copia `apps/api` + seus `node_modules` para lá
-no empacotamento — não implementado nesta versão por exigir validação em ambiente real
-(módulos nativos compilados para Windows), documentado aqui para a próxima iteração.
+`npm run package:win` roda, em sequência: `npm run build` (renderer Vite + main process
+`tsc`) → `npm run prepare:api-resources` → `electron-builder --win --publish=never`.
+
+O passo `prepare:api-resources` (`scripts/prepare-api-resources.mjs`) é o que fecha o
+gap que antes era pendência (Rodada 4 do mega-audit): ele builda `apps/api` de verdade
+(`npm run build`, o MESMO script usado no deploy em nuvem), copia o `dist/` gerado para
+`apps/desktop/resources-build/api/dist`, gera ali um `package.json` mínimo só com as
+`dependencies` reais de produção de `apps/api` (as mesmas marcadas como `external` pelo
+esbuild) + `@prisma/client`, roda `npm install --omit=dev` nesse diretório (baixando os
+binários nativos pré-compilados, ex. `argon2` via `prebuild-install`, para a
+plataforma/arquitetura da máquina que está empacotando) e copia o cliente Prisma já
+gerado (`packages/db/node_modules/.prisma/client`) para dentro desse `node_modules`. O
+`package.json` do desktop então empacota esse diretório inteiro via `extraResources`
+(`resources-build/api` → `resources/api`), exatamente onde `backend-manager.ts` já
+esperava encontrá-lo (`resources/api/dist/server.cjs`).
+
+Também foi corrigido um bug real em `backend-manager.ts`: em produção, `process.execPath`
+aponta para o binário do PRÓPRIO Electron (não um Node.js "puro"), então o spawn do
+backend agora passa `ELECTRON_RUN_AS_NODE=1` no ambiente do child_process — sem essa
+variável o Electron tentaria abrir uma segunda janela do Chromium em vez de rodar
+`server.cjs` como script Node. Módulos nativos N-API (`argon2`) continuam funcionando
+nesse modo normalmente, pois N-API é estável entre o Node embutido no Electron e um Node
+"puro" de mesma plataforma/arquitetura.
+
+**Limitação honesta que permanece** (não validável neste ambiente sandbox, requer
+hardware real): o passo `prepare:api-resources` em si FOI validado de ponta a ponta
+nesta sessão (build real + `npm install --omit=dev` de 425 pacotes de produção,
+incluindo `argon2` — confirmado `require("argon2").hash(...)` funcionando via prebuild
+nativo embutido no próprio pacote, e `require("@prisma/client")` resolvendo contra o
+cliente copiado). O que NÃO foi rodado aqui é a geração efetiva do instalador NSIS via
+`electron-builder --win` (mesma classe de limitação de rede/proxy já documentada abaixo
+para o download do binário do Electron). Empacotar para uma arquitetura diferente da
+máquina que roda o script (ex. gerar instalador ARM64 numa máquina x64) também não é
+resolvido por este script — exige rodá-lo numa máquina/CI daquela arquitetura.
 
 ## Limitações conhecidas deste ambiente sandbox
 

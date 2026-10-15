@@ -13,7 +13,8 @@
     "build:electron": "tsc -p tsconfig.electron.json",
     "build": "npm run build:renderer && npm run build:electron",
     "typecheck": "tsc --noEmit",
-    "package:win": "npm run build && electron-builder --win --publish=never",
+    "prepare:api-resources": "node scripts/prepare-api-resources.mjs",
+    "package:win": "npm run build && npm run prepare:api-resources && electron-builder --win --publish=never",
     "start": "electron ."
   },
   "dependencies": {
@@ -55,6 +56,11 @@
       {
         "from": "../web/dist",
         "to": "web",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "resources-build/api",
+        "to": "api",
         "filter": ["**/*"]
       }
     ],
