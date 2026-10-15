@@ -23,7 +23,7 @@ const cache = new Map<string, { value: string | null; expiresAt: number }>();
 export interface PlatformSecretDefinition {
   key: string;
   label: string;
-  group: "Stripe" | "Asaas" | "Licenciamento" | "Rede" | "Armazenamento (R2)" | "Open Finance (Pluggy)" | "Backup";
+  group: "Stripe" | "Asaas" | "Licenciamento" | "Rede" | "Armazenamento (R2)" | "Open Finance (Pluggy)" | "Backup" | "Email (Plataforma)";
   description: string;
   /** Nome da variável de ambiente usada como fallback/compatibilidade — quase sempre igual a `key`. */
   envFallback: string;
@@ -156,6 +156,22 @@ export const PLATFORM_SECRET_REGISTRY: PlatformSecretDefinition[] = [
     description: "Chave de 32 bytes em hexadecimal (64 caracteres hex) usada para cifrar o dump completo do banco antes de subir ao R2 (Capítulo 10.3). Gere com `node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"`. Trocar esta chave torna backups antigos ilegíveis — nunca remover sem antes restaurar/arquivar os backups existentes.",
     envFallback: "BACKUP_ENCRYPTION_KEY",
     placeholder: "64 caracteres hexadecimais",
+  },
+  {
+    key: "PLATFORM_RESEND_API_KEY",
+    label: "E-mail — Resend API Key (plataforma)",
+    group: "Email (Plataforma)",
+    description: "Chave da API Resend (re_...) usada EXCLUSIVAMENTE para e-mails transacionais da plataforma (ex.: reset de senha de admin da plataforma) — não confundir com a credencial EMAIL_RESEND por tenant em IntegrationCredential. Sem esta chave, links de reset de senha de admin caem no fallback de log estruturado.",
+    envFallback: "PLATFORM_RESEND_API_KEY",
+    placeholder: "re_...",
+  },
+  {
+    key: "PLATFORM_RESEND_FROM_ADDRESS",
+    label: "E-mail — Endereço remetente (plataforma)",
+    group: "Email (Plataforma)",
+    description: "Endereço \"De\" usado nos e-mails transacionais da plataforma (precisa ser um domínio verificado na Resend).",
+    envFallback: "PLATFORM_RESEND_FROM_ADDRESS",
+    placeholder: "contato@filitecherp.com.br",
   },
 ];
 

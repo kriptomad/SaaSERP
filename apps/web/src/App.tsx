@@ -65,6 +65,7 @@ import { PlatformAdminAuthProvider, usePlatformAdminAuth } from "./modules/platf
 import { PlatformAdminLoginPage } from "./modules/platform-admin/PlatformAdminLoginPage";
 import { PlatformAdminShell } from "./modules/platform-admin/PlatformAdminShell";
 import { InfrastructureSettingsPage } from "./modules/platform-admin/InfrastructureSettingsPage";
+import { SecurityPage } from "./modules/platform-admin/SecurityPage";
 import { MarketingAdminPage } from "./modules/platform-admin/MarketingAdminPage";
 import { TenantListPage } from "./modules/platform-admin/TenantListPage";
 import { TenantDetailPage } from "./modules/platform-admin/TenantDetailPage";
@@ -121,6 +122,7 @@ export function App() {
               }
             >
               <Route path="/platform-admin/infraestrutura" element={<InfrastructureSettingsPage />} />
+              <Route path="/platform-admin/seguranca" element={<SecurityPage />} />
               <Route path="/platform-admin/marketing" element={<MarketingAdminPage />} />
               <Route path="/platform-admin/tenants" element={<TenantListPage />} />
               <Route path="/platform-admin/tenants/:id" element={<TenantDetailPage />} />

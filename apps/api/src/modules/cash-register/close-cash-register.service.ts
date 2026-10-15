@@ -9,6 +9,15 @@
 import { Prisma, TenantScopedTransactionClient } from "@filitech/db";
 
 export async function closeCashRegister(tx: TenantScopedTransactionClient, cashRegisterId: string, countedAmount: Prisma.Decimal) {
+  // GAP DE AUDITORIA FECHADO: antes, nenhum lock pessimista protegia o `CashRegister`
+  // durante o fechamento — um `registerCashMovement` (sangria/suprimento) concorrente
+  // na mesma gaveta podia commitar entre a leitura de `movements`/`sales` aqui e o
+  // `update` final, fazendo o fechamento ignorar silenciosamente aquele movimento
+  // (ou, pior, duas chamadas de fechamento simultâneas calcularem `expectedAmount`
+  // com bases diferentes). `SELECT ... FOR UPDATE` bloqueia a linha do caixa até o
+  // commit desta transação — mesmo padrão já usado em deduct-stock-fefo.service.ts.
+  await tx.$queryRaw`SELECT id FROM cash_registers WHERE id = ${cashRegisterId} FOR UPDATE`;
+
   const register = await tx.cashRegister.findUniqueOrThrow({
     where: { id: cashRegisterId },
     include: { sales: { include: { payments: true } }, movements: true },
@@ -47,6 +56,22 @@ export async function registerCashMovement(
   if (!input.reason?.trim()) {
     throw new Error("Sangria/suprimento exige motivo obrigatório.");
   }
+
+  // GAP DE AUDITORIA FECHADO: mesmo lock pessimista de `closeCashRegister` acima —
+  // sem ele, uma sangria/suprimento podia ser inserida exatamente entre a leitura de
+  // `movements` e o `update` final de um fechamento concorrente da MESMA gaveta,
+  // silenciosamente ficando de fora do cálculo de `expectedAmount` daquele
+  // fechamento (o commit do fechamento já teria passado). O `FOR UPDATE` aqui força
+  // esta transação a esperar o commit/rollback de um fechamento em andamento (e
+  // vice-versa) antes de prosseguir — serializando as duas operações na mesma
+  // gaveta, nunca intercalando-as.
+  const [register] = await tx.$queryRaw<{ status: string }[]>`
+    SELECT status FROM cash_registers WHERE id = ${input.cashRegisterId} FOR UPDATE
+  `;
+  if (!register || register.status !== "OPEN") {
+    throw new Error("Caixa não está aberto — sangria/suprimento exige um caixa com status OPEN.");
+  }
+
   // GAP DE AUDITORIA FECHADO (Capítulo 6.7, Rodada 15): o `AuditLog` global
   // (Capítulo 13) é exclusivo de ações do PAINEL DE PLATAFORMA — sua FK
   // `platformAdminUserId` é obrigatória e não aceita usuários de tenant, então

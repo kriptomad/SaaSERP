@@ -14,10 +14,11 @@ import { prismaUnscoped as prisma } from "@filitech/db";
 import { verifyPassword, hashPassword } from "../auth/password.service";
 import { encryptEnvelope, decryptEnvelope } from "../../lib/envelope-crypto";
 import { enforceRateLimit, resetRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
-import { ipMatchesAnyCidr } from "../../lib/cidr-match";
+import { ipMatchesAnyCidr, isValidCidrRange } from "../../lib/cidr-match";
 import { hashSessionId } from "./platform-admin-auth.middleware";
 import { createModuleLogger } from "../../lib/logger";
 import { validatePasswordPolicy } from "../../lib/password-policy";
+import { sendPlatformEmail } from "../../lib/platform-email";
 import {
   signPlatformAdminSessionToken,
   signTwoFactorEnrollToken,
@@ -351,6 +352,86 @@ platformAdminAuthRouter.post("/platform-admin/auth/sessions/:id/revoke", async (
 });
 
 // ─────────────────────────────────────────────────────────────────────────
+// ALLOWLIST DE IP — CRUD (Capítulo 14.5)
+// GAP DE AUDITORIA FECHADO: antes, `AdminIpAllowlistEntry` só existia no schema e
+// era checada no login (2FA verify); não havia nenhuma rota para o próprio admin
+// cadastrar/remover um IP/CIDR autorizado. Cada admin só gerencia a SUA PRÓPRIA
+// allowlist (nunca a de outro admin, nem mesmo SUPER_ADMIN) — mesma lógica de
+// "ação sobre a própria conta" já usada em sessões ativas acima.
+// ─────────────────────────────────────────────────────────────────────────
+
+platformAdminAuthRouter.get("/platform-admin/auth/ip-allowlist", async (req: Request, res: Response) => {
+  const session = requireSession(req, res);
+  if (!session) return;
+
+  const entries = await prisma.adminIpAllowlistEntry.findMany({
+    where: { platformAdminUserId: session.platformAdminUserId },
+    orderBy: { createdAt: "desc" },
+  });
+
+  return res.json({ success: true, data: entries, error: null });
+});
+
+const createIpAllowlistEntrySchema = z.object({
+  cidrRange: z.string().min(1),
+  label: z.string().min(1).max(120),
+});
+
+platformAdminAuthRouter.post("/platform-admin/auth/ip-allowlist", async (req: Request, res: Response) => {
+  const session = requireSession(req, res);
+  if (!session) return;
+
+  const parsed = createIpAllowlistEntrySchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+  }
+  if (!isValidCidrRange(parsed.data.cidrRange)) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: { code: "INVALID_CIDR", message: "Formato inválido — use um IPv4 (ex.: 203.0.113.5) ou faixa CIDR (ex.: 203.0.113.0/24)." },
+    });
+  }
+
+  // Salvaguarda crítica: nunca permite cadastrar a PRIMEIRA entrada de uma faixa que
+  // não cubra o IP de quem está fazendo a requisição agora — sem isso, o próprio
+  // admin se trancaria para fora do painel na próxima requisição (a allowlist liga o
+  // enforcement assim que tem 1+ entrada).
+  const existingCount = await prisma.adminIpAllowlistEntry.count({ where: { platformAdminUserId: session.platformAdminUserId } });
+  if (existingCount === 0 && !ipMatchesAnyCidr(clientIp(req), [parsed.data.cidrRange])) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: {
+        code: "WOULD_LOCK_OUT_SELF",
+        message: `Este cadastro bloquearia seu próprio acesso: seu IP atual (${clientIp(req)}) não está dentro de "${parsed.data.cidrRange}".`,
+      },
+    });
+  }
+
+  const entry = await prisma.adminIpAllowlistEntry.create({
+    data: { platformAdminUserId: session.platformAdminUserId, cidrRange: parsed.data.cidrRange, label: parsed.data.label },
+  });
+  await logAuthEvent(session.platformAdminUserId, "AUTH_IP_ALLOWLIST_CREATED", { entryId: entry.id, cidrRange: entry.cidrRange, label: entry.label });
+
+  return res.status(201).json({ success: true, data: entry, error: null });
+});
+
+platformAdminAuthRouter.delete("/platform-admin/auth/ip-allowlist/:id", async (req: Request, res: Response) => {
+  const session = requireSession(req, res);
+  if (!session) return;
+
+  const target = await prisma.adminIpAllowlistEntry.findFirst({ where: { id: req.params.id, platformAdminUserId: session.platformAdminUserId } });
+  if (!target) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Entrada não encontrada." } });
+  }
+  await prisma.adminIpAllowlistEntry.delete({ where: { id: target.id } });
+  await logAuthEvent(session.platformAdminUserId, "AUTH_IP_ALLOWLIST_DELETED", { entryId: target.id, cidrRange: target.cidrRange, label: target.label });
+
+  return res.json({ success: true, data: { deleted: true }, error: null });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // RESET DE SENHA (Capítulo 14.3)
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -377,17 +458,25 @@ platformAdminAuthRouter.post("/platform-admin/auth/password-reset/request", asyn
       },
     });
     await logAuthEvent(admin.id, "AUTH_PASSWORD_RESET_REQUESTED", { ip: clientIp(req) });
-    // PENDENTE (flagado explicitamente, não escondido): envio do link por e-mail
-    // transacional depende de uma credencial de Resend em nível de PLATAFORMA (não
-    // existe ainda um grupo "Email" em PLATFORM_SECRET_REGISTRY, platform-secrets.ts
-    // — apenas credenciais por tenant via IntegrationCredential existem hoje para
-    // EMAIL_RESEND). Até essa integração ser conectada, o link é registrado no log
-    // estruturado do servidor (acesso restrito à infraestrutura, nunca exposto na
-    // resposta HTTP) para permitir reset manual assistido por um operador.
-    logger.warn({
-      adminId: admin.id,
-      resetLink: `https://admin.filitecherp.com.br/reset-senha?token=${rawToken}`,
-    }, "Link de reset de senha gerado (envio por e-mail pendente de credencial de plataforma)");
+
+    // GAP DE AUDITORIA FECHADO: antes, o link era sempre logado em claro via
+    // `logger.warn`. Agora envia e-mail real via credencial de plataforma
+    // (PLATFORM_RESEND_API_KEY/PLATFORM_RESEND_FROM_ADDRESS, platform-secrets.ts) e
+    // só cai no log estruturado — nunca na resposta HTTP — se a credencial não
+    // estiver configurada, permitindo reset manual assistido por um operador até lá.
+    const resetLink = `https://admin.filitecherp.com.br/reset-senha?token=${rawToken}`;
+    const emailResult = await sendPlatformEmail(
+      admin.email,
+      "Redefinição de senha — Filitech ERP (Administração da Plataforma)",
+      `<p>Olá, ${admin.name}.</p><p>Foi solicitada a redefinição da sua senha de administrador da plataforma. Clique no link abaixo para continuar (válido por ${PASSWORD_RESET_TOKEN_TTL_MINUTES} minutos):</p><p><a href="${resetLink}">${resetLink}</a></p><p>Se você não solicitou esta redefinição, ignore este e-mail.</p>`,
+    );
+    if (!emailResult.success) {
+      logger.warn({
+        adminId: admin.id,
+        resetLink,
+        reason: emailResult.message,
+      }, "Link de reset de senha gerado (fallback de log: credencial de e-mail de plataforma não configurada ou falhou)");
+    }
   }
 
   return res.json({ success: true, data: { message: "Se o e-mail existir em nossa base, um link de redefinição foi gerado." }, error: null });

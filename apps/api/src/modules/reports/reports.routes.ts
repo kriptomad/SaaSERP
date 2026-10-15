@@ -23,7 +23,7 @@ import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
-import { executeReportDefinition, InvalidReportFieldError } from "./execute-report-definition";
+import { executeReportDefinition, InvalidReportFieldError, ReportFilterCondition } from "./execute-report-definition";
 import { DATASET_REGISTRY } from "./dataset-registry";
 import { buildAbcCurveReport, buildVariantAbcCurveReport } from "./abc-curve-report.service";
 import { buildCollectionTurnoverReport } from "./collection-turnover-report.service";
@@ -131,7 +131,15 @@ const createReportDefinitionSchema = z.object({
   datasetKey: z.string().min(1),
   dimensions: z.array(z.string()).default([]),
   metrics: z.array(z.string()).min(1),
-  filters: z.record(z.any()).default({}),
+  filters: z
+    .array(
+      z.object({
+        field: z.string().min(1),
+        operator: z.enum(["eq", "neq", "gt", "gte", "lt", "lte", "in"]),
+        value: z.any(),
+      }),
+    )
+    .default([]),
   chartType: z.enum(["TABLE", "BAR", "LINE", "PIE"]),
   isPinnedToDashboard: z.boolean().default(false),
 });
@@ -202,6 +210,7 @@ reportsRouter.get("/report-definitions/:id/execute", requireAuth, async (req: Re
       datasetKey: definition.datasetKey,
       dimensions: definition.dimensions as string[],
       metrics: definition.metrics as string[],
+      filters: definition.filters as unknown as ReportFilterCondition[],
     });
     return res.json({ success: true, data: rows, error: null });
   } catch (err) {
@@ -233,6 +242,7 @@ reportsRouter.get("/report-definitions/:id/export", requireAuth, async (req: Req
       datasetKey: definition.datasetKey,
       dimensions: definition.dimensions as string[],
       metrics: definition.metrics as string[],
+      filters: definition.filters as unknown as ReportFilterCondition[],
     });
     const safeFileName = definition.name.replace(/[^a-zA-Z0-9-_]+/g, "_").slice(0, 60) || "relatorio";
     if (format === "xlsx") {
@@ -356,3 +366,4 @@ reportsRouter.put("/dashboard-layout", requireAuth, async (req: Request, res: Re
   });
   return res.json({ success: true, data: layout, error: null });
 });
+

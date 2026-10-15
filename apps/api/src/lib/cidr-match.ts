@@ -38,3 +38,13 @@ export function ipMatchesCidr(ip: string, cidrRange: string): boolean {
 export function ipMatchesAnyCidr(ip: string, cidrRanges: string[]): boolean {
   return cidrRanges.some((range) => ipMatchesCidr(ip, range));
 }
+
+/** Valida o formato `a.b.c.d` ou `a.b.c.d/bits` antes de persistir uma entrada da allowlist. */
+export function isValidCidrRange(cidrRange: string): boolean {
+  const [rangeIp, bitsRaw] = cidrRange.split("/");
+  if (bitsRaw !== undefined) {
+    const bits = Number(bitsRaw);
+    if (!Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+  }
+  return ipv4ToInt(rangeIp) !== null;
+}

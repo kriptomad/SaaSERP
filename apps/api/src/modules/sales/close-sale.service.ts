@@ -341,7 +341,23 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
               throw new InsufficientVariantStockError(`Estoque insuficiente para a variante ${variant.axisValue} do produto ${product.name}.`);
             }
           }
-          await tx.product.update({ where: { id: product.id }, data: { stockQuantity: { decrement: item.quantity } } });
+          // GAP DE AUDITORIA FECHADO: antes, produtos sem lote/série/variante (o
+          // caminho mais comum — mercado/convenência, varejo geral) decrementavam
+          // `stockQuantity` com `update()` direto, sem nenhuma guarda `WHERE
+          // stockQuantity >= quantidade` nem lock — duas vendas simultâneas da
+          // última unidade (ou menos) em dois PDVs/terminais do mesmo tenant
+          // podiam ambas "ter sucesso" e deixar o estoque negativo (overselling).
+          // Agora é um claim atômico via `updateMany`, mesmo padrão já usado acima
+          // para variante e componente de kit: a segunda venda concorrente nunca
+          // encontra linhas a atualizar e falha com erro de negócio, nunca com
+          // estoque negativo silencioso.
+          const claimedProduct = await tx.product.updateMany({
+            where: { id: product.id, tenantId: input.tenantId, stockQuantity: { gte: new Prisma.Decimal(item.quantity) } },
+            data: { stockQuantity: { decrement: item.quantity } },
+          });
+          if (claimedProduct.count === 0) {
+            throw new InsufficientStockError(`Estoque insuficiente do produto ${product.name} para concluir a venda.`);
+          }
         }
 
         // BATCH já gravou um StockMovement por lote dentro de deductStockFefoWithinTx,

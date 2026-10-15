@@ -15,13 +15,41 @@
 // transação local de estoque + status da venda, só aberta depois que a fase 1 já
 // terminou com sucesso.
 import { Prisma, TenantScopedPrismaClient } from "@filitech/db";
+import { createModuleLogger } from "../../lib/logger";
 import { verifyManagerPin } from "../auth/manager-pin.service";
 import { cancelFiscalDocument } from "../fiscal/cancel-fiscal-document.service";
+
+const logger = createModuleLogger("refund-sale");
 
 export class RefundReasonRequiredError extends Error {}
 export class RefundRequiresManagerRoleError extends Error {}
 export class RefundCannotSelfAuthorizeError extends Error {}
 export class OnlyPaidSalesCanBeRefundedError extends Error {}
+// GAP DE AUDITORIA FECHADO (Mega-Audit Rodada 2, item 8): a Fase 1 (cancelamento
+// fiscal via SEFAZ) e a Fase 2 (transação local de estoque/caixa/venda) não podem
+// ser uma única transação ACID — cruzam um boundary de rede real, e segurar locks
+// de linha pelo tempo de resposta da SEFAZ é o antipadrão que este arquivo evita
+// deliberadamente (ver comentário no topo). Isso cria, por design, uma janela onde
+// a Fase 1 já comitou (FiscalDocument.status = CANCELLED, de forma durável, dentro
+// da própria transação de cancelFiscalDocument) mas a Fase 2 pode falhar depois
+// (ex.: crash do processo, erro de banco). Sem tratamento, essa falha subia como um
+// erro genérico e o estado "fiscal cancelado, mas Sale ainda PAID/estoque não
+// devolvido" ficava inconsistente e invisível para operação. Esta exceção dedicada
+// sinaliza explicitamente esse caso excepcional para alarme/reconciliação manual —
+// não existe forma de evitar a janela sem um padrão saga/outbox completo (fora do
+// escopo deste fix pontual), mas agora ela nunca mais é silenciosa.
+export class RefundLocalPhaseFailedAfterFiscalCancelError extends Error {
+  constructor(
+    public readonly saleId: string,
+    public readonly fiscalDocumentId: string,
+    public readonly cause: unknown,
+  ) {
+    super(
+      `Estorno da venda ${saleId}: cancelamento fiscal ${fiscalDocumentId} já foi confirmado na SEFAZ, mas a ` +
+        `fase local (estoque/caixa/status da venda) falhou. Estado inconsistente — requer reconciliação manual.`,
+    );
+  }
+}
 
 export async function refundSale(
   prisma: TenantScopedPrismaClient,
@@ -71,7 +99,8 @@ export async function refundSale(
   // Fase 2 — agora sim, uma única transação local de banco para estoque + status da
   // venda, sem nenhuma chamada de rede dentro dela (igual ao padrão FIFO do
   // Capítulo 6.2).
-  return prisma.$transaction(async (tx) => {
+  try {
+    return await prisma.$transaction(async (tx) => {
     // Transição atômica PAID -> REFUNDED primeiro: dois estornos concorrentes da mesma
     // venda nunca devolvem o estoque duas vezes (o segundo vê count 0 e é rejeitado).
     const transition = await tx.sale.updateMany({
@@ -145,5 +174,20 @@ export async function refundSale(
     });
 
     return tx.sale.findUniqueOrThrow({ where: { id: sale.id } });
-  });
+    });
+  } catch (err) {
+    if (authorizedFiscalDoc) {
+      // A SEFAZ já confirmou o cancelamento (Fase 1 comitou de forma durável) antes
+      // desta transação sequer começar — não é um simples "rollback e tente de
+      // novo", é um estado divergente entre o documento fiscal (já CANCELLED) e o
+      // restante do sistema (ainda como se a venda estivesse PAID). Loga como
+      // erro crítico para alarme/reconciliação manual, nunca engolindo a falha.
+      logger.error(
+        { saleId: sale.id, fiscalDocumentId: authorizedFiscalDoc.id, err },
+        "Estorno: fase local falhou após cancelamento fiscal já confirmado na SEFAZ — estado inconsistente, requer reconciliação manual",
+      );
+      throw new RefundLocalPhaseFailedAfterFiscalCancelError(sale.id, authorizedFiscalDoc.id, err);
+    }
+    throw err;
+  }
 }

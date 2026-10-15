@@ -6,7 +6,7 @@ import { platformAdminApi } from "./platform-admin-client";
 export interface PlatformSecretStatus {
   key: string;
   label: string;
-  group: "Stripe" | "Asaas" | "Licenciamento" | "Rede" | "Armazenamento (R2)";
+  group: "Stripe" | "Asaas" | "Licenciamento" | "Rede" | "Armazenamento (R2)" | "Open Finance (Pluggy)" | "Backup" | "Email (Plataforma)";
   description: string;
   envFallback: string;
   placeholder?: string;

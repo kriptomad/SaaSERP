@@ -13,6 +13,14 @@ import { Request, Response, NextFunction } from "express";
 import { createHash } from "node:crypto";
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { verifyPlatformAdminSessionToken } from "./platform-admin-jwt.service";
+import { ipMatchesAnyCidr } from "../../lib/cidr-match";
+import { createModuleLogger } from "../../lib/logger";
+
+const logger = createModuleLogger("platform-admin-auth.middleware");
+
+function clientIp(req: Request): string {
+  return req.ip ?? "0.0.0.0";
+}
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -46,6 +54,36 @@ export async function platformAdminAuthMiddleware(req: Request, _res: Response, 
     if (!activeSession || activeSession.revokedAt) {
       return next();
     }
+
+    // GAP DE AUDITORIA FECHADO — Capítulo 14.5: a allowlist de IP antes só era
+    // checada no momento do login (2FA verify). Um token de sessão roubado/vazado
+    // ainda funcionava de qualquer IP pelas até 4h de validade restantes. Agora é
+    // reforçada a CADA requisição autenticada: zero entradas cadastradas continua
+    // sem restrição (opt-in), mas qualquer entrada ativa exige IP correspondente em
+    // toda chamada, não só no login.
+    const allowlistEntries = await prisma.adminIpAllowlistEntry.findMany({
+      where: { platformAdminUserId: claims.platformAdminUserId },
+      select: { cidrRange: true },
+    });
+    if (allowlistEntries.length > 0 && !ipMatchesAnyCidr(clientIp(req), allowlistEntries.map((e) => e.cidrRange))) {
+      logger.warn(
+        { adminId: claims.platformAdminUserId, ip: clientIp(req) },
+        "Requisição de administrador de plataforma bloqueada por IP fora da allowlist",
+      );
+      prisma.auditLog
+        .create({
+          data: {
+            platformAdminUserId: claims.platformAdminUserId,
+            action: "AUTH_IP_BLOCKED",
+            targetType: "PlatformAdminUser",
+            targetId: claims.platformAdminUserId,
+            metadata: { ip: clientIp(req), path: req.path } as any,
+          },
+        })
+        .catch(() => undefined);
+      return next(); // sem sessão autenticada — rota protegida responde 401 normalmente
+    }
+
     // Atualiza `lastSeenAt` de forma best-effort (não bloqueia a requisição em caso
     // de falha transitória de banco) — alimenta a listagem "Sessões ativas" do
     // Capítulo 14.4 com a última atividade real, não apenas o horário de login.
