@@ -201,6 +201,7 @@ export const NAV_GROUPS: NavGroup[] = [
       // dois itens específicos recebem `tenantTypes` no próprio NavItem.
       { id: "exportar-dados", label: "Exportar dados", path: "/configuracoes/dados", icon: <CloudDownloadIcon /> },
       { id: "importar-dados", label: "Importar dados", path: "/configuracoes/importar-dados", icon: <CloudUploadIcon />, tenantTypes: ["BUSINESS"] },
+      { id: "loja-online", label: "Loja Online", path: "/loja-online", icon: <ShoppingCartIcon />, moduleCode: "ONLINE_STORE", tenantTypes: ["BUSINESS"], roles: ["OWNER", "MANAGER"] },
       { id: "suporte", label: "Suporte / Helpdesk", path: "/suporte", icon: <SupportAgentIcon /> },
     ],
   },

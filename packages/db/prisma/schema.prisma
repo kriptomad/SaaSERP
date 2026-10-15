@@ -180,7 +180,7 @@ model Tenant {
   childTenants                 Tenant[]                     @relation("TenantHierarchy")
   subscriptions                Subscription[]
   tenantModules                TenantModule[]
-  labelPrinterConfigs           LabelPrinterConfig[]
+  labelPrinterConfigs          LabelPrinterConfig[]
   // Licença Mestra (Capítulo 2.10) — controle técnico de acesso/offline do app,
   // DISTINTO da relação `subscriptions` acima (que é cobrança):
   tenantLicense                TenantLicense?
@@ -211,6 +211,7 @@ model Tenant {
   purchaseOrders               PurchaseOrder[] // Capítulo 17.8
   fiscalDocumentEvents         FiscalDocumentEvent[] // Capítulo 21.19
   onlineStoreSettings          OnlineStoreSettings? // Capítulo 8.5
+  onlineOrders                 OnlineOrder[] // Capítulo 8.5
   inventoryCounts              InventoryCount[] // Capítulo 17.9
   dataImportJobs               DataImportJob[] // Capítulo 18.5
   tenantDataExportJobs         TenantDataExportJob[] // Capítulo 18.4
@@ -363,12 +364,12 @@ model LabelPrinterConfig {
 }
 
 model TenantModule {
-  id            String    @id @default(uuid())
-  tenantId      String
-  moduleCode    String
-  active        Boolean   @default(true)
-  activatedAt   DateTime  @default(now())
-  deactivatedAt DateTime?
+  id                       String    @id @default(uuid())
+  tenantId                 String
+  moduleCode               String
+  active                   Boolean   @default(true)
+  activatedAt              DateTime  @default(now())
+  deactivatedAt            DateTime?
   // Capítulo 2.6 — cobrança real do módulo à la carte: item de "subscription
   // item" do Stripe dedicado a ESTE módulo específico, usando `price_data`
   // inline (o valor vem de `Module.monthlyPrice`, que pode variar por ambiente/
@@ -560,52 +561,52 @@ model User {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  tenant                      Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  rolePermissions             RolePermission[]
-  backupCodes                 TwoFactorBackupCode[] // Capítulo 14.1.1
-  passwordResetTokens         PasswordResetToken[] // Capítulo 14.3
-  activeSessions              ActiveSession[] // Capítulo 14.4
-  salesRefundRequested        Sale[]                       @relation("SaleRefundRequestedBy") // Capítulo 6.8
-  salesRefundAuthorized       Sale[]                       @relation("SaleRefundAuthorizedBy") // Capítulo 6.8
-  sales                       Sale[]
-  workOrders                  WorkOrder[]                  @relation("AssignedTechnician")
-  technicianCommissionRule    TechnicianCommissionRule?    @relation("TechnicianCommissionRuleTechnician")
-  cashRegisters               CashRegister[]
-  osPhotos                    OsPhoto[]
+  tenant                        Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  rolePermissions               RolePermission[]
+  backupCodes                   TwoFactorBackupCode[] // Capítulo 14.1.1
+  passwordResetTokens           PasswordResetToken[] // Capítulo 14.3
+  activeSessions                ActiveSession[] // Capítulo 14.4
+  salesRefundRequested          Sale[]                       @relation("SaleRefundRequestedBy") // Capítulo 6.8
+  salesRefundAuthorized         Sale[]                       @relation("SaleRefundAuthorizedBy") // Capítulo 6.8
+  sales                         Sale[]
+  workOrders                    WorkOrder[]                  @relation("AssignedTechnician")
+  technicianCommissionRule      TechnicianCommissionRule?    @relation("TechnicianCommissionRuleTechnician")
+  cashRegisters                 CashRegister[]
+  osPhotos                      OsPhoto[]
   // Par obrigatório da relação nomeada Appointment.professional (Capítulo 12) — relações
   // nomeadas (@relation("Nome")) exigem o campo inverso declarado manualmente dos dois
   // lados; "prisma format" não resolve esse caso de forma confiável (ver nota abaixo).
-  appointmentsAsProfessional  Appointment[]                @relation("AppointmentProfessional")
+  appointmentsAsProfessional    Appointment[]                @relation("AppointmentProfessional")
   // Capítulo 11.6 — profissional que de fato executou o serviço lançado na comanda
   // (pode ser diferente de quem abriu/fechou a comanda); base da comissão liberada
   // apenas no fechamento+pagamento, nunca no agendamento.
-  comandaItemsAsProfessional  ComandaItem[]                @relation("ComandaItemProfessional")
-  serviceCommissionsEarned    ServiceCommissionEntry[]     @relation("ServiceCommissionProfessional")
+  comandaItemsAsProfessional    ComandaItem[]                @relation("ComandaItemProfessional")
+  serviceCommissionsEarned      ServiceCommissionEntry[]     @relation("ServiceCommissionProfessional")
   // Capítulo 11.6 — expediente cadastrado do profissional (por dia da semana),
   // usado para gerar os horários livres da Agenda Online pública.
-  workingHours                ProfessionalWorkingHours[]   @relation("ProfessionalWorkingHoursProfessional")
-  reportDefinitionsCreated    ReportDefinition[]
-  dashboardLayout             DashboardLayout?
+  workingHours                  ProfessionalWorkingHours[]   @relation("ProfessionalWorkingHoursProfessional")
+  reportDefinitionsCreated      ReportDefinition[]
+  dashboardLayout               DashboardLayout?
   // Catálogo fiscal global (Capítulo 21.15/21.16) — só populado em SUPER_ADMIN do painel do dono.
-  ibsCbsRegimeElectionsSigned TenantIbsCbsRegimeElection[]
+  ibsCbsRegimeElectionsSigned   TenantIbsCbsRegimeElection[]
   // fiscalCodeCatalogImports removido daqui (CORREÇÃO DE AUDITORIA): o catálogo fiscal
   // é global de PLATAFORMA, importado por um PlatformAdminUser (painel do dono,
   // Capítulo 13), nunca por um User de tenant — ver FiscalCodeCatalogImport abaixo.
   // Filitech Pessoal (Capítulo 22) — só populado em usuários de tenants PERSONAL.
-  personalAccountsOwned       PersonalAccount[]
-  personalTransactionsCreated PersonalTransaction[]
-  personalTransactionSplits   PersonalTransactionSplit[]
+  personalAccountsOwned         PersonalAccount[]
+  personalTransactionsCreated   PersonalTransaction[]
+  personalTransactionSplits     PersonalTransactionSplit[]
   // Sistema central de notificações (Capítulo 8.4.5):
-  notifications               Notification[]
-  notificationPreferences     NotificationPreference[]
-  pushDeviceTokens            PushDeviceToken[]
-  purchaseOrdersCreated       PurchaseOrder[] // Capítulo 17.8 — usuário que criou o pedido
-  inventoryCountsStarted      InventoryCount[]             @relation("InventoryCountStartedBy") // Capítulo 17.9
-  inventoryCountsApproved     InventoryCount[]             @relation("InventoryCountApprovedBy") // Capítulo 17.9
-  inventoryCountItemsCounted  InventoryCountItem[] // Capítulo 17.9 — contagem individual em campo
-  dataImportJobsCreated       DataImportJob[] // Capítulo 18.5
+  notifications                 Notification[]
+  notificationPreferences       NotificationPreference[]
+  pushDeviceTokens              PushDeviceToken[]
+  purchaseOrdersCreated         PurchaseOrder[] // Capítulo 17.8 — usuário que criou o pedido
+  inventoryCountsStarted        InventoryCount[]             @relation("InventoryCountStartedBy") // Capítulo 17.9
+  inventoryCountsApproved       InventoryCount[]             @relation("InventoryCountApprovedBy") // Capítulo 17.9
+  inventoryCountItemsCounted    InventoryCountItem[] // Capítulo 17.9 — contagem individual em campo
+  dataImportJobsCreated         DataImportJob[] // Capítulo 18.5
   tenantDataExportJobsRequested TenantDataExportJob[] // Capítulo 18.4
-  cashRegisterMovements       CashRegisterMovement[] // Capítulo 6.7 — sangrias/suprimentos realizados por este usuário
+  cashRegisterMovements         CashRegisterMovement[] // Capítulo 6.7 — sangrias/suprimentos realizados por este usuário
 
   @@unique([tenantId, email])
   @@index([tenantId, role])
@@ -662,7 +663,7 @@ model Client {
   // Capítulo 9/17 — cache do ID do cliente final criado no PSP (Asaas) na primeira
   // cobrança de Boleto/Pix emitida pelo lojista (PaymentCharge). Evita recriar o
   // cliente no provedor a cada nova cobrança do mesmo client local.
-  asaasCustomerId              String?
+  asaasCustomerId             String?
   // Capítulo 11.4 — Loja de Roupas/Moda: saldo de crédito de loja a favor do cliente,
   // emitido por trocas (ProductExchange/StoreCreditTransaction ISSUED) e consumido
   // manualmente pelo caixa como desconto numa venda nova (StoreCreditTransaction
@@ -930,6 +931,12 @@ model Product {
   // a venda de um produto com isKitComposition=true baixa cada componente
   // individualmente em vez do próprio estoque do kit (ver close-sale.service.ts).
   isKitComposition              Boolean             @default(false)
+  // GAP DE AUDITORIA FECHADO (Mega-Audit Rodada 2, item 8.5 — Vitrine Virtual): o
+  // schema já tinha `OnlineStoreSettings` por tenant, mas nenhum produto tinha como
+  // optar por aparecer (ou não) na loja pública — sem isto, a vitrine não teria
+  // como saber quais produtos exibir sem vazar TODO o catálogo interno (incluindo
+  // itens fora de linha/exclusivos de atacado) para qualquer visitante anônimo.
+  showInOnlineStore             Boolean             @default(false)
   active                        Boolean             @default(true)
   createdAt                     DateTime            @default(now())
   updatedAt                     DateTime            @updatedAt
@@ -950,6 +957,7 @@ model Product {
   purchaseOrderItems     PurchaseOrderItem[] // Capítulo 17.8
   inventoryCountItems    InventoryCountItem[] // Capítulo 17.9
   comandaItems           ComandaItem[]
+  onlineOrderItems       OnlineOrderItem[] // Capítulo 8.5 — Vitrine Virtual
 
   @@unique([tenantId, sku])
   @@unique([tenantId, barcode])
@@ -1677,8 +1685,8 @@ model FiscalDocument {
   // documento fiscal da venda, no mesmo padrão dos agregados legados acima (soma de
   // todos os SaleItem da venda, calculada em close-sale.service.ts).
   difalAmount                  Decimal?              @db.Decimal(12, 2) // DIFAL devido à UF de destino em venda interestadual a consumidor final não contribuinte
-  monofasicoSegregatedRevenue   Decimal?              @db.Decimal(12, 2) // receita de itens com PIS/COFINS monofásico (já tributados na origem) — excluída da base do DAS/apuração
-  usedVehicleIcmsAmount         Decimal?              @db.Decimal(12, 2) // ICMS com base de cálculo reduzida de revenda de veículo usado (Capítulo 21.12)
+  monofasicoSegregatedRevenue  Decimal?              @db.Decimal(12, 2) // receita de itens com PIS/COFINS monofásico (já tributados na origem) — excluída da base do DAS/apuração
+  usedVehicleIcmsAmount        Decimal?              @db.Decimal(12, 2) // ICMS com base de cálculo reduzida de revenda de veículo usado (Capítulo 21.12)
   createdAt                    DateTime              @default(now())
   updatedAt                    DateTime              @updatedAt
 
@@ -1759,27 +1767,27 @@ enum PersonalAccountType {
 }
 
 model PersonalAccount {
-  id                   String              @id @default(uuid())
-  tenantId             String
-  ownerId              String? // User que cadastrou; null = conta explicitamente do casal (sem dono único)
-  name                 String
-  type                 PersonalAccountType
-  institutionName      String? // "Nubank", "Itaú", "Carteira" etc.
-  currentBalance       Decimal             @default(0) @db.Decimal(14, 2)
-  creditLimit          Decimal?            @db.Decimal(14, 2) // obrigatório em uso quando type = CREDIT_CARD
-  invoiceClosingDay    Int? // dia do mês em que a fatura fecha (type = CREDIT_CARD)
-  invoiceDueDay        Int? // dia do mês de vencimento da fatura (type = CREDIT_CARD)
-  isShared             Boolean             @default(true) // visível para todos os membros da residência (Capítulo 22.3)
-  openFinanceConsentId String? // preenchido quando a conta é sincronizada automaticamente (Capítulo 22.5)
+  id                           String              @id @default(uuid())
+  tenantId                     String
+  ownerId                      String? // User que cadastrou; null = conta explicitamente do casal (sem dono único)
+  name                         String
+  type                         PersonalAccountType
+  institutionName              String? // "Nubank", "Itaú", "Carteira" etc.
+  currentBalance               Decimal             @default(0) @db.Decimal(14, 2)
+  creditLimit                  Decimal?            @db.Decimal(14, 2) // obrigatório em uso quando type = CREDIT_CARD
+  invoiceClosingDay            Int? // dia do mês em que a fatura fecha (type = CREDIT_CARD)
+  invoiceDueDay                Int? // dia do mês de vencimento da fatura (type = CREDIT_CARD)
+  isShared                     Boolean             @default(true) // visível para todos os membros da residência (Capítulo 22.3)
+  openFinanceConsentId         String? // preenchido quando a conta é sincronizada automaticamente (Capítulo 22.5)
   // GAP DE AUDITORIA CORRIGIDO (worker real de sincronização Pluggy, Capítulo 22.5):
   // id lógico da conta no agregador — mesmo papel de `BankAccount.openFinanceExternalAccountId`
   // no lado BUSINESS. Sem este campo, a chave de idempotência do worker caía só em
   // `institutionName`, o que mescla erroneamente duas contas reais da mesma instituição
   // (ex.: conta corrente + cartão de crédito do mesmo banco) em uma única PersonalAccount.
   openFinanceExternalAccountId String?
-  archivedAt           DateTime?
-  createdAt            DateTime            @default(now())
-  updatedAt            DateTime            @updatedAt
+  archivedAt                   DateTime?
+  createdAt                    DateTime            @default(now())
+  updatedAt                    DateTime            @updatedAt
 
   tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   owner              User?                 @relation(fields: [ownerId], references: [id])
@@ -2257,6 +2265,64 @@ model OnlineStoreSettings {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("online_store_settings")
+}
+
+enum OnlineOrderStatus {
+  PENDING // recém-criado pelo cliente final, aguardando confirmação do lojista
+  CONFIRMED // lojista confirmou disponibilidade/estoque
+  PREPARING
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+// GAP DE AUDITORIA FECHADO (Mega-Audit Rodada 2, item 8.5 — Vitrine Virtual): o
+// pedido feito na loja online é deliberadamente um registro PRÓPRIO, nunca uma
+// `Sale` criada diretamente pelo cliente final sem supervisão — mesma razão pela
+// qual o agendamento online público (Capítulo 11.6) não cria direto um
+// `Appointment` fora da janela de slots livres: um pedido anônimo da internet
+// precisa de confirmação humana (estoque real, forma de pagamento, horário de
+// entrega) antes de virar uma venda de verdade no PDV (`close-sale.service.ts`),
+// que é quem efetivamente baixa estoque e gera documento fiscal.
+model OnlineOrder {
+  id               String            @id @default(uuid())
+  tenantId         String
+  customerName     String
+  customerPhone    String
+  customerEmail    String?
+  isDelivery       Boolean           @default(false)
+  deliveryAddress  String?
+  status           OnlineOrderStatus @default(PENDING)
+  itemsTotalAmount Decimal           @db.Decimal(12, 2)
+  deliveryFee      Decimal?          @db.Decimal(10, 2)
+  totalAmount      Decimal           @db.Decimal(12, 2)
+  customerNotes    String?
+  cancelReason     String?
+  linkedSaleId     String? // preenchido quando o lojista confirma e converte este pedido numa Sale real do PDV
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  tenant Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  items  OnlineOrderItem[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  @@map("online_orders")
+}
+
+model OnlineOrderItem {
+  id            String  @id @default(uuid())
+  onlineOrderId String
+  productId     String
+  productName   String // snapshot do nome no momento do pedido — o produto pode ser renomeado/excluído depois
+  quantity      Decimal @db.Decimal(12, 3)
+  unitPrice     Decimal @db.Decimal(12, 2) // snapshot do preço no momento do pedido — nunca recalculado depois (o cliente viu e aceitou este preço)
+
+  onlineOrder OnlineOrder @relation(fields: [onlineOrderId], references: [id], onDelete: Cascade)
+  product     Product     @relation(fields: [productId], references: [id])
+
+  @@index([onlineOrderId])
+  @@map("online_order_items")
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2779,8 +2845,8 @@ model PlatformSecret {
 // isolado por tenant — um único `pg_dump`/dump lógico cobre todos os tenants de uma
 // vez). Não entra em TENANT_SCOPED_MODELS por não ter `tenantId`.
 model DatabaseBackupLog {
-  id              String   @id @default(uuid())
-  startedAt       DateTime @default(now())
+  id              String    @id @default(uuid())
+  startedAt       DateTime  @default(now())
   finishedAt      DateTime?
   status          String // "RUNNING" | "SUCCESS" | "FAILED"
   storageKey      String? // chave do objeto .enc no R2 (platform/database-backups/...)

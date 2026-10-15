@@ -2,7 +2,7 @@
 import { useState, FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Box, Button, Paper, TextField, Typography, Alert, Stack, MenuItem } from "@mui/material";
-import { signup, ApiError } from "../api/client";
+import { signup, lookupCnpj, ApiError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { ThemeToggleButton } from "../theme/ThemeToggleButton";
 import { formatCnpjMask, isValidCnpj, normalizeCnpj } from "../shared/validation/br-documents";
@@ -30,9 +30,43 @@ export function SignupPage() {
   });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [cnpjLookupLoading, setCnpjLookupLoading] = useState(false);
+  const [cnpjLookupNotice, setCnpjLookupNotice] = useState<string | null>(null);
 
   function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  // GAP DE AUDITORIA FECHADO (Mega-Audit Rodada 2, item 10): ao sair do campo CNPJ
+  // com um valor numericamente válido, consulta a BrasilAPI (Receita Federal) e
+  // autopreenche razão social/nome fantasia SE o usuário ainda não os tiver
+  // digitado manualmente — nunca sobrescreve um valor já preenchido pelo usuário.
+  // Falha de rede/CNPJ não encontrado nunca bloqueia o cadastro: a consulta é só
+  // uma conveniência, o preenchimento manual continua sempre possível.
+  async function handleCnpjBlur() {
+    const digits = normalizeCnpj(form.cnpj);
+    if (form.tenantType !== "BUSINESS" || digits.length !== 14 || !isValidCnpj(form.cnpj)) return;
+    setCnpjLookupLoading(true);
+    setCnpjLookupNotice(null);
+    try {
+      const result = await lookupCnpj(digits);
+      setForm((prev) => ({
+        ...prev,
+        legalName: prev.legalName || result.razao_social || prev.legalName,
+        tradeName: prev.tradeName || result.nome_fantasia || prev.tradeName,
+      }));
+      if (result.descricao_situacao_cadastral && result.descricao_situacao_cadastral.toUpperCase() !== "ATIVA") {
+        setCnpjLookupNotice(`Atenção: situação cadastral na Receita Federal é "${result.descricao_situacao_cadastral}".`);
+      } else {
+        setCnpjLookupNotice("Dados preenchidos a partir do CNPJ (Receita Federal).");
+      }
+    } catch (err) {
+      // Silencioso de propósito: CNPJ não encontrado/API fora do ar não deve travar
+      // o cadastro, apenas deixar de autopreencher.
+      setCnpjLookupNotice(err instanceof ApiError ? null : null);
+    } finally {
+      setCnpjLookupLoading(false);
+    }
   }
 
   async function handleSubmit(e: FormEvent) {
@@ -92,6 +126,7 @@ export function SignupPage() {
                 label="CNPJ"
                 value={form.cnpj}
                 onChange={(e) => set("cnpj", formatCnpjMask(e.target.value))}
+                onBlur={handleCnpjBlur}
                 required
                 fullWidth
                 placeholder="XX.XXX.XXX/XXXX-XX"
@@ -99,7 +134,9 @@ export function SignupPage() {
                 helperText={
                   form.cnpj.length > 0 && normalizeCnpj(form.cnpj).length === 14 && !isValidCnpj(form.cnpj)
                     ? "CNPJ inválido — confira os números digitados."
-                    : "Aceita CNPJ numérico tradicional ou o novo formato alfanumérico da Receita Federal."
+                    : cnpjLookupLoading
+                      ? "Consultando Receita Federal..."
+                      : cnpjLookupNotice ?? "Aceita CNPJ numérico tradicional ou o novo formato alfanumérico da Receita Federal."
                 }
               />
             )}

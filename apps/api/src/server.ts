@@ -32,6 +32,8 @@ import { inventoryCountRouter } from "./modules/purchasing/inventory-count.route
 import { schedulingRouter } from "./modules/scheduling/scheduling.routes";
 import { comandaRouter } from "./modules/comanda/comanda.routes";
 import { publicBookingRouter } from "./modules/public-booking/public-booking.routes";
+import { publicOnlineStoreRouter } from "./modules/online-store/public-online-store.routes";
+import { onlineStoreRouter } from "./modules/online-store/online-store.routes";
 import { clientRecordsRouter } from "./modules/client-records/client-records.routes";
 import { platformAdminAuthRouter } from "./modules/platform-admin/platform-admin-auth.routes";
 import { platformAdminAuthMiddleware } from "./modules/platform-admin/platform-admin-auth.middleware";
@@ -78,6 +80,8 @@ import { clientCreditPaymentsRouter } from "./modules/clients/credit-payments.ro
 import { opticalLabWorkOrdersRouter } from "./modules/optical/optical-lab-work-orders.routes";
 import { healthInsurancePlansRouter } from "./modules/optical/health-insurance-plans.routes";
 import { healthInsuranceBillingRouter } from "./modules/optical/health-insurance-billing.routes";
+import { lookupRouter } from "./modules/lookup/lookup.routes";
+import { systemStatusRouter } from "./modules/platform-admin/system-status.routes";
 import { prismaUnscoped } from "@filitech/db";
 import { redis } from "./lib/redis";
 import { getPlatformSecret } from "./lib/platform-secrets";
@@ -153,10 +157,15 @@ app.get("/health", async (_req, res) => {
 // Rotas públicas (signup/login) — não passam por auth/tenant middlewares.
 app.use("/auth", authRouter);
 
+// Consulta pública de CEP/CNPJ (ViaCEP/BrasilAPI) — usada no onboarding, antes do
+// usuário ter qualquer sessão. Rate-limitada por IP dentro do próprio router.
+app.use(lookupRouter);
+
 // Capítulo 11.6 — Agenda Online pública (sem autenticação, tenant resolvido por
 // slug na própria URL): precisa vir antes de authMiddleware/tenantContextMiddleware,
 // nunca exigir sessão de tenant para o cliente final agendar sozinho.
 app.use(publicBookingRouter);
+app.use(publicOnlineStoreRouter);
 
 // Autenticação do painel de plataforma (SUPER_ADMIN) — sistema de sessão totalmente
 // separado do tenant (Capítulo 14.2), com seu próprio esquema JWT de 3 audiences.
@@ -166,6 +175,7 @@ app.use(platformAdminAuthRouter);
 app.use(platformAdminAuthMiddleware);
 app.use(platformAdminRouter);
 app.use(platformSecretsRouter);
+app.use(systemStatusRouter);
 app.use(databaseBackupsRouter);
 app.use(multiFilialRouter);
 app.use(supportTicketsRouter);
@@ -235,6 +245,7 @@ app.use(tireWarrantyRouter);
 app.use(carWashQueueRouter);
 app.use(dataExportRouter);
 app.use(dataImportRouter);
+app.use(onlineStoreRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ error: { code: "NOT_FOUND", message: "Rota não encontrada." } });

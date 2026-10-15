@@ -200,6 +200,40 @@ export function checkHealth(): Promise<{ status: string; database: string }> {
   return request("/health");
 }
 
+export interface ViaCepAddress {
+  cep: string;
+  logradouro: string;
+  complemento: string;
+  bairro: string;
+  localidade: string;
+  uf: string;
+  ibge: string;
+}
+
+export interface BrasilApiCnpjResult {
+  cnpj: string;
+  razao_social: string;
+  nome_fantasia: string | null;
+  descricao_situacao_cadastral: string | null;
+  cep: string | null;
+  logradouro: string | null;
+  numero: string | null;
+  bairro: string | null;
+  municipio: string | null;
+  uf: string | null;
+  ddd_telefone_1: string | null;
+}
+
+// Consultas públicas (ViaCEP/BrasilAPI) — sem sessão, usadas no onboarding para
+// autopreencher endereço/razão social a partir do CEP/CNPJ digitado.
+export function lookupCep(cep: string): Promise<ViaCepAddress> {
+  return api.get(`/lookup/cep/${encodeURIComponent(cep)}`);
+}
+
+export function lookupCnpj(cnpj: string): Promise<BrasilApiCnpjResult> {
+  return api.get(`/lookup/cnpj/${encodeURIComponent(cnpj)}`);
+}
+
 export interface CashRegister {
   id: string;
   status: "OPEN" | "CLOSED";

@@ -50,6 +50,8 @@ import { SupplierPicker } from "../../shared/lookups";
 import { money, parseDecimal, qty } from "../../shared/ui/format";
 import { VariantsDialog } from "../product-variants/VariantsDialog";
 import { printProductLabel } from "../catalog/label-printers-api";
+import { onlineStoreApi } from "../online-store/api";
+import StorefrontIcon from "@mui/icons-material/Storefront";
 
 interface FormState {
   sku: string;
@@ -302,6 +304,15 @@ export function ProductsPage() {
     },
   });
 
+  const toggleOnlineStoreVisibility = useMutation({
+    mutationFn: ({ id, showInOnlineStore }: { id: string; showInOnlineStore: boolean }) =>
+      onlineStoreApi.toggleProductVisibility(id, showInOnlineStore),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["products"] });
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+
   const visible = filtered.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage);
 
   return (
@@ -399,6 +410,16 @@ export function ProductsPage() {
                           <Tooltip title="Desativar">
                             <IconButton size="small" aria-label={`Desativar ${p.name}`} onClick={() => setToDelete(p)}>
                               <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                          <Tooltip title={p.showInOnlineStore ? "Remover da loja online" : "Exibir na loja online"}>
+                            <IconButton
+                              size="small"
+                              color={p.showInOnlineStore ? "primary" : "default"}
+                              aria-label={`Alternar visibilidade de ${p.name} na loja online`}
+                              onClick={() => toggleOnlineStoreVisibility.mutate({ id: p.id, showInOnlineStore: !p.showInOnlineStore })}
+                            >
+                              <StorefrontIcon fontSize="small" />
                             </IconButton>
                           </Tooltip>
                         </TableCell>

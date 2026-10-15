@@ -63,6 +63,8 @@ export interface ProductListItem {
   unitConversionFactor: string | null;
   // Capítulo 11.5 — Papelaria/Presentes: kit escolar = Recipe/RecipeItem como BOM do kit.
   isKitComposition: boolean;
+  // Capítulo 8.5 — Vitrine Virtual: visibilidade na loja online pública.
+  showInOnlineStore: boolean;
 }
 
 export interface ProductDetail extends ProductListItem {

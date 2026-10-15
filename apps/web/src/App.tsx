@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { LandingPage } from "./landing/LandingPage";
 import { LoginPage } from "./pages/LoginPage";
 import { SignupPage } from "./pages/SignupPage";
+import { StatusPage } from "./pages/StatusPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { PosPage } from "./modules/market/pos/PosPage";
 import { SalesHistoryPage } from "./modules/market/sales/SalesHistoryPage";
@@ -55,6 +56,8 @@ import { VariantQuickLookupPage } from "./modules/product-variants/VariantQuickL
 import { CollectionTurnoverReportPage } from "./modules/reports/CollectionTurnoverReportPage";
 import { ExchangesPage } from "./modules/exchanges/ExchangesPage";
 import { PublicBookingPage } from "./modules/public-booking/PublicBookingPage";
+import { PublicStorePage } from "./modules/public-store/PublicStorePage";
+import { OnlineStorePage } from "./modules/online-store/OnlineStorePage";
 import { SeasonalityWindowsPage } from "./modules/seasonality/SeasonalityWindowsPage";
 import { SeasonalClearanceReportPage } from "./modules/seasonality/SeasonalClearanceReportPage";
 import { PersonalizationOrdersPage } from "./modules/personalization/PersonalizationOrdersPage";
@@ -66,6 +69,7 @@ import { PlatformAdminLoginPage } from "./modules/platform-admin/PlatformAdminLo
 import { PlatformAdminShell } from "./modules/platform-admin/PlatformAdminShell";
 import { InfrastructureSettingsPage } from "./modules/platform-admin/InfrastructureSettingsPage";
 import { SecurityPage } from "./modules/platform-admin/SecurityPage";
+import { SystemStatusPage } from "./modules/platform-admin/SystemStatusPage";
 import { MarketingAdminPage } from "./modules/platform-admin/MarketingAdminPage";
 import { TenantListPage } from "./modules/platform-admin/TenantListPage";
 import { TenantDetailPage } from "./modules/platform-admin/TenantDetailPage";
@@ -111,8 +115,12 @@ export function App() {
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/signup" element={<SignupPage />} />
+            {/* Pública, sem auth: Cap. 15.1.5 — página de status da plataforma */}
+            <Route path="/status" element={<StatusPage />} />
             {/* Pública, sem auth: Cap. 11.6 — agendamento online self-service */}
             <Route path="/agendar/:tenantSlug" element={<PublicBookingPage />} />
+            {/* Pública, sem auth: Cap. 8.5 — vitrine virtual/loja online */}
+            <Route path="/loja/:customSlug" element={<PublicStorePage />} />
             <Route path="/platform-admin/login" element={<PlatformAdminLoginPage />} />
             <Route
               element={
@@ -123,6 +131,7 @@ export function App() {
             >
               <Route path="/platform-admin/infraestrutura" element={<InfrastructureSettingsPage />} />
               <Route path="/platform-admin/seguranca" element={<SecurityPage />} />
+              <Route path="/platform-admin/status" element={<SystemStatusPage />} />
               <Route path="/platform-admin/marketing" element={<MarketingAdminPage />} />
               <Route path="/platform-admin/tenants" element={<TenantListPage />} />
               <Route path="/platform-admin/tenants/:id" element={<TenantDetailPage />} />
@@ -197,6 +206,7 @@ export function App() {
             <Route path="/ferragens/faturamento" element={<BusinessAccountInvoicePage />} />
             <Route path="/pneus/garantia" element={<TireWarrantyPage />} />
             <Route path="/estetica-automotiva/fila" element={<CarWashQueuePage />} />
+            <Route path="/loja-online" element={<OnlineStorePage />} />
             <Route path="/pessoal" element={<PersonalDashboardPage />} />
             <Route path="/pessoal/carteiras" element={<PersonalAccountsPage />} />
             <Route path="/pessoal/transacoes" element={<PersonalTransactionsPage />} />

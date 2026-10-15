@@ -128,6 +128,12 @@ const MODULE_CATALOG = [
     monthlyPrice: "59.90",
     description: "Consignação de seminovos, publicação em portais de anúncio (OLX/Webmotors/iCarros) e repasse ao consignante (Capítulo 11.12).",
   },
+  {
+    code: "ONLINE_STORE",
+    label: "Vitrine Virtual — Loja Online",
+    monthlyPrice: "29.90",
+    description: "Catálogo público com pedidos online (retirada/entrega), sem risco de overselling — o lojista confirma cada pedido antes de virar venda real no PDV (Capítulo 8.5).",
+  },
 ] as const;
 
 // Capítulo 2.3/2.4/2.5 — planos base + Filitech Pessoal (B2C).

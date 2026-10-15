@@ -100,6 +100,11 @@ export const TENANT_SCOPED_MODELS = new Set([
   "FiscalDocumentEvent",
   // Vitrine Virtual (Capítulo 8.5) — tenantId único e simples:
   "OnlineStoreSettings",
+  // Pedidos da vitrine virtual (Capítulo 8.5) — tenantId único e simples. NOTA:
+  // "OnlineOrderItem" fica FORA desta lista — não possui coluna tenantId própria,
+  // herda o tenant via onlineOrderId -> OnlineOrder (mesmo padrão de
+  // InventoryCountItem acima).
+  "OnlineOrder",
   // Contagem física de estoque (Capítulo 17.9) — tenantId único e simples:
   "InventoryCount",
   // NOTA: "InventoryCountItem" fica FORA desta lista — não possui coluna tenantId
