@@ -9,7 +9,13 @@ import { useState } from "react";
 import {
   Alert,
   Button,
+  Checkbox,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
   MenuItem,
   Paper,
   Stack,
@@ -25,15 +31,76 @@ import {
   Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { carWashQueueApi, CAR_WASH_STATUS_LABEL, type CarWashQueueEntry } from "./api";
+import { carWashQueueApi, carWashServiceApi, CAR_WASH_STATUS_LABEL, type CarWashQueueEntry } from "./api";
 import { schedulingApi } from "../scheduling/api";
 import { Page, PageHeader, QueryState, errorMessage } from "../../shared/ui/PageLayout";
 import { useToast } from "../../shared/ui/Toast";
 import { ClientPicker, useProfessionals } from "../../shared/lookups";
 import type { Client } from "../registrations/api";
 import { formatDateTime } from "../../shared/ui/format";
+import { uploadFileToStorage } from "../../shared/storage/upload";
 
 const ADVANCEABLE: CarWashQueueEntry["status"][] = ["SCHEDULED", "IN_PROGRESS"];
+// Capítulo 11.11: checklist padrão de inspeção do veículo — mesmos itens na
+// entrada (avarias pré-existentes) e na saída (conferência pós-lavagem).
+const CHECKLIST_ITEMS = ["Riscos na lataria", "Rodas/calotas limpas", "Estofado sem manchas", "Vidros sem resíduo", "Objetos pessoais no veículo"];
+
+function ChecklistDialog({ entry, stage, onClose }: { entry: CarWashQueueEntry; stage: "ENTRY" | "DELIVERY"; onClose: () => void }) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const [checks, setChecks] = useState<Record<string, boolean>>(Object.fromEntries(CHECKLIST_ITEMS.map((i) => [i, false])));
+  const [files, setFiles] = useState<File[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = useMutation({
+    mutationFn: async () => {
+      const photoStorageKeys = await Promise.all(files.map((f) => uploadFileToStorage(f, "work-order-photos")));
+      return carWashServiceApi.registerChecklist(entry.id, { stage, items: checks, photoStorageKeys });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["car-wash-queue-today"] });
+      toast.success(stage === "ENTRY" ? "Checklist de entrada registrado." : "Checklist de saída registrado.");
+      onClose();
+    },
+    onError: (e) => setError(errorMessage(e)),
+  });
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>{stage === "ENTRY" ? "Checklist de entrada" : "Checklist de saída"} — {entry.client.name}</DialogTitle>
+      <DialogContent>
+        {error && (
+          <Alert severity="error" sx={{ mb: 1 }}>
+            {error}
+          </Alert>
+        )}
+        <Stack spacing={1}>
+          {CHECKLIST_ITEMS.map((item) => (
+            <FormControlLabel
+              key={item}
+              control={<Checkbox checked={checks[item]} onChange={(e) => setChecks((c) => ({ ...c, [item]: e.target.checked }))} />}
+              label={item}
+            />
+          ))}
+          <TextField
+            type="file"
+            inputProps={{ accept: "image/*", multiple: true }}
+            label={stage === "ENTRY" ? "Fotos (antes)" : "Fotos (depois)"}
+            InputLabelProps={{ shrink: true }}
+            onChange={(e) => setFiles(Array.from((e.target as HTMLInputElement).files ?? []))}
+          />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancelar</Button>
+        <Button variant="contained" disabled={submit.isPending} onClick={() => { setError(null); submit.mutate(); }}>
+          {submit.isPending ? "Salvando…" : "Salvar checklist"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 
 function statusColor(status: CarWashQueueEntry["status"]): "default" | "info" | "warning" | "success" | "error" | "primary" {
   if (status === "COMPLETED") return "success";
@@ -129,6 +196,7 @@ function QueueTab() {
   const queryClient = useQueryClient();
   const toast = useToast();
   const query = useQuery({ queryKey: ["car-wash-queue-today"], queryFn: () => carWashQueueApi.today() });
+  const [checklistDialog, setChecklistDialog] = useState<{ entry: CarWashQueueEntry; stage: "ENTRY" | "DELIVERY" } | null>(null);
 
   const advance = useMutation({
     mutationFn: (appointmentId: string) => carWashQueueApi.advanceStatus(appointmentId),
@@ -142,6 +210,7 @@ function QueueTab() {
   return (
     <Stack spacing={2}>
       <WalkInForm />
+      {checklistDialog && <ChecklistDialog entry={checklistDialog.entry} stage={checklistDialog.stage} onClose={() => setChecklistDialog(null)} />}
       <QueryState query={query} isEmpty={(d) => d.length === 0} emptyMessage="Nenhum atendimento na fila de hoje.">
         {(data) => (
           <Paper>
@@ -173,11 +242,19 @@ function QueueTab() {
                         <Chip size="small" label={CAR_WASH_STATUS_LABEL[row.status]} color={statusColor(row.status)} />
                       </TableCell>
                       <TableCell align="right">
-                        {ADVANCEABLE.includes(row.status) && (
-                          <Button size="small" onClick={() => advance.mutate(row.id)} disabled={advance.isPending}>
-                            Avançar status
+                        <Stack direction="row" spacing={1} justifyContent="flex-end">
+                          <Button size="small" onClick={() => setChecklistDialog({ entry: row, stage: "ENTRY" })}>
+                            Checklist entrada
                           </Button>
-                        )}
+                          <Button size="small" onClick={() => setChecklistDialog({ entry: row, stage: "DELIVERY" })}>
+                            Checklist saída
+                          </Button>
+                          {ADVANCEABLE.includes(row.status) && (
+                            <Button size="small" onClick={() => advance.mutate(row.id)} disabled={advance.isPending}>
+                              Avançar status
+                            </Button>
+                          )}
+                        </Stack>
                       </TableCell>
                     </TableRow>
                   ))}

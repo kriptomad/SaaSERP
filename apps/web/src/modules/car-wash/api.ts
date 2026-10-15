@@ -52,3 +52,31 @@ export const CAR_WASH_STATUS_LABEL: Record<CarWashAppointmentStatus, string> = {
   CANCELLED: "Cancelado",
   NO_SHOW: "Não compareceu",
 };
+
+// Contratos reais de apps/api/src/modules/car-wash/car-wash-service.routes.ts
+// (Capítulo 11.11 — checklist de entrada/saída + fotos antes/depois).
+export interface CarWashChecklistEntry {
+  id: string;
+  stage: "ENTRY" | "DELIVERY";
+  items: Record<string, boolean>;
+  createdAt: string;
+}
+export interface CarWashPhoto {
+  id: string;
+  storageKey: string;
+  caption: string | null;
+  createdAt: string;
+}
+export interface CarWashServiceRecord {
+  workOrder: { id: string; status: string } | null;
+  checklist: CarWashChecklistEntry[];
+  photos: CarWashPhoto[];
+}
+
+export const carWashServiceApi = {
+  getServiceRecord: (appointmentId: string) => api.get<CarWashServiceRecord>(`/car-wash-queue/${appointmentId}/service-record`),
+  registerChecklist: (
+    appointmentId: string,
+    input: { stage: "ENTRY" | "DELIVERY"; items: Record<string, boolean>; photoStorageKeys: string[] },
+  ) => api.post<{ checklist: CarWashChecklistEntry; photos: CarWashPhoto[] }>(`/car-wash-queue/${appointmentId}/checklist`, input),
+};

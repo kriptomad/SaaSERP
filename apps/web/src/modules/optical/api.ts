@@ -21,6 +21,8 @@ export const opticalLabWorkOrdersApi = {
   list: (status?: OpticalLabWorkOrderStatus) => api.get<OpticalLabWorkOrder[]>("/optical-lab-work-orders", { status }),
   get: (id: string) => api.get<OpticalLabWorkOrder>(`/optical-lab-work-orders/${id}`),
   setStatus: (id: string, status: OpticalLabWorkOrderStatus) => api.patch<OpticalLabWorkOrder>(`/optical-lab-work-orders/${id}/status`, { status }),
+  registerAdjustment: (id: string, input: { reason: string; newEstimatedReadyAt?: string | null }) =>
+    api.post<OpticalLabWorkOrder>(`/optical-lab-work-orders/${id}/register-adjustment`, input),
 };
 
 export interface HealthInsurancePlan {

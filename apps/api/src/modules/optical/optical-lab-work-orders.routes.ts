@@ -107,3 +107,38 @@ opticalLabWorkOrdersRouter.patch("/optical-lab-work-orders/:id/status", requireA
 
   return res.json({ success: true, data: updated, error: null });
 });
+
+const adjustmentSchema = z.object({ reason: z.string().min(1), newEstimatedReadyAt: z.coerce.date().nullable().optional() });
+
+// GAP DE AUDITORIA FECHADO (Mega-Audit Rodada 3) — Capítulo 11.2: "ajuste de
+// grau" é o retorno do cliente após a entrega para correção da armação/lente
+// (encaixe, aperto, troca de lente mal cortada etc.), dentro da garantia (90
+// dias CDC + garantia contratual adicional, já calculada em `SaleItem.warrantyExpiresAt`
+// no fechamento da venda). Reabre a MESMA O.S. de laboratório (DELIVERED →
+// IN_REPAIR) em vez de criar uma nova — preserva o histórico único do pedido
+// (receita, prazo original, fotos/checklist) com o motivo do ajuste registrado
+// via `OsChecklist` (stage DIAGNOSIS, mesmo stage usado pela Assistência Técnica
+// para o laudo de entrada de um reparo).
+opticalLabWorkOrdersRouter.post("/optical-lab-work-orders/:id/register-adjustment", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
+  if (!(await requireWrite(req, res))) return;
+  const parsed = adjustmentSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  const { tenantId } = req.session!;
+  const existing = await prisma.workOrder.findFirst({ where: { id: req.params.id, tenantId, workOrderType: "OPTICAL_LAB" } });
+  if (!existing) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Pedido de laboratório óptico não encontrado." } });
+  if (existing.status !== "DELIVERED") {
+    return res.status(409).json({ success: false, data: null, error: { code: "INVALID_TRANSITION", message: "Ajuste de grau só pode ser registrado sobre um pedido já entregue (DELIVERED)." } });
+  }
+
+  const [updated] = await prisma.$transaction([
+    prisma.workOrder.update({
+      where: { id: existing.id },
+      data: { status: "IN_REPAIR", estimatedReadyAt: parsed.data.newEstimatedReadyAt ?? null, deliveredAt: null },
+    }),
+    prisma.osChecklist.create({
+      data: { tenantId, workOrderId: existing.id, stage: "DIAGNOSIS", items: { "Motivo do ajuste de grau": parsed.data.reason } },
+    }),
+  ]);
+
+  return res.json({ success: true, data: updated, error: null });
+});

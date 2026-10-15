@@ -5,6 +5,12 @@
 // e notificação ao cliente quando o status muda para READY (feita no backend).
 import { useState } from "react";
 import {
+  Alert,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   MenuItem,
   Paper,
   Stack,
@@ -69,8 +75,64 @@ function StatusSelect({ orderId, status }: { orderId: string; status: OpticalLab
   );
 }
 
+function AdjustmentDialog({ id, clientName, onClose }: { id: string; clientName: string; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  const [reason, setReason] = useState("");
+  const [newEstimatedReadyAt, setNewEstimatedReadyAt] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = useMutation({
+    mutationFn: () => opticalLabWorkOrdersApi.registerAdjustment(id, { reason: reason.trim(), newEstimatedReadyAt: newEstimatedReadyAt || null }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["optical-lab-work-orders"] });
+      toast.success("Ajuste de grau registrado — pedido reaberto em produção.");
+      onClose();
+    },
+    onError: (e) => setError(errorMessage(e)),
+  });
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Registrar ajuste de grau — {clientName}</DialogTitle>
+      <DialogContent>
+        {error && (
+          <Alert severity="error" sx={{ mb: 1 }}>
+            {error}
+          </Alert>
+        )}
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <TextField
+            label="Motivo do ajuste"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            multiline
+            minRows={2}
+            required
+            helperText="Ex.: encaixe da armação, lente cortada fora da medida, troca dentro da garantia."
+          />
+          <TextField
+            label="Nova previsão de entrega (opcional)"
+            type="date"
+            value={newEstimatedReadyAt}
+            onChange={(e) => setNewEstimatedReadyAt(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+          />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancelar</Button>
+        <Button variant="contained" disabled={!reason.trim() || submit.isPending} onClick={() => { setError(null); submit.mutate(); }}>
+          {submit.isPending ? "Salvando…" : "Registrar ajuste"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 export function OpticalLabPage() {
   const [statusFilter, setStatusFilter] = useState<OpticalLabWorkOrderStatus | "">("");
+  const [adjustmentTarget, setAdjustmentTarget] = useState<{ id: string; clientName: string } | null>(null);
   const query = useQuery({
     queryKey: ["optical-lab-work-orders", statusFilter],
     queryFn: () => opticalLabWorkOrdersApi.list(statusFilter || undefined),
@@ -105,6 +167,7 @@ export function OpticalLabPage() {
                     <TableCell>Previsão de entrega</TableCell>
                     <TableCell>Entregue em</TableCell>
                     <TableCell>Status</TableCell>
+                    <TableCell align="right">Ações</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -123,6 +186,13 @@ export function OpticalLabPage() {
                           <StatusSelect orderId={o.id} status={o.status} />
                         </Stack>
                       </TableCell>
+                      <TableCell align="right">
+                        {o.status === "DELIVERED" && (
+                          <Button size="small" onClick={() => setAdjustmentTarget({ id: o.id, clientName: o.client.name })}>
+                            Registrar ajuste
+                          </Button>
+                        )}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -131,6 +201,9 @@ export function OpticalLabPage() {
           </Paper>
         )}
       </QueryState>
+      {adjustmentTarget && (
+        <AdjustmentDialog id={adjustmentTarget.id} clientName={adjustmentTarget.clientName} onClose={() => setAdjustmentTarget(null)} />
+      )}
     </Page>
   );
 }

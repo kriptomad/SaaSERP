@@ -64,7 +64,10 @@ import { SeasonalityWindowsPage } from "./modules/seasonality/SeasonalityWindows
 import { SeasonalClearanceReportPage } from "./modules/seasonality/SeasonalClearanceReportPage";
 import { PersonalizationOrdersPage } from "./modules/personalization/PersonalizationOrdersPage";
 import { BusinessAccountInvoicePage } from "./modules/construction/BusinessAccountInvoicePage";
+import { ConstructionQuotesPage } from "./modules/construction/ConstructionQuotesPage";
+import { MaterialDeliveriesPage } from "./modules/construction/MaterialDeliveriesPage";
 import { TireWarrantyPage } from "./modules/tires/TireWarrantyPage";
+import { TireServiceOrdersPage } from "./modules/tires/TireServiceOrdersPage";
 import { CarWashQueuePage } from "./modules/car-wash/CarWashQueuePage";
 import { PlatformAdminAuthProvider, usePlatformAdminAuth } from "./modules/platform-admin/PlatformAdminAuthContext";
 import { PlatformAdminLoginPage } from "./modules/platform-admin/PlatformAdminLoginPage";
@@ -208,7 +211,10 @@ export function App() {
             <Route path="/sazonalidade/liquidacao" element={<SeasonalClearanceReportPage />} />
             <Route path="/personalizacao" element={<PersonalizationOrdersPage />} />
             <Route path="/ferragens/faturamento" element={<BusinessAccountInvoicePage />} />
+            <Route path="/ferragens/orcamentos" element={<ConstructionQuotesPage />} />
+            <Route path="/ferragens/entregas" element={<MaterialDeliveriesPage />} />
             <Route path="/pneus/garantia" element={<TireWarrantyPage />} />
+            <Route path="/pneus/ordens-de-servico" element={<TireServiceOrdersPage />} />
             <Route path="/estetica-automotiva/fila" element={<CarWashQueuePage />} />
             <Route path="/loja-online" element={<OnlineStorePage />} />
             <Route path="/pessoal" element={<PersonalDashboardPage />} />

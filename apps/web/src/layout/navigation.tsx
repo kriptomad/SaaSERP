@@ -289,6 +289,8 @@ export const NAV_GROUPS: NavGroup[] = [
     tenantTypes: ["BUSINESS"],
     items: [
       { id: "ferragens-faturamento", label: "Faturamento mensal (profissionais)", path: "/ferragens/faturamento", icon: <ConstructionIcon />, moduleCode: "CONSTRUCTION_BULK_UNITS" },
+      { id: "ferragens-orcamentos", label: "Orçamentos de obra", path: "/ferragens/orcamentos", icon: <ConstructionIcon />, moduleCode: "CONSTRUCTION_BULK_UNITS" },
+      { id: "ferragens-entregas", label: "Entregas de material", path: "/ferragens/entregas", icon: <ConstructionIcon />, moduleCode: "CONSTRUCTION_BULK_UNITS" },
     ],
   },
   {
@@ -305,6 +307,7 @@ export const NAV_GROUPS: NavGroup[] = [
     tenantTypes: ["BUSINESS"],
     items: [
       { id: "pneus-garantia", label: "Garantia de pneus por lote", path: "/pneus/garantia", icon: <TireRepairIcon />, moduleCode: "TIRE_WARRANTY" },
+      { id: "pneus-os", label: "O.S. de montagem/balanceamento/alinhamento", path: "/pneus/ordens-de-servico", icon: <TireRepairIcon />, moduleCode: "TIRE_WARRANTY" },
       { id: "estetica-fila", label: "Fila de atendimento (lava-rápido)", path: "/estetica-automotiva/fila", icon: <LocalCarWashIcon />, moduleCode: "CAR_WASH_QUEUE" },
       { id: "oficina-os", label: "Ordens de Serviço (Oficina)", path: "/os", icon: <BuildIcon />, moduleCode: "AUTO_REPAIR_SHOP" },
       { id: "oficina-veiculos", label: "Veículos de clientes", path: "/oficina/veiculos", icon: <BuildIcon />, moduleCode: "AUTO_REPAIR_SHOP" },
