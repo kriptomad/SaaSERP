@@ -105,8 +105,26 @@ export async function calculateTax(
 
   // Simples Nacional: ICMS "normal" já embutido no DAS (não destacado) — apenas o
   // ICMS-ST (se a regra tiver MVA) é calculado à parte, nunca duplicado.
+  //
+  // CORREÇÃO (mega-audit round 4, achado crítico): a fórmula anterior
+  // (`grossAmount * MVA% * aliquota%`) não correspondia à fórmula legal de
+  // ICMS-ST (Convênio ICMS 142/2018, cláusula sexta) e, em especial, NUNCA
+  // deduzia o ICMS próprio (ICMS da operação normal, já destacado na mesma
+  // nota) do ICMS-ST apurado — superestimando sistematicamente o tributo retido
+  // por substituição tributária. Fórmula correta:
+  //   baseST   = valorOperação × (1 + MVA%)
+  //   icmsST   = (baseST × alíquotaInterna%) − icmsPróprio
+  //   icmsPróprio = valorOperação × alíquotaInterna%
+  // Nunca negativo (quando a alíquota interna é baixa e o MVA pequeno, o
+  // próprio pode em tese igualar/superar o ST bruto — `Decimal.max(0, ...)`
+  // evita um ICMS-ST negativo, que não existe na prática).
+  const icmsAliquotaDecimal = rule.icmsAliquota?.div(100) ?? new Prisma.Decimal(0);
+  const icmsProprio = input.grossAmount.mul(icmsAliquotaDecimal);
   const legacyIcmsAmount = rule.icmsStMva
-    ? input.grossAmount.mul(rule.icmsStMva.div(100)).mul(rule.icmsAliquota?.div(100) ?? new Prisma.Decimal(0))
+    ? Prisma.Decimal.max(
+        new Prisma.Decimal(0),
+        input.grossAmount.mul(new Prisma.Decimal(1).plus(rule.icmsStMva.div(100))).mul(icmsAliquotaDecimal).minus(icmsProprio),
+      )
     : new Prisma.Decimal(0);
 
   return {
