@@ -13,6 +13,7 @@ import { requireAuth } from "../../middlewares/auth.middleware";
 import { hashPassword } from "../auth/password.service";
 import { setManagerPin, InvalidManagerPinFormatError } from "../auth/manager-pin.service";
 import { calculateSeatBilling, reconcileSeatBillingWithProvider } from "../billing/seat-billing.service";
+import { validatePasswordPolicy } from "../../lib/password-policy";
 
 export const usersRouter = Router();
 
@@ -78,6 +79,11 @@ usersRouter.post("/users", requireAuth, async (req: Request, res: Response) => {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
   }
   const input = parsed.data;
+
+  const passwordPolicy = validatePasswordPolicy(input.password);
+  if (!passwordPolicy.valid) {
+    return res.status(400).json({ success: false, data: null, error: { code: "WEAK_PASSWORD", message: passwordPolicy.errors.join(" ") } });
+  }
 
   if (input.role === "OWNER" && role !== "OWNER") {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Apenas um OWNER pode criar outro OWNER." } });

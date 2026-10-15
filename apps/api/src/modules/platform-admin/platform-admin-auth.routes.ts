@@ -17,6 +17,7 @@ import { enforceRateLimit, resetRateLimit, RateLimitExceededError } from "../../
 import { ipMatchesAnyCidr } from "../../lib/cidr-match";
 import { hashSessionId } from "./platform-admin-auth.middleware";
 import { createModuleLogger } from "../../lib/logger";
+import { validatePasswordPolicy } from "../../lib/password-policy";
 import {
   signPlatformAdminSessionToken,
   signTwoFactorEnrollToken,
@@ -398,6 +399,11 @@ platformAdminAuthRouter.post("/platform-admin/auth/password-reset/confirm", asyn
   const parsed = passwordResetConfirmSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+  }
+
+  const passwordPolicy = validatePasswordPolicy(parsed.data.newPassword);
+  if (!passwordPolicy.valid) {
+    return res.status(400).json({ success: false, data: null, error: { code: "WEAK_PASSWORD", message: passwordPolicy.errors.join(" ") } });
   }
 
   const tokenHash = createHash("sha256").update(parsed.data.token).digest("hex");

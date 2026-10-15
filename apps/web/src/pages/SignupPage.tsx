@@ -5,6 +5,9 @@ import { Box, Button, Paper, TextField, Typography, Alert, Stack, MenuItem } fro
 import { signup, ApiError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { ThemeToggleButton } from "../theme/ThemeToggleButton";
+import { formatCnpjMask, isValidCnpj, normalizeCnpj } from "../shared/validation/br-documents";
+import { validatePasswordPolicy } from "../shared/validation/password-strength";
+import { PasswordStrengthMeter } from "../shared/validation/PasswordStrengthMeter";
 
 const TENANT_TYPES = [
   { value: "BUSINESS", label: "Empresa (loja/comércio)" },
@@ -35,9 +38,20 @@ export function SignupPage() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+
+    if (form.tenantType === "BUSINESS" && !isValidCnpj(form.cnpj)) {
+      setError("CNPJ inválido — confira os números digitados.");
+      return;
+    }
+    const passwordPolicy = validatePasswordPolicy(form.ownerPassword);
+    if (!passwordPolicy.valid) {
+      setError(passwordPolicy.errors.join(" "));
+      return;
+    }
+
     setLoading(true);
     try {
-      const response = await signup({ ...form, cnpj: form.cnpj || undefined });
+      const response = await signup({ ...form, cnpj: form.cnpj ? normalizeCnpj(form.cnpj) : undefined });
       setSession(response);
       navigate("/dashboard");
     } catch (err) {
@@ -74,7 +88,20 @@ export function SignupPage() {
             <TextField label="Nome fantasia" value={form.tradeName} onChange={(e) => set("tradeName", e.target.value)} required fullWidth />
             <TextField label="Identificador (slug)" value={form.slug} onChange={(e) => set("slug", e.target.value)} required fullWidth />
             {form.tenantType === "BUSINESS" && (
-              <TextField label="CNPJ" value={form.cnpj} onChange={(e) => set("cnpj", e.target.value)} required fullWidth />
+              <TextField
+                label="CNPJ"
+                value={form.cnpj}
+                onChange={(e) => set("cnpj", formatCnpjMask(e.target.value))}
+                required
+                fullWidth
+                placeholder="XX.XXX.XXX/XXXX-XX"
+                error={form.cnpj.length > 0 && normalizeCnpj(form.cnpj).length === 14 && !isValidCnpj(form.cnpj)}
+                helperText={
+                  form.cnpj.length > 0 && normalizeCnpj(form.cnpj).length === 14 && !isValidCnpj(form.cnpj)
+                    ? "CNPJ inválido — confira os números digitados."
+                    : "Aceita CNPJ numérico tradicional ou o novo formato alfanumérico da Receita Federal."
+                }
+              />
             )}
             <TextField label="Seu nome" value={form.ownerName} onChange={(e) => set("ownerName", e.target.value)} required fullWidth />
             <TextField
@@ -92,8 +119,9 @@ export function SignupPage() {
               onChange={(e) => set("ownerPassword", e.target.value)}
               required
               fullWidth
-              helperText="Mínimo 8 caracteres"
+              helperText="Mínimo 8 caracteres e 1 caractere especial (ex.: ! @ # $ % & *)"
             />
+            <PasswordStrengthMeter password={form.ownerPassword} />
             <Button type="submit" variant="contained" disabled={loading} fullWidth>
               {loading ? "Criando..." : "Criar espaço"}
             </Button>

@@ -9,6 +9,8 @@ import { hashPassword, verifyPassword } from "./password.service";
 import { signSessionToken } from "./jwt.service";
 import { enforceRateLimit, resetRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
 import { authMiddleware, requireAuth } from "../../middlewares/auth.middleware";
+import { isValidCnpj } from "../../lib/br-documents";
+import { validatePasswordPolicy } from "../../lib/password-policy";
 
 export const authRouter = Router();
 
@@ -36,6 +38,16 @@ authRouter.post("/signup", async (req, res) => {
   // CNPJ obrigatório apenas para tenantType = BUSINESS (Capítulo 22.1).
   if (input.tenantType === "BUSINESS" && !input.cnpj) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "cnpj é obrigatório para tenantType BUSINESS." } });
+  }
+  // Validação real de dígito verificador — aceita tanto CNPJ numérico tradicional
+  // quanto o novo formato alfanumérico da Receita Federal (ver lib/br-documents.ts).
+  // Checado sempre que um CNPJ é informado, independente do tenantType.
+  if (input.cnpj && !isValidCnpj(input.cnpj)) {
+    return res.status(400).json({ success: false, data: null, error: { code: "INVALID_CNPJ", message: "CNPJ inválido (dígito verificador não confere)." } });
+  }
+  const passwordPolicy = validatePasswordPolicy(input.ownerPassword);
+  if (!passwordPolicy.valid) {
+    return res.status(400).json({ success: false, data: null, error: { code: "WEAK_PASSWORD", message: passwordPolicy.errors.join(" ") } });
   }
 
   const existingSlug = await prismaUnscoped.tenant.findUnique({ where: { slug: input.slug } });
