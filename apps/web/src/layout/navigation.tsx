@@ -282,6 +282,14 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    id: "multi-filial",
+    label: "Multi-Filial",
+    tenantTypes: ["BUSINESS"],
+    items: [
+      { id: "multi-filial-dashboard", label: "Dashboard consolidado da rede", path: "/multi-filial/dashboard", icon: <AccountTreeIcon />, moduleCode: "MULTI_FILIAL" },
+    ],
+  },
+  {
     id: "setor-automotivo",
     label: "Setor Automotivo",
     tenantTypes: ["BUSINESS"],
