@@ -242,6 +242,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: "receitas", label: "Retenção de receitas", path: "/farmacia/receitas", icon: <LocalPharmacyIcon />, moduleCode: "PHARMACY_SNGPC" },
       { id: "validades", label: "Lotes a vencer", path: "/farmacia/validades", icon: <EventBusyIcon />, moduleCode: "PHARMACY_SNGPC" },
+      { id: "sngpc", label: "Livro SNGPC (controlados)", path: "/farmacia/sngpc", icon: <VerifiedUserIcon />, moduleCode: "PHARMACY_SNGPC" },
     ],
   },
   {

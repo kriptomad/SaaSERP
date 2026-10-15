@@ -194,3 +194,153 @@ prescriptionRecordsRouter.get("/pharmacy/expiring-batches", requireAuth, require
 
   return res.json({ success: true, data, error: null });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /pharmacy/sngpc-ledger?month=YYYY-MM&productId= — Livro de Escrituração de
+// substâncias controladas (SNGPC — RDC 1.000/2025). GAP DE AUDITORIA FECHADO:
+// `Product.isControlledSubstance` só era usado como um rótulo visual (filtro/chip)
+// — não existia NENHUM lugar no sistema onde o farmacêutico responsável pudesse
+// extrair o livro de movimentação (entradas via compra, saídas via dispensação)
+// exigido para a prestação de contas periódica à ANVISA via Portal SNGPC (upload
+// próprio da ANVISA; este endpoint gera os dados-fonte reais para esse upload —
+// a transmissão ao órgão em si é um processo externo ao ERP, fora do nosso domínio).
+//
+// Reconstituído 100% a partir de `StockMovement` (nunca duplicando estado): entradas
+// = StockMovement.type IN (PURCHASE_IN/RETURN/ADJUSTMENT positivo) com referenceId
+// apontando para PurchaseOrder; saídas = StockMovement.type SALE_OUT/LOSS/ADJUSTMENT
+// negativo, com referenceId apontando para Sale.idempotencyKey — join feito em
+// memória (poucas centenas de linhas por mês mesmo em farmácia de grande porte,
+// nunca justificaria uma tabela de cache redundante sujeita a dessincronizar).
+const sngpcLedgerQuerySchema = z.object({
+  month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Informe o mês no formato YYYY-MM."),
+  productId: z.string().optional(),
+});
+
+prescriptionRecordsRouter.get("/pharmacy/sngpc-ledger", requireAuth, requireModule("PHARMACY_SNGPC"), async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "pharmacy:sngpc-ledger:read"))) {
+    return forbidden(res, "Seu nível de acesso não permite consultar o livro de escrituração SNGPC.");
+  }
+  const parsed = sngpcLedgerQuerySchema.safeParse(req.query);
+  if (!parsed.success) return validationError(res, parsed.error.flatten());
+  const { month, productId } = parsed.data;
+
+  const [year, monthNum] = month.split("-").map(Number);
+  const periodStart = new Date(Date.UTC(year, monthNum - 1, 1, 0, 0, 0));
+  const periodEnd = new Date(Date.UTC(year, monthNum, 1, 0, 0, 0));
+
+  const controlledProducts = await prisma.product.findMany({
+    where: { tenantId, isControlledSubstance: true, ...(productId ? { id: productId } : {}) },
+    select: { id: true, name: true, sku: true, ncm: true },
+  });
+  if (controlledProducts.length === 0) {
+    return res.json({ success: true, data: { month, summary: [], movements: [] }, error: null });
+  }
+  const controlledProductIds = controlledProducts.map((p) => p.id);
+  const productById = new Map(controlledProducts.map((p) => [p.id, p]));
+
+  // Saldo anterior ao período: soma de TODAS as movimentações anteriores ao início
+  // do mês consultado — garante que o "saldo anterior" do livro sempre bate com o
+  // saldo real de estoque, mesmo que o tenant nunca tenha gerado este livro antes.
+  const priorMovements = await prisma.stockMovement.groupBy({
+    by: ["productId"],
+    where: { tenantId, productId: { in: controlledProductIds }, createdAt: { lt: periodStart } },
+    _sum: { quantity: true },
+  });
+  const priorBalanceByProduct = new Map(priorMovements.map((m) => [m.productId, Number(m._sum.quantity ?? 0)]));
+
+  const movements = await prisma.stockMovement.findMany({
+    where: { tenantId, productId: { in: controlledProductIds }, createdAt: { gte: periodStart, lt: periodEnd } },
+    orderBy: { createdAt: "asc" },
+  });
+
+  // Referências cruzadas para o documento de origem de cada linha do livro — exigido
+  // pela escrituração (não basta "saiu X unidades", precisa apontar a nota/receita
+  // de origem): vendas (saída/dispensação, com a receita retida vinculada) e pedidos
+  // de compra (entrada).
+  const saleIdempotencyKeys = movements
+    .filter((m) => m.type === "SALE_OUT" && m.referenceId)
+    .map((m) => m.referenceId as string);
+  const purchaseOrderIds = movements.filter((m) => m.type === "PURCHASE_IN" && m.referenceId).map((m) => m.referenceId as string);
+
+  const [sales, purchaseOrders] = await Promise.all([
+    saleIdempotencyKeys.length
+      ? prisma.sale.findMany({
+          where: { tenantId, idempotencyKey: { in: saleIdempotencyKeys } },
+          select: {
+            idempotencyKey: true,
+            id: true,
+            createdAt: true,
+            items: {
+              select: {
+                productId: true,
+                prescriptionRecord: {
+                  select: { prescriptionType: true, patientDocument: true, electronicPrescriptionNumber: true },
+                },
+              },
+            },
+          },
+        })
+      : Promise.resolve([]),
+    purchaseOrderIds.length
+      ? prisma.purchaseOrder.findMany({
+          where: { tenantId, id: { in: purchaseOrderIds } },
+          select: { id: true, orderNumber: true, supplier: { select: { name: true } }, createdAt: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  const saleByIdempotencyKey = new Map(sales.map((s) => [s.idempotencyKey, s]));
+  const purchaseOrderById = new Map(purchaseOrders.map((po) => [po.id, po]));
+
+  const runningBalance = new Map(priorBalanceByProduct);
+  const ledgerRows = movements.map((movement) => {
+    const quantity = Number(movement.quantity);
+    const previous = runningBalance.get(movement.productId) ?? 0;
+    const next = previous + quantity;
+    runningBalance.set(movement.productId, next);
+
+    let documentReference: string | null = null;
+    let patientDocument: string | null = null;
+    if (movement.type === "SALE_OUT" && movement.referenceId) {
+      const sale = saleByIdempotencyKey.get(movement.referenceId);
+      const saleItem = sale?.items.find((item) => item.productId === movement.productId);
+      documentReference = sale ? `Venda ${sale.id}` : null;
+      patientDocument = saleItem?.prescriptionRecord?.patientDocument ?? null;
+    } else if (movement.type === "PURCHASE_IN" && movement.referenceId) {
+      const po = purchaseOrderById.get(movement.referenceId);
+      documentReference = po ? `Pedido de Compra #${po.orderNumber} — ${po.supplier.name}` : null;
+    }
+
+    const product = productById.get(movement.productId)!;
+    return {
+      id: movement.id,
+      productId: movement.productId,
+      productName: product.name,
+      productSku: product.sku,
+      productNcm: product.ncm,
+      movementType: movement.type,
+      quantity,
+      balanceAfter: next,
+      documentReference,
+      patientDocument,
+      createdAt: movement.createdAt,
+    };
+  });
+
+  const summary = controlledProducts.map((product) => {
+    const rows = ledgerRows.filter((r) => r.productId === product.id);
+    const entradas = rows.filter((r) => r.quantity > 0).reduce((sum, r) => sum + r.quantity, 0);
+    const saidas = rows.filter((r) => r.quantity < 0).reduce((sum, r) => sum + Math.abs(r.quantity), 0);
+    return {
+      productId: product.id,
+      productName: product.name,
+      productSku: product.sku,
+      saldoAnterior: priorBalanceByProduct.get(product.id) ?? 0,
+      entradas,
+      saidas,
+      saldoAtual: runningBalance.get(product.id) ?? priorBalanceByProduct.get(product.id) ?? 0,
+    };
+  });
+
+  return res.json({ success: true, data: { month, summary, movements: ledgerRows }, error: null });
+});

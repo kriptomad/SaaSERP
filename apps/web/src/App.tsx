@@ -51,6 +51,7 @@ import { RecipesPage } from "./modules/recipes/RecipesPage";
 import { ProductionBatchPage } from "./modules/recipes/ProductionBatchPage";
 import { PrescriptionRecordsPage } from "./modules/pharmacy/PrescriptionRecordsPage";
 import { ExpiringBatchesPage } from "./modules/pharmacy/ExpiringBatchesPage";
+import { SngpcLedgerPage } from "./modules/pharmacy/SngpcLedgerPage";
 import { ClientCreditStatementPage } from "./modules/registrations/ClientCreditStatementPage";
 import { VariantTurnoverReportPage } from "./modules/product-variants/VariantTurnoverReportPage";
 import { VariantQuickLookupPage } from "./modules/product-variants/VariantQuickLookupPage";
@@ -195,6 +196,7 @@ export function App() {
             <Route path="/producao" element={<ProductionBatchPage />} />
             <Route path="/farmacia/receitas" element={<PrescriptionRecordsPage />} />
             <Route path="/farmacia/validades" element={<ExpiringBatchesPage />} />
+            <Route path="/farmacia/sngpc" element={<SngpcLedgerPage />} />
             <Route path="/cadastros/clientes/credito" element={<ClientCreditStatementPage />} />
             <Route path="/varejo/giro-variantes" element={<VariantTurnoverReportPage />} />
             <Route path="/varejo/consulta-variantes" element={<VariantQuickLookupPage />} />

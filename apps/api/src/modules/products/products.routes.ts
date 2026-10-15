@@ -64,6 +64,8 @@ productsRouter.get("/products", requireAuth, async (req: Request, res: Response)
       purchaseUnit: true,
       unitConversionFactor: true,
       isKitComposition: true,
+      requiresPrescriptionRetention: true,
+      isControlledSubstance: true,
       updatedAt: true,
     },
   });

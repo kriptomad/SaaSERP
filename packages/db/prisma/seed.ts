@@ -435,6 +435,10 @@ const OWNER_PERMISSIONS = [
   "pharmacy:prescription-record:read",
   "pharmacy:prescription-record:write",
   "pharmacy:expiring-batches:read",
+  // Capítulo 4.5 — SNGPC: livro de escrituração de substâncias controladas é dado
+  // sensível de compliance regulatório (ANVISA); restrito a OWNER/MANAGER, nunca ao
+  // balcão (CASHIER só registra a retenção pontual, nunca extrai o livro completo).
+  "pharmacy:sngpc-ledger:read",
   // Capítulo 11.4 — Loja de Roupas/Moda: trocas por tamanho/defeito e crédito de loja.
   "catalog:exchange:read",
   "catalog:exchange:write",
@@ -453,8 +457,6 @@ const OWNER_PERMISSIONS = [
   "personalization:order:read",
   "personalization:order:write",
 ];
-
-const MANAGER_PERMISSIONS = [
   "pdv:sale:create",
   "pdv:sale:cancel",
   "pdv:cash-register:open",
@@ -505,6 +507,7 @@ const MANAGER_PERMISSIONS = [
   "pharmacy:prescription-record:read",
   "pharmacy:prescription-record:write",
   "pharmacy:expiring-batches:read",
+  "pharmacy:sngpc-ledger:read",
   "catalog:exchange:read",
   "catalog:exchange:write",
   "optical:lab:read",

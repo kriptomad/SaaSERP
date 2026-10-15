@@ -49,11 +49,43 @@ export interface ExpiringBatch {
   urgency: ExpiringBatchUrgency;
 }
 
+export interface SngpcLedgerMovement {
+  id: string;
+  productId: string;
+  productName: string;
+  productSku: string;
+  productNcm: string | null;
+  movementType: "PURCHASE_IN" | "SALE_OUT" | "ADJUSTMENT" | "RECIPE_CONSUMPTION" | "PRODUCTION_CONSUMPTION" | "LOSS" | "RETURN";
+  quantity: number;
+  balanceAfter: number;
+  documentReference: string | null;
+  patientDocument: string | null;
+  createdAt: string;
+}
+
+export interface SngpcLedgerSummaryRow {
+  productId: string;
+  productName: string;
+  productSku: string;
+  saldoAnterior: number;
+  entradas: number;
+  saidas: number;
+  saldoAtual: number;
+}
+
+export interface SngpcLedger {
+  month: string;
+  summary: SngpcLedgerSummaryRow[];
+  movements: SngpcLedgerMovement[];
+}
+
 export const pharmacyApi = {
   listPrescriptionRecords: (params?: { clientId?: string; productId?: string }) =>
     api.get<PrescriptionRecord[]>("/prescription-records", params),
   createPrescriptionRecord: (input: PrescriptionRecordInput) => api.post<PrescriptionRecord>("/prescription-records", input),
   listExpiringBatches: (daysAhead?: number) => api.get<ExpiringBatch[]>("/pharmacy/expiring-batches", { daysAhead }),
+  getSngpcLedger: (month: string, productId?: string) =>
+    api.get<SngpcLedger>("/pharmacy/sngpc-ledger", productId ? { month, productId } : { month }),
 };
 
 export const PRESCRIPTION_TYPE_LABEL: Record<PrescriptionType, string> = {

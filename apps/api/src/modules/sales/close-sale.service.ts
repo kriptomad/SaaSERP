@@ -190,12 +190,17 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
         const product = await tx.product.findFirstOrThrow({ where: { id: item.productId, tenantId: input.tenantId } });
 
         // Trava regulatória SNGPC/SNCR (Capítulo 4.5): produto de retenção obrigatória
-        // (Lista B/tarja preta — Portaria 344/1998, RDC 1.000/2025) exige os dados
-        // mínimos da receita no próprio payload da venda — sem isso a transação nunca
-        // commita, e nenhum StockMovement/SaleItem deste carrinho é persistido.
-        if (product.requiresPrescriptionRetention && !item.prescriptionData) {
+        // (Lista B/tarja preta — Portaria 344/1998, RDC 1.000/2025) OU classificado como
+        // substância controlada (escrituração SNGPC) exige os dados mínimos da receita
+        // no próprio payload da venda — sem isso a transação nunca commita, e nenhum
+        // StockMovement/SaleItem deste carrinho é persistido. GAP DE AUDITORIA FECHADO:
+        // antes só `requiresPrescriptionRetention` era checado; `isControlledSubstance`
+        // (flag independente no schema — um produto pode ser controlado sem estar na
+        // Lista B de retenção obrigatória, ex. alguns antimicrobianos RDC 20/2011) não
+        // disparava trava alguma, permitindo dispensação de controlado sem receita.
+        if ((product.requiresPrescriptionRetention || product.isControlledSubstance) && !item.prescriptionData) {
           throw new PrescriptionRequiredError(
-            `Produto ${product.name} exige retenção de receita (Lista B/tarja preta — Portaria 344/1998, RDC 1.000/2025). Informe prescriptionData (prescriptionType, patientDocument) para concluir a venda.`,
+            `Produto ${product.name} exige retenção de receita (Lista B/tarja preta/substância controlada — Portaria 344/1998, RDC 1.000/2025). Informe prescriptionData (prescriptionType, patientDocument) para concluir a venda.`,
           );
         }
 

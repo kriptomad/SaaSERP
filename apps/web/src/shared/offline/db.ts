@@ -14,6 +14,12 @@ export interface CachedProduct {
   stockQuantitySnapshot: number;
   isWeighted: boolean;
   category: string | null;
+  // Farmácia/Drogaria (Capítulo 4.5 — Portaria 344/1998, RDC 1.000/2025): replicados no
+  // catálogo offline para que o PDV consiga exigir os dados de receita no momento da
+  // montagem do carrinho, mesmo sem rede — sem isso, a venda só falharia no servidor
+  // (ou, pior, na sincronização em segundo plano, quando o cliente já saiu da loja).
+  requiresPrescriptionRetention: boolean;
+  isControlledSubstance: boolean;
 }
 
 export interface PendingSale {

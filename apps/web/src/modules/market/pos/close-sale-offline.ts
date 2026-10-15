@@ -11,7 +11,19 @@ export interface CloseSaleOfflineInput {
   // Capítulo 4.1.1 — cliente identificado via CPF na nota, usado pelo backend para
   // creditar pontos de fidelidade (EARN) na mesma transação de fechamento da venda.
   clientId?: string | null;
-  items: { productId: string; quantity: number; unitPrice: number }[];
+  items: {
+    productId: string;
+    quantity: number;
+    unitPrice: number;
+    // Farmácia/Drogaria (Capítulo 4.5): dados de receita retida, coletados no próprio
+    // carrinho do PDV (ver PosPage) quando o item exige — propagados tal como estão
+    // para o payload sincronizado; o backend aplica a trava final em close-sale.service.ts.
+    prescriptionData?: {
+      prescriptionType: "NOTIFICACAO_B_AZUL" | "RECEITA_A_AMARELA" | "RECEITA_ELETRONICA_SNCR";
+      patientDocument: string;
+      electronicPrescriptionNumber?: string;
+    };
+  }[];
   paymentMethod: "CASH" | "DEBIT_CARD" | "CREDIT_CARD" | "PIX" | "BOLETO" | "STORE_CREDIT";
   amountTendered?: number;
 }

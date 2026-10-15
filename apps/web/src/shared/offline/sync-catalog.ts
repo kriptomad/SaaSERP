@@ -15,6 +15,8 @@ interface RemoteProduct {
   stockQuantity: string;
   isWeighted: boolean;
   category: string | null;
+  requiresPrescriptionRetention: boolean;
+  isControlledSubstance: boolean;
 }
 
 export async function syncProductCatalog(): Promise<{ syncedCount: number }> {
@@ -43,6 +45,8 @@ export async function syncProductCatalog(): Promise<{ syncedCount: number }> {
         stockQuantitySnapshot: Number(product.stockQuantity),
         isWeighted: product.isWeighted,
         category: product.category,
+        requiresPrescriptionRetention: product.requiresPrescriptionRetention,
+        isControlledSubstance: product.isControlledSubstance,
       });
     }
     await offlineDb.syncState.put({ key: "lastSyncedAt", value: syncedAt });

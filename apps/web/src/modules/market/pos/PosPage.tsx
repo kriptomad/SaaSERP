@@ -20,6 +20,11 @@ import {
   Alert,
   ToggleButton,
   ToggleButtonGroup,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  MenuItem,
 } from "@mui/material";
 import { useLiveQuery } from "dexie-react-hooks";
 import { useAuth } from "../../../auth/AuthContext";
@@ -42,6 +47,16 @@ interface CartLine {
   name: string;
   quantity: number;
   unitPrice: number;
+  // Farmácia/Drogaria (Capítulo 4.5 — Portaria 344/1998, RDC 1.000/2025): preenchido
+  // no momento da adição ao carrinho quando o produto exige retenção de receita ou é
+  // substância controlada — sem isso o fechamento de venda é rejeitado pelo backend
+  // (close-sale.service.ts), mas aqui coletamos ANTES, no PDV, para o operador nunca
+  // ser surpreendido com um erro ao finalizar depois de já ter montado todo o carrinho.
+  prescriptionData?: {
+    prescriptionType: "NOTIFICACAO_B_AZUL" | "RECEITA_A_AMARELA" | "RECEITA_ELETRONICA_SNCR";
+    patientDocument: string;
+    electronicPrescriptionNumber?: string;
+  };
 }
 
 type PaymentMethod = "CASH" | "DEBIT_CARD" | "CREDIT_CARD";
@@ -76,6 +91,12 @@ export function PosPage() {
   const [printerConnected, setPrinterConnected] = useState(false);
   const [hardwareMessage, setHardwareMessage] = useState<string | null>(null);
   const [tefBusy, setTefBusy] = useState(false);
+  const [prescriptionPrompt, setPrescriptionPrompt] = useState<{
+    product: { id: string; name: string; unitPrice: number };
+    prescriptionType: "NOTIFICACAO_B_AZUL" | "RECEITA_A_AMARELA" | "RECEITA_ELETRONICA_SNCR";
+    patientDocument: string;
+    electronicPrescriptionNumber: string;
+  } | null>(null);
   const printerRef = useRef<ThermalPrinterService | null>(null);
   const scaleRef = useRef<ScaleService | null>(null);
   const keystrokeTimestampsRef = useRef<number[]>([]);
@@ -132,16 +153,50 @@ export function PosPage() {
 
   const total = useMemo(() => cart.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0), [cart]);
 
-  function addToCart(product: { id: string; name: string; unitPrice: number }, quantity = 1) {
+  function addToCart(
+    product: { id: string; name: string; unitPrice: number },
+    quantity = 1,
+    prescriptionData?: CartLine["prescriptionData"],
+  ) {
     setCart((prev) => {
       const existing = prev.find((line) => line.productId === product.id);
       if (existing) {
         return prev.map((line) =>
-          line.productId === product.id ? { ...line, quantity: line.quantity + quantity } : line,
+          line.productId === product.id
+            ? { ...line, quantity: line.quantity + quantity, prescriptionData: prescriptionData ?? line.prescriptionData }
+            : line,
         );
       }
-      return [...prev, { productId: product.id, name: product.name, quantity, unitPrice: product.unitPrice }];
+      return [...prev, { productId: product.id, name: product.name, quantity, unitPrice: product.unitPrice, prescriptionData }];
     });
+  }
+
+  // Farmácia/Drogaria (Capítulo 4.5): intercepta o clique no produto ANTES de
+  // adicionar ao carrinho quando ele exige retenção de receita/é controlado — abre o
+  // diálogo de captura em vez de adicionar direto, e só adiciona de fato ao confirmar.
+  function handleProductClick(product: {
+    id: string;
+    name: string;
+    unitPrice: number;
+    requiresPrescriptionRetention: boolean;
+    isControlledSubstance: boolean;
+  }) {
+    if (product.requiresPrescriptionRetention || product.isControlledSubstance) {
+      setPrescriptionPrompt({ product, prescriptionType: "RECEITA_A_AMARELA", patientDocument: "", electronicPrescriptionNumber: "" });
+      return;
+    }
+    addToCart(product);
+  }
+
+  function confirmPrescriptionPrompt() {
+    if (!prescriptionPrompt) return;
+    const { product, prescriptionType, patientDocument, electronicPrescriptionNumber } = prescriptionPrompt;
+    addToCart(product, 1, {
+      prescriptionType,
+      patientDocument,
+      ...(electronicPrescriptionNumber ? { electronicPrescriptionNumber } : {}),
+    });
+    setPrescriptionPrompt(null);
   }
 
   // Capítulo 11.8 — Material de Construção/Ferragens: venda fracionada (ex. 2,4m de
@@ -343,7 +398,12 @@ export function PosPage() {
       cashRegisterId,
       cashierId: user.id,
       clientId: client?.id,
-      items: cart.map((line) => ({ productId: line.productId, quantity: line.quantity, unitPrice: line.unitPrice })),
+      items: cart.map((line) => ({
+        productId: line.productId,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        ...(line.prescriptionData ? { prescriptionData: line.prescriptionData } : {}),
+      })),
       paymentMethod,
     }).catch(async (error) => {
       // A adquirente já aprovou o débito no cartão do cliente, mas o ERP falhou ao
@@ -422,9 +482,16 @@ export function PosPage() {
           <List dense>
             {(products ?? []).map((product) => (
               <Stack key={product.id} direction="row" alignItems="center">
-                <ListItemButton sx={{ flex: 1 }} onClick={() => addToCart(product)}>
+                <ListItemButton sx={{ flex: 1 }} onClick={() => handleProductClick(product)}>
                   <ListItemText
-                    primary={product.name}
+                    primary={
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <span>{product.name}</span>
+                        {(product.requiresPrescriptionRetention || product.isControlledSubstance) && (
+                          <Chip size="small" color="warning" label="Receita" />
+                        )}
+                      </Stack>
+                    }
                     secondary={`SKU ${product.sku} · R$ ${product.unitPrice.toFixed(2)} · estoque local: ${product.stockQuantitySnapshot}`}
                   />
                 </ListItemButton>
@@ -471,7 +538,12 @@ export function PosPage() {
               <Stack key={line.productId} direction="row" alignItems="center" spacing={1} sx={{ py: 0.5 }}>
                 <ListItemText
                   sx={{ flex: 1 }}
-                  primary={line.name}
+                  primary={
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <span>{line.name}</span>
+                      {line.prescriptionData && <Chip size="small" color="info" label="Receita retida" />}
+                    </Stack>
+                  }
                   secondary={`R$ ${(line.quantity * line.unitPrice).toFixed(2)}`}
                 />
                 <TextField
@@ -525,6 +597,61 @@ export function PosPage() {
           </Button>
         </Paper>
       </Stack>
+
+      {/* Farmácia/Drogaria (Capítulo 4.5 — Portaria 344/1998, RDC 1.000/2025): captura
+          obrigatória antes de adicionar ao carrinho qualquer item de retenção/controlado.
+          Sem CPF do paciente preenchido, o botão de confirmar permanece desabilitado —
+          nunca é possível adicionar o item "para resolver depois". */}
+      <Dialog open={Boolean(prescriptionPrompt)} onClose={() => setPrescriptionPrompt(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Receita obrigatória — {prescriptionPrompt?.product.name}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Alert severity="warning">
+              Este produto exige retenção de receita (Lista B/tarja preta ou substância controlada — Portaria
+              344/1998, RDC 1.000/2025). A venda não poderá ser concluída sem estes dados.
+            </Alert>
+            <TextField
+              select
+              label="Tipo de receituário"
+              value={prescriptionPrompt?.prescriptionType ?? "RECEITA_A_AMARELA"}
+              onChange={(e) =>
+                setPrescriptionPrompt((prev) =>
+                  prev ? { ...prev, prescriptionType: e.target.value as typeof prev.prescriptionType } : prev,
+                )
+              }
+            >
+              <MenuItem value="NOTIFICACAO_B_AZUL">Notificação de Receita B (Azul)</MenuItem>
+              <MenuItem value="RECEITA_A_AMARELA">Receita A (Amarela)</MenuItem>
+              <MenuItem value="RECEITA_ELETRONICA_SNCR">Receita Eletrônica (SNCR)</MenuItem>
+            </TextField>
+            <TextField
+              label="CPF do paciente"
+              value={prescriptionPrompt?.patientDocument ?? ""}
+              onChange={(e) =>
+                setPrescriptionPrompt((prev) => (prev ? { ...prev, patientDocument: e.target.value } : prev))
+              }
+              placeholder="Somente números"
+            />
+            <TextField
+              label="Número da receita eletrônica (SNCR, se houver)"
+              value={prescriptionPrompt?.electronicPrescriptionNumber ?? ""}
+              onChange={(e) =>
+                setPrescriptionPrompt((prev) => (prev ? { ...prev, electronicPrescriptionNumber: e.target.value } : prev))
+              }
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPrescriptionPrompt(null)}>Cancelar</Button>
+          <Button
+            variant="contained"
+            disabled={(prescriptionPrompt?.patientDocument.replace(/\D/g, "").length ?? 0) < 11}
+            onClick={confirmPrescriptionPrompt}
+          >
+            Confirmar e adicionar ao carrinho
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
