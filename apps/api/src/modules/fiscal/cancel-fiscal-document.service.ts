@@ -54,7 +54,14 @@ export async function cancelFiscalDocument(
   }
 
   const deadlineHours = CANCELLATION_DEADLINE_HOURS[fiscalDocument.type];
-  const hoursSinceAuthorization = (Date.now() - fiscalDocument.createdAt.getTime()) / (1000 * 60 * 60);
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 5): o prazo contava a partir de
+  // `createdAt` (criação local do registro PENDING), nunca do instante real de
+  // autorização na SEFAZ (`authorizedAt`). Documentos antigos (anteriores a esta
+  // correção) podem não ter `authorizedAt` preenchido por falha de backfill — nesse
+  // caso extremo, cai em `createdAt` apenas como último recurso, nunca permitindo
+  // silenciosamente um cancelamento sem nenhuma verificação de prazo.
+  const referenceTimestamp = fiscalDocument.authorizedAt ?? fiscalDocument.createdAt;
+  const hoursSinceAuthorization = (Date.now() - referenceTimestamp.getTime()) / (1000 * 60 * 60);
   if (hoursSinceAuthorization > deadlineHours) {
     // Fora do prazo legal de cancelamento simples — a única via restante é a emissão
     // de uma NF-e/NFC-e de DEVOLUÇÃO (fluxo de venda inverso, CFOP 1202/2202), nunca

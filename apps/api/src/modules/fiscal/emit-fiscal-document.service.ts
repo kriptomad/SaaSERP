@@ -317,6 +317,7 @@ export async function emitFiscalDocument(
       data: {
         status: "AUTHORIZED",
         accessKey,
+        authorizedAt: new Date(),
         xmlStorageKey: typeof body.caminho_xml_nota_fiscal === "string" ? body.caminho_xml_nota_fiscal : null,
         danfeStorageKey: typeof body.caminho_danfe === "string" ? body.caminho_danfe : null,
         qrCodeUrl: typeof body.qrcode_url === "string" ? body.qrcode_url : null,

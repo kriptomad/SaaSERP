@@ -1802,6 +1802,13 @@ model FiscalDocument {
   focusNfeMensagemSefaz        String?               @db.Text
   qrCodeUrl                    String? // "qrcode_url" — renderizado na notinha térmica (Capítulo 21.7) para o consumidor validar no site da SEFAZ
   danfeStorageKey              String? // "caminho_danfe" devolvido pela Focus NFe — path do DANFE/HTML hospedado por eles, referenciado na reimpressão (Capítulo 21.7)
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 5, Capítulo 21.19.2): o prazo legal de
+  // cancelamento (30 min para NFC-e, Ajuste SINIEF 07/2018) deve contar a partir da
+  // autorização REAL na SEFAZ, nunca de `createdAt` (momento em que o FiscalDocument
+  // é criado localmente como PENDING, que pode anteceder a autorização em segundos
+  // ou minutos de latência de rede/fila). Gravado no exato instante em que a Focus
+  // NFe confirma `status === "autorizado"` (emit-fiscal-document.service.ts).
+  authorizedAt                 DateTime?
   // Campos da Reforma Tributária (Capítulo 21.3) — convivem com os tributos legados
   // durante toda a transição 2026-2033; nulos fora da janela em que o tributo se aplica.
   legacyIcmsAmount             Decimal?              @db.Decimal(12, 2) // ICMS "antigo", calculado enquanto vigente
