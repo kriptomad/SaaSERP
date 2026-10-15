@@ -33,6 +33,7 @@ import { schedulingRouter } from "./modules/scheduling/scheduling.routes";
 import { comandaRouter } from "./modules/comanda/comanda.routes";
 import { publicBookingRouter } from "./modules/public-booking/public-booking.routes";
 import { publicOnlineStoreRouter } from "./modules/online-store/public-online-store.routes";
+import { publicApiRouter } from "./modules/integrations/public-api.routes";
 import { onlineStoreRouter } from "./modules/online-store/online-store.routes";
 import { clientRecordsRouter } from "./modules/client-records/client-records.routes";
 import { platformAdminAuthRouter } from "./modules/platform-admin/platform-admin-auth.routes";
@@ -179,6 +180,13 @@ app.use(lookupRouter);
 // nunca exigir sessão de tenant para o cliente final agendar sozinho.
 app.use(publicBookingRouter);
 app.use(publicOnlineStoreRouter);
+
+// Capítulo 15.4 — API REST pública self-service dos tenants (integrações
+// externas: e-commerce, ERP contábil parceiro), autenticada por TenantApiKey
+// via requireApiKey (não por cookie/JWT de sessão). Aplica sua própria cadeia
+// de tenantContextMiddleware/tenantLockoutMiddleware por rota (ver header do
+// arquivo) — por isso também vem antes do authMiddleware global de sessão.
+app.use(publicApiRouter);
 
 // Autenticação do painel de plataforma (SUPER_ADMIN) — sistema de sessão totalmente
 // separado do tenant (Capítulo 14.2), com seu próprio esquema JWT de 3 audiences.
