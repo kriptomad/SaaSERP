@@ -8,14 +8,17 @@
 // em pseudocódigo, mas NENHUM arquivo real existia — zero rota REST.
 // ESCOPO DESTA 1ª IMPLEMENTAÇÃO (honestamente delimitado):
 //   - CRUD de `ReportDefinition` + execução real via `executeReportDefinition()`.
-//   - CRUD de `ScheduledReport` (persistência do agendamento).
+//   - CRUD de `ScheduledReport` (persistência do agendamento) + disparo real do
+//     cron via BullMQ Job Scheduler (`reportGenerationQueue.upsertJobScheduler`,
+//     consumido por `workers/scheduled-report-generation.worker.ts`, que executa
+//     o relatório e envia PDF/XLSX por e-mail aos `recipientEmails` — GAP DE
+//     AUDITORIA FECHADO na rodada 3, antes a fila existia mas não tinha
+//     produtor nem worker).
 //   - GET/PUT de `DashboardLayout` por usuário.
-// PENDENTE (flagado explicitamente): o disparo real do cron (`cronExpression`)
-// via BullMQ que de fato executa e envia o `ScheduledReport` por e-mail
-// (Capítulo 18.2 — nenhum worker ainda lê esta tabela), e o suporte a
-// dimensões com JOIN entre modelos no `DATASET_REGISTRY` (Capítulo 18.5 —
-// importação assistida de dados — continua como gap totalmente separado, não
-// coberto aqui). Exportação PDF/XLSX sob demanda via GET
+// PENDENTE (flagado explicitamente): suporte a dimensões com JOIN entre modelos
+// no `DATASET_REGISTRY` (Capítulo 18.5 — importação assistida de dados —
+// continua como gap totalmente separado, não coberto aqui). Exportação
+// PDF/XLSX sob demanda via GET
 // /report-definitions/:id/export?format=pdf|xlsx JÁ IMPLEMENTADA
 // (report-export.service.ts, exceljs + pdfkit).
 import { Router, Request, Response } from "express";
@@ -28,6 +31,8 @@ import { DATASET_REGISTRY } from "./dataset-registry";
 import { buildAbcCurveReport, buildVariantAbcCurveReport } from "./abc-curve-report.service";
 import { buildCollectionTurnoverReport } from "./collection-turnover-report.service";
 import { buildReportPdf, buildReportXlsx } from "./report-export.service";
+import { reportGenerationQueue } from "../../lib/queue";
+import type { ScheduledReportJobData } from "../../workers/scheduled-report-generation.worker";
 
 export const reportsRouter = Router();
 
@@ -295,6 +300,18 @@ reportsRouter.post("/scheduled-reports", requireAuth, async (req: Request, res: 
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Definição de relatório não encontrada." } });
   }
   const schedule = await prisma.scheduledReport.create({ data: { tenantId, ...parsed.data } });
+  if (schedule.active) {
+    try {
+      await reportGenerationQueue.upsertJobScheduler(
+        schedule.id,
+        { pattern: schedule.cronExpression },
+        { name: "run-scheduled-report", data: { scheduledReportId: schedule.id } satisfies ScheduledReportJobData },
+      );
+    } catch (error) {
+      await prisma.scheduledReport.delete({ where: { id: schedule.id } });
+      return res.status(400).json({ success: false, data: null, error: { code: "INVALID_CRON", message: `Expressão cron inválida: ${(error as Error).message}` } });
+    }
+  }
   return res.status(201).json({ success: true, data: schedule, error: null });
 });
 
@@ -317,6 +334,21 @@ reportsRouter.patch("/scheduled-reports/:id", requireAuth, async (req: Request, 
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Agendamento não encontrado." } });
   }
   const updated = await prisma.scheduledReport.update({ where: { id: existing.id }, data: parsed.data });
+  // Resincroniza o Job Scheduler do BullMQ com o novo estado: remove sempre
+  // primeiro (idempotente mesmo se nunca existiu) e recria apenas se continuar
+  // ativo, cobrindo tanto mudança de cron quanto desativação/reativação.
+  try {
+    await reportGenerationQueue.removeJobScheduler(updated.id);
+    if (updated.active) {
+      await reportGenerationQueue.upsertJobScheduler(
+        updated.id,
+        { pattern: updated.cronExpression },
+        { name: "run-scheduled-report", data: { scheduledReportId: updated.id } satisfies ScheduledReportJobData },
+      );
+    }
+  } catch (error) {
+    return res.status(400).json({ success: false, data: null, error: { code: "INVALID_CRON", message: `Expressão cron inválida: ${(error as Error).message}` } });
+  }
   return res.json({ success: true, data: updated, error: null });
 });
 
@@ -327,6 +359,7 @@ reportsRouter.delete("/scheduled-reports/:id", requireAuth, async (req: Request,
   if (!existing) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Agendamento não encontrado." } });
   }
+  await reportGenerationQueue.removeJobScheduler(existing.id);
   await prisma.scheduledReport.delete({ where: { id: existing.id } });
   return res.json({ success: true, data: { id: existing.id }, error: null });
 });

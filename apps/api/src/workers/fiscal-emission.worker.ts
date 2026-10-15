@@ -13,7 +13,11 @@
 import { Worker, Job } from "bullmq";
 import { prisma, runWithTenantContext } from "@filitech/db";
 import { queueRedisConnection, QUEUE_NAMES } from "../lib/queue";
-import { emitFiscalDocument, FocusNfeNotConfiguredError } from "../modules/fiscal/emit-fiscal-document.service";
+import {
+  emitFiscalDocument,
+  FocusNfeNotConfiguredError,
+  FiscalDataValidationError,
+} from "../modules/fiscal/emit-fiscal-document.service";
 import { notifyTenant } from "../modules/notifications/notify.service";
 
 interface EmitFiscalDocumentJobData {
@@ -31,18 +35,23 @@ export async function fiscalEmissionProcessor(
       const result = await emitFiscalDocument(prisma, { tenantId, fiscalDocumentId });
       return { authorized: result.authorized };
     } catch (error) {
-      if (error instanceof FocusNfeNotConfiguredError) {
-        // Falha de configuração (nunca de rede/SEFAZ) — não adianta tentar de novo
-        // automaticamente até o lojista configurar a credencial; avisa uma única vez
-        // por tentativa e deixa o BullMQ esgotar as `attempts` configuradas em
-        // enqueueFiscalEmission (5, backoff exponencial) antes de desistir.
+      if (error instanceof FocusNfeNotConfiguredError || error instanceof FiscalDataValidationError) {
+        // Falha de configuração/cadastro (nunca de rede/SEFAZ) — não adianta tentar de
+        // novo automaticamente até o lojista corrigir a credencial ou o cadastro do
+        // produto/tenant; avisa uma única vez por tentativa e deixa o BullMQ esgotar
+        // as `attempts` configuradas em enqueueFiscalEmission (5, backoff
+        // exponencial) antes de desistir.
         await notifyTenant({
           tenantId,
           category: "FISCAL_DOCUMENT_REJECTED",
           severity: "CRITICAL",
-          title: "Emissão fiscal bloqueada — integração não configurada",
+          title:
+            error instanceof FiscalDataValidationError
+              ? "Emissão fiscal bloqueada — cadastro incompleto"
+              : "Emissão fiscal bloqueada — integração não configurada",
           body: error.message,
-          linkRoute: "/configuracoes/integracoes",
+          linkRoute:
+            error instanceof FiscalDataValidationError ? "/cadastros/produtos" : "/configuracoes/integracoes",
           sourceType: "FISCAL_DOCUMENT",
           sourceId: fiscalDocumentId,
         });

@@ -43,6 +43,12 @@ const FOCUS_NFE_BREAKER = "focus-nfe";
 
 export { FocusNfeNotConfiguredError };
 
+// Falha de cadastro (nunca de rede/SEFAZ): produto sem NCM ou tenant sem UF de
+// origem cadastrados. Emitir com NCM "00000000" (fictício) ou UF chutada para a
+// SEFAZ é pior do que bloquear — gera autuação fiscal real por informação
+// incorreta na nota. Bloqueia a emissão e orienta o lojista a corrigir o cadastro.
+export class FiscalDataValidationError extends Error {}
+
 export interface FiscalDocumentEmissionResult {
   authorized: boolean;
   accessKey: string | null;
@@ -200,8 +206,18 @@ export async function emitFiscalDocument(
   const items = await Promise.all(
     productItems.map(async (item, index) => {
       const product = item.product!;
-      const ncm = product.ncm ?? "00000000";
-      const uf = product.originUf ?? tenant.uf ?? "SP";
+      if (!product.ncm) {
+        throw new FiscalDataValidationError(
+          `Produto "${product.name}" (SKU ${product.sku}) não possui NCM cadastrado. Preencha o NCM em Cadastros > Produtos antes de emitir documentos fiscais — a emissão com NCM fictício resulta em autuação pela SEFAZ.`,
+        );
+      }
+      const uf = product.originUf ?? tenant.uf;
+      if (!uf) {
+        throw new FiscalDataValidationError(
+          `Não foi possível determinar a UF de origem para o produto "${product.name}" (SKU ${product.sku}): nem o produto nem o tenant possuem UF cadastrada. Configure a UF do estabelecimento em Configurações > Empresa.`,
+        );
+      }
+      const ncm = product.ncm;
       const destinationUf = sale.client?.uf ?? uf;
       const nicheCode = product.nicheCode ?? "MARKET";
       const { cfop, cstCsosn } = await resolveItemFiscalCodes(prisma, {

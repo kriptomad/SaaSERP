@@ -177,13 +177,18 @@ app.use(platformAdminRouter);
 app.use(platformSecretsRouter);
 app.use(systemStatusRouter);
 app.use(databaseBackupsRouter);
-app.use(multiFilialRouter);
-app.use(supportTicketsRouter);
 
 // A partir daqui, toda rota é tenant-aware: auth -> contexto de tenant -> lockout -> requireAuth.
 app.use(authMiddleware);
 app.use(tenantContextMiddleware);
 app.use(tenantLockoutMiddleware);
+
+// multiFilialRouter e supportTicketsRouter usam apenas requireAuth (sessão de
+// tenant), então precisam vir DEPOIS da cadeia acima — caso contrário chegam sem
+// req.session (401 incorreto) e não recebem o lockout 402 global (gap achado em
+// mega-audit rodada 3).
+app.use(multiFilialRouter);
+app.use(supportTicketsRouter);
 
 app.get("/me", requireAuth, (req, res) => {
   res.json({ session: req.session });

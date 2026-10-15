@@ -24,11 +24,17 @@ export interface SendEmailResult {
   message: string;
 }
 
+export interface EmailAttachment {
+  filename: string;
+  contentBase64: string;
+}
+
 export async function sendTransactionalEmail(
   tenantId: string,
   toEmail: string,
   subject: string,
   htmlBody: string,
+  attachments?: EmailAttachment[],
 ): Promise<SendEmailResult> {
   const credential = await prisma.integrationCredential.findUnique({
     where: { tenantId_provider_environment: { tenantId, provider: "EMAIL_RESEND", environment: "PRODUCTION" } },
@@ -59,6 +65,9 @@ export async function sendTransactionalEmail(
         to: [toEmail],
         subject,
         html: htmlBody,
+        ...(attachments && attachments.length > 0
+          ? { attachments: attachments.map((a) => ({ filename: a.filename, content: a.contentBase64 })) }
+          : {}),
       }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });

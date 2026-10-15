@@ -27,6 +27,8 @@ import crypto from "node:crypto";
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { requirePlatformAdminAuth, requireSuperAdmin } from "./platform-admin-auth.middleware";
 import { signSessionToken } from "../auth/jwt.service";
+import { webhookDeliveryQueue } from "../../lib/queue";
+import type { WebhookDeliveryJobData } from "../../lib/webhook-dispatch";
 
 export const platformAdminRouter = Router();
 
@@ -449,10 +451,10 @@ platformAdminRouter.get("/platform-admin/webhook-endpoints/:id/deliveries", requ
   return res.json({ success: true, data: deliveries, error: null });
 });
 
-// Reenvio manual de uma entrega falha — o disparo real de HTTP (com assinatura
-// HMAC-SHA256 do signingSecret) é delegado à mesma função de entrega de webhook
-// usada originalmente (apps/api/src/lib/queue.ts, fila BullMQ existente), nunca
-// duplicado aqui.
+// Reenvio manual de uma entrega falha — enfileira um novo job na MESMA fila
+// BullMQ (webhook-delivery) consumida por webhook-delivery.worker.ts, que faz o
+// disparo HTTP real com assinatura HMAC-SHA256 e grava uma nova linha em
+// WebhookDelivery com o resultado. Nunca duplica a lógica de entrega aqui.
 platformAdminRouter.post("/platform-admin/webhook-deliveries/:id/replay", requirePlatformAdminAuth, async (req: Request, res: Response) => {
   const delivery = await prisma.webhookDelivery.findUnique({ where: { id: req.params.id }, include: { endpoint: true } });
   if (!delivery) {
@@ -461,9 +463,11 @@ platformAdminRouter.post("/platform-admin/webhook-deliveries/:id/replay", requir
   if (!delivery.endpoint.active) {
     return res.status(409).json({ success: false, data: null, error: { code: "ENDPOINT_INACTIVE", message: "O endpoint de destino está inativo." } });
   }
-  // PENDENTE: disparo HTTP real + assinatura HMAC ainda não implementado (worker
-  // de webhook dedicado não existe nesta passada) — esta rota registra a
-  // intenção de replay e a auditoria, mas não substitui o worker de entrega real.
+  await webhookDeliveryQueue.add(
+    "deliver",
+    { endpointId: delivery.endpointId, eventType: delivery.eventType, payload: delivery.payload as Record<string, unknown> } satisfies WebhookDeliveryJobData,
+    { attempts: 6, backoff: { type: "exponential", delay: 5_000 } },
+  );
   await writeAuditLog(req, "WEBHOOK_REPLAY_REQUESTED", "WebhookDelivery", delivery.id, { endpointId: delivery.endpointId, eventType: delivery.eventType });
   return res.status(202).json({ success: true, data: { id: delivery.id, replayQueued: true }, error: null });
 });
