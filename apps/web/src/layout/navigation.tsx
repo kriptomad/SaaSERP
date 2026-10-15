@@ -41,6 +41,15 @@ import CardGiftcardIcon from "@mui/icons-material/CardGiftcard";
 import ConstructionIcon from "@mui/icons-material/Construction";
 import TireRepairIcon from "@mui/icons-material/TireRepair";
 import LocalCarWashIcon from "@mui/icons-material/LocalCarWash";
+import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
+import SavingsIcon from "@mui/icons-material/Savings";
+import TrendingUpIcon from "@mui/icons-material/TrendingUp";
+import CreditCardIcon from "@mui/icons-material/CreditCard";
+import FlagIcon from "@mui/icons-material/Flag";
+import PieChartIcon from "@mui/icons-material/PieChart";
+import RepeatIcon from "@mui/icons-material/Repeat";
+import AccountTreeIcon from "@mui/icons-material/AccountTree";
+import CalculateIcon from "@mui/icons-material/Calculate";
 
 export interface NavItem {
   id: string;
@@ -147,6 +156,32 @@ export const NAV_GROUPS: NavGroup[] = [
     tenantTypes: ["ACCOUNTING_OFFICE"],
     items: [
       { id: "carteira-clientes", label: "Carteira de Clientes", path: "/contabilidade/carteira", icon: <AccountBalanceIcon /> },
+    ],
+  },
+  {
+    id: "pessoal",
+    label: "Filitech Pessoal",
+    tenantTypes: ["PERSONAL"],
+    items: [
+      { id: "pessoal-dashboard", label: "Painel", path: "/pessoal", icon: <DashboardIcon /> },
+      { id: "pessoal-carteiras", label: "Contas e carteiras", path: "/pessoal/carteiras", icon: <AccountBalanceWalletIcon /> },
+      { id: "pessoal-transacoes", label: "Transações", path: "/pessoal/transacoes", icon: <SwapVertIcon /> },
+      { id: "pessoal-recorrencias", label: "Lançamentos recorrentes", path: "/pessoal/recorrencias", icon: <RepeatIcon /> },
+      { id: "pessoal-orcamento", label: "Orçamento", path: "/pessoal/orcamento", icon: <PieChartIcon /> },
+      { id: "pessoal-metas", label: "Metas", path: "/pessoal/metas", icon: <FlagIcon /> },
+      { id: "pessoal-dividas", label: "Dívidas", path: "/pessoal/dividas", icon: <CreditCardIcon /> },
+      { id: "pessoal-contas-pagar", label: "Contas a pagar", path: "/pessoal/contas", icon: <ReceiptLongIcon /> },
+    ],
+  },
+  {
+    id: "pessoal-patrimonio",
+    label: "Patrimônio e Investimentos",
+    tenantTypes: ["PERSONAL"],
+    items: [
+      { id: "pessoal-investimentos", label: "Investimentos", path: "/pessoal/investimentos", icon: <TrendingUpIcon /> },
+      { id: "pessoal-patrimonio", label: "Patrimônio líquido", path: "/pessoal/patrimonio", icon: <SavingsIcon /> },
+      { id: "pessoal-open-finance", label: "Open Finance", path: "/pessoal/open-finance", icon: <AccountTreeIcon /> },
+      { id: "pessoal-carne-leao", label: "Carnê-Leão", path: "/pessoal/carne-leao", icon: <CalculateIcon /> },
     ],
   },
   {

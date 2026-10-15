@@ -1,7 +1,7 @@
 // apps/web/src/pages/DashboardPage.tsx
 import { useEffect, useState } from "react";
 import { Box, Typography, Paper, Button, Chip } from "@mui/material";
-import { Link as RouterLink } from "react-router-dom";
+import { Link as RouterLink, Navigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { checkHealth } from "../api/client";
 
@@ -14,6 +14,13 @@ export function DashboardPage() {
       .then((res) => setHealth(`${res.status} (db: ${res.database})`))
       .catch(() => setHealth("indisponível"));
   }, []);
+
+  // Tenant PERSONAL (household B2C) não usa o dashboard de varejo/PDV — redireciona
+  // para o painel do Filitech Pessoal (mesmo padrão usado para ACCOUNTING_OFFICE em
+  // outras rotas raiz do app).
+  if (tenant?.tenantType === "PERSONAL") {
+    return <Navigate to="/pessoal" replace />;
+  }
 
   return (
     <Box sx={{ p: { xs: 2, md: 4 }, maxWidth: 720, mx: "auto" }}>

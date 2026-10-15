@@ -68,6 +68,18 @@ import { RevenueDashboardPage } from "./modules/platform-admin/RevenueDashboardP
 import { ModuleCatalogPage } from "./modules/platform-admin/ModuleCatalogPage";
 import { AuditLogViewerPage } from "./modules/platform-admin/AuditLogViewerPage";
 import { SystemParametersPage } from "./modules/platform-admin/SystemParametersPage";
+import { PersonalDashboardPage } from "./modules/personal-finance/PersonalDashboardPage";
+import { PersonalAccountsPage } from "./modules/personal-finance/PersonalAccountsPage";
+import { PersonalTransactionsPage } from "./modules/personal-finance/PersonalTransactionsPage";
+import { PersonalRecurrenceRulesPage } from "./modules/personal-finance/PersonalRecurrenceRulesPage";
+import { PersonalBudgetPage } from "./modules/personal-finance/PersonalBudgetPage";
+import { PersonalGoalsPage } from "./modules/personal-finance/PersonalGoalsPage";
+import { PersonalDebtsPage } from "./modules/personal-finance/PersonalDebtsPage";
+import { PersonalInvestmentsPage } from "./modules/personal-finance/PersonalInvestmentsPage";
+import { PersonalBillsPage } from "./modules/personal-finance/PersonalBillsPage";
+import { PersonalNetWorthPage } from "./modules/personal-finance/PersonalNetWorthPage";
+import { PersonalOpenFinanceConsentsPage } from "./modules/personal-finance/PersonalOpenFinanceConsentsPage";
+import { PersonalTaxToolsPage } from "./modules/personal-finance/PersonalTaxToolsPage";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const { isAuthenticated } = useAuth();
@@ -171,6 +183,18 @@ export function App() {
             <Route path="/ferragens/faturamento" element={<BusinessAccountInvoicePage />} />
             <Route path="/pneus/garantia" element={<TireWarrantyPage />} />
             <Route path="/estetica-automotiva/fila" element={<CarWashQueuePage />} />
+            <Route path="/pessoal" element={<PersonalDashboardPage />} />
+            <Route path="/pessoal/carteiras" element={<PersonalAccountsPage />} />
+            <Route path="/pessoal/transacoes" element={<PersonalTransactionsPage />} />
+            <Route path="/pessoal/recorrencias" element={<PersonalRecurrenceRulesPage />} />
+            <Route path="/pessoal/orcamento" element={<PersonalBudgetPage />} />
+            <Route path="/pessoal/metas" element={<PersonalGoalsPage />} />
+            <Route path="/pessoal/dividas" element={<PersonalDebtsPage />} />
+            <Route path="/pessoal/investimentos" element={<PersonalInvestmentsPage />} />
+            <Route path="/pessoal/contas" element={<PersonalBillsPage />} />
+            <Route path="/pessoal/patrimonio" element={<PersonalNetWorthPage />} />
+            <Route path="/pessoal/open-finance" element={<PersonalOpenFinanceConsentsPage />} />
+            <Route path="/pessoal/carne-leao" element={<PersonalTaxToolsPage />} />
             <Route
               path="/admin/licenciamento"
               element={

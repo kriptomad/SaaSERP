@@ -11,6 +11,8 @@ import { startPluggySyncWorker } from "./workers/pluggy-sync.worker";
 import { startExpireLoyaltyPointsWorker, scheduleExpireLoyaltyPointsJob } from "./workers/expire-loyalty-points.worker";
 import { startEnforceScheduledCancellationsWorker, scheduleEnforceScheduledCancellationsJob } from "./workers/enforce-scheduled-cancellations.worker";
 import { startWebhookDeliveryWorker } from "./workers/webhook-delivery.worker";
+import { startPersonalRecurrenceGenerationWorker, schedulePersonalRecurrenceGenerationJob } from "./workers/personal-recurrence-generation.worker";
+import { startPersonalBillRemindersWorker, schedulePersonalBillRemindersJob } from "./workers/personal-bill-reminders.worker";
 
 async function main() {
   const log = createModuleLogger("worker");
@@ -24,8 +26,12 @@ async function main() {
   const enforceScheduledCancellationsWorker = startEnforceScheduledCancellationsWorker();
   await scheduleEnforceScheduledCancellationsJob();
   const webhookDeliveryWorker = startWebhookDeliveryWorker();
+  const personalRecurrenceGenerationWorker = startPersonalRecurrenceGenerationWorker();
+  await schedulePersonalRecurrenceGenerationJob();
+  const personalBillRemindersWorker = startPersonalBillRemindersWorker();
+  await schedulePersonalBillRemindersJob();
 
-  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker]) {
+  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker]) {
     worker.on("completed", (job) => {
       log.info({ queue: job.queueName, jobId: job.id, result: job.returnvalue }, "job concluído");
     });

@@ -52,6 +52,15 @@ export const QUEUE_NAMES = {
   // `dispatchWebhookEvent()` após o commit do evento (ex.: venda fechada, NF-e
   // autorizada) — nunca síncrono dentro da transação que gerou o evento.
   WEBHOOK_DELIVERY: "webhook-delivery",
+  // Capítulo 22.4 — motor de recorrência do Filitech Pessoal: gera automaticamente a
+  // próxima PersonalTransaction de cada PersonalRecurrenceRule ativa cujo
+  // `nextOccurrenceAt` já chegou, consumida por
+  // `workers/personal-recurrence-generation.worker.ts`.
+  PERSONAL_RECURRENCE_GENERATION: "personal-recurrence-generation",
+  // Capítulo 22.8 — lembrete de contas a pagar do Filitech Pessoal
+  // (PersonalBill.reminderDaysBefore) e marcação automática de OVERDUE após o
+  // vencimento, consumida por `workers/personal-bill-reminders.worker.ts`.
+  PERSONAL_BILL_REMINDERS: "personal-bill-reminders",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -79,3 +88,11 @@ export const scheduledSubscriptionCancellationsQueue = new Queue(QUEUE_NAMES.SCH
 });
 
 export const webhookDeliveryQueue = new Queue(QUEUE_NAMES.WEBHOOK_DELIVERY, { connection: queueRedisConnection });
+
+export const personalRecurrenceGenerationQueue = new Queue(QUEUE_NAMES.PERSONAL_RECURRENCE_GENERATION, {
+  connection: queueRedisConnection,
+});
+
+export const personalBillRemindersQueue = new Queue(QUEUE_NAMES.PERSONAL_BILL_REMINDERS, {
+  connection: queueRedisConnection,
+});
