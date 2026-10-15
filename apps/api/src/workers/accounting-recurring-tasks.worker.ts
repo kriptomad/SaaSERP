@@ -66,8 +66,11 @@ function buildMonthlyPlan(now: Date, taxRegime: string): TaskPlanItem[] {
   const plan: TaskPlanItem[] = [
     // Fechamento de folha/pró-labore: comum a qualquer regime com empregados/sócios.
     { taskType: "FOLHA_FECHAMENTO", dueDate: dueDateInMonth(now, 5), competencia: monthlyCompetencia },
-    // EFD-Reinf/DCTFWeb: declarações de retenções/folha, aplicáveis a qualquer regime
-    // com folha — mesmo critério usado em ecf-reinf-dctfweb.service.ts.
+    // EFD_REINF_ENVIO (nome do bucket no enum AccountingTaskType): na prática cobre o
+    // envio do worksheet de pró-labore via eSocial S-1200/S-1210 (não EFD-Reinf
+    // R-2010/R-2020, que tratam de cessão de mão de obra entre PJs — ver nota de
+    // compliance em ecf-reinf-dctfweb.service.ts) + DCTFWeb, aplicáveis a qualquer
+    // regime com folha/pró-labore.
     { taskType: "EFD_REINF_ENVIO", dueDate: dueDateInMonth(now, 15), competencia: monthlyCompetencia },
     { taskType: "DCTFWEB_GERACAO", dueDate: dueDateInMonth(now, 15), competencia: monthlyCompetencia },
   ];

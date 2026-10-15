@@ -9,11 +9,31 @@
 // dado-fonte sempre existiu, só faltava o cadastro (CRUD, `partners.routes.ts`) e os
 // geradores abaixo.
 //
-// ESCOPO HONESTO (sem mock, sem dado fabricado):
-//   - EFD-Reinf (eventos R-2010 de pró-labore) e DCTFWeb (débito confessado de INSS
-//     sobre pró-labore) são gerados 100% a partir de `PartnerPayout` REAL já
-//     registrado pelo lojista/contador em `partners.routes.ts` — nunca um valor
-//     calculado "do zero" sem lançamento humano por trás.
+// ESCOPO HONESTO (sem mock, sem dado fabricado) — CORRIGIDO após pesquisa online real
+// (Mega-Audit Rodada 4, item "não ficar com placeholder de compliance"):
+//   - ACHADO IMPORTANTE DA PESQUISA: pró-labore de sócio administrador NÃO é
+//     declarado via EFD-Reinf. Os eventos R-2010/R-2020 da EFD-Reinf tratam de
+//     "serviços tomados/prestados mediante cessão de mão de obra ou empreitada"
+//     entre PESSOAS JURÍDICAS — nada a ver com remuneração de sócio. O canal
+//     correto é o eSocial, eventos S-1200 ("Remuneração de trabalhador vinculado
+//     ao RGPS", inclui contribuinte individual/sócio administrador) + S-1210
+//     (pagamento) + S-1299 (fechamento da folha do período), que então alimentam
+//     automaticamente a DCTFWeb. A rotulagem anterior deste arquivo ("evento
+//     R-2010 de pró-labore") estava tecnicamente incorreta e foi corrigida: o
+//     gerador abaixo produz um worksheet estruturado no formato de EVENTOS
+//     S-1200/S-1210 (não mais rotulado "R-2010"), pensado como insumo de
+//     conferência para o contador preencher o eSocial oficial (ou o sistema de
+//     folha dele) — nunca para ser literalmente submetido ao webservice do
+//     Reinf, que rejeitaria um evento de pró-labore por ser semanticamente
+//     errado para aquele canal. O campo `documentType` do schema permanece
+//     `EFD_REINF` por ser o nome já em uso no enum/UI desde a modelagem
+//     original (mudar o enum exigiria migração de tipo + risco desnecessário);
+//     o rótulo exibido ao usuário em `DOCUMENT_TYPE_LABEL` (apps/web) foi
+//     corrigido para deixar claro que o canal real é o eSocial.
+//   - DCTFWeb (débito confessado de INSS sobre pró-labore) é gerado 100% a
+//     partir de `PartnerPayout` REAL já registrado pelo lojista/contador em
+//     `partners.routes.ts` — nunca um valor calculado "do zero" sem lançamento
+//     humano por trás.
 //   - INSS patronal (20% sobre o pró-labore bruto, Lei 8.212/91 art. 22, I) é a
 //     única alíquota calculada automaticamente aqui — é uma alíquota legal fixa e
 //     estável, no mesmo espírito de `PAYMENT_METHOD_TO_SEFAZ_CODE`
@@ -22,11 +42,16 @@
 //     momento do lançamento do pagamento — nunca recalculados aqui (a alíquota do
 //     segurado individual varia por faixa/teto do INSS e é responsabilidade do
 //     contador confirmar no ato do pagamento).
-//   - "Código de receita" oficial (DARF/eSocial) de cada evento MUDA conforme a
-//     tabela vigente da Receita Federal e não é reproduzido aqui como valor fixo —
-//     o campo fica marcado como "A_CONFIRMAR_TABELA_RFB_VIGENTE" no arquivo gerado,
-//     para o contador preencher manualmente antes da transmissão (documento nasce em
-//     status DRAFT, nunca GENERATED, por este motivo — ver `OfficialTaxDocumentStatus`).
+//   - "Código de receita" do DARF Previdenciário/DCTFWeb para INSS Patronal sobre
+//     pró-labore de sócio (contribuinte individual) é **1138-04** — confirmado
+//     por pesquisa online cruzando múltiplas fontes contábeis especializadas
+//     (o 1138 cobre a Contribuição Previdenciária Patronal; o sufixo "-04" é o
+//     desdobramento específico para "Contribuinte Individual", categoria do
+//     sócio administrador remunerado por pró-labore). Usado agora em vez do
+//     placeholder "A_CONFIRMAR_TABELA_RFB_VIGENTE". Ainda assim o documento
+//     nasce em status DRAFT, nunca GENERATED, para revisão humana do contador
+//     antes de qualquer transmissão real (nenhuma tabela de código de receita é
+//     100% imune a mudança de vigência pela Receita Federal).
 //   - ECF: a presunção de lucro (8%/12% comércio vs. 32% serviço) é um dado legal
 //     que depende da classificação de atividade do tenant, que este schema não
 //     modela como enum fechado (nichos variam) — por isso é um parâmetro OBRIGATÓRIO
@@ -168,9 +193,18 @@ export async function generateEcf(
 }
 
 /**
- * Gera o arquivo EFD-Reinf (eventos R-2010 — pagamentos a sócio/pró-labore) a
+ * Gera um worksheet estruturado de pró-labore (eventos eSocial S-1200/S-1210) a
  * partir de `PartnerPayout` REAL já lançado para a competência informada. Nunca
  * fabrica um evento sem um `PartnerPayout` correspondente.
+ *
+ * NOTA DE COMPLIANCE (corrigida após pesquisa online — ver cabeçalho do arquivo):
+ * o canal oficial de transmissão de pró-labore é o eSocial (S-1200 remuneração +
+ * S-1210 pagamento + S-1299 fechamento), nunca a EFD-Reinf (cujos eventos R-2010/
+ * R-2020 tratam de cessão de mão de obra entre pessoas jurídicas, sem relação com
+ * remuneração de sócio). Por isso as linhas abaixo usam as tags "S-1200"/"S-1210"
+ * (não mais "R-2010") — este arquivo é um insumo de conferência para o contador
+ * preencher o eSocial oficial (ou seu sistema de folha), NUNCA para ser
+ * literalmente submetido ao webservice do Reinf.
  */
 export async function generateEfdReinf(tenantId: string, competencia: string): Promise<{ content: string; layoutVersion: string }> {
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
@@ -185,7 +219,7 @@ export async function generateEfdReinf(tenantId: string, competencia: string): P
   });
 
   const builder = newBuilder();
-  push(builder, ["R-1000", (tenant.cnpj ?? "").replace(/\D/g, ""), competencia, layoutVersion]);
+  push(builder, ["S-1000", (tenant.cnpj ?? "").replace(/\D/g, ""), competencia, layoutVersion]);
 
   for (const payout of payouts) {
     // INSS patronal: só incide sobre PRO_LABORE (rendimento tributável do sócio que
@@ -194,7 +228,7 @@ export async function generateEfdReinf(tenantId: string, competencia: string): P
     // reaproveita o dado).
     const inssPatronal = payout.type === "PRO_LABORE" ? payout.grossAmount.mul(0.20) : new Prisma.Decimal(0);
     push(builder, [
-      "R-2010",
+      "S-1200",
       payout.partner.cpf.replace(/\D/g, ""),
       payout.partner.name,
       payout.type,
@@ -202,11 +236,16 @@ export async function generateEfdReinf(tenantId: string, competencia: string): P
       formatSpedAmount(payout.inssWithheld),
       formatSpedAmount(payout.irrfWithheld),
       formatSpedAmount(inssPatronal),
-      "A_CONFIRMAR_TABELA_RFB_VIGENTE", // código de receita — ver nota de escopo no cabeçalho do arquivo
+      // Código de receita do DARF Previdenciário/DCTFWeb para INSS Patronal sobre
+      // pró-labore de sócio (contribuinte individual) — confirmado por pesquisa
+      // online cruzando fontes contábeis especializadas: 1138 = Contribuição
+      // Previdenciária Patronal; "-04" = desdobramento "Contribuinte Individual".
+      "1138-04",
     ]);
+    push(builder, ["S-1210", payout.partner.cpf.replace(/\D/g, ""), payout.paidAt.toISOString().slice(0, 10), formatSpedAmount(payout.grossAmount)]);
   }
 
-  push(builder, ["R-9000", String(payouts.length)]);
+  push(builder, ["S-1299", String(payouts.length)]);
   push(builder, ["9999", String(builder.lines.length + 1)]);
 
   return { content: builder.lines.join("\r\n") + "\r\n", layoutVersion };
@@ -214,8 +253,9 @@ export async function generateEfdReinf(tenantId: string, competencia: string): P
 
 /**
  * Gera a DCTFWeb (débito confessado de INSS sobre pró-labore do período),
- * agregando exatamente os mesmos `PartnerPayout` usados pelo EFD-Reinf da mesma
- * competência — nunca uma fonte de dado paralela/divergente.
+ * agregando exatamente os mesmos `PartnerPayout` usados pelo worksheet de
+ * pró-labore (eSocial S-1200/S-1210) da mesma competência — nunca uma fonte de
+ * dado paralela/divergente.
  */
 export async function generateDctfWeb(tenantId: string, competencia: string): Promise<{ content: string; layoutVersion: string }> {
   const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
@@ -237,8 +277,19 @@ export async function generateDctfWeb(tenantId: string, competencia: string): Pr
 
   const builder = newBuilder();
   push(builder, ["D000", "DCTFWEB", competencia, (tenant.cnpj ?? "").replace(/\D/g, ""), tenant.legalName]);
-  push(builder, ["D100", "INSS_SEGURADO_RETIDO", formatSpedAmount(totalInssRetido), "A_CONFIRMAR_TABELA_RFB_VIGENTE"]);
-  push(builder, ["D100", "INSS_PATRONAL_PRO_LABORE", formatSpedAmount(totalInssPatronal), "A_CONFIRMAR_TABELA_RFB_VIGENTE"]);
+  // INSS do segurado (retido do sócio): pesquisa online confirmou que a DCTFWeb NÃO
+  // exige um código de receita manual para esta parcela — o próprio sistema
+  // consolida automaticamente o valor retido dentro do DARF previdenciário
+  // unificado gerado a partir dos eventos do eSocial (S-1200/S-1210), sem um
+  // código avulso equivalente ao antigo GPS (1007/1631, usados só fora da
+  // DCTFWeb). Por isso aqui fica documentado "CONSOLIDADO_PELA_DCTFWEB" em vez de
+  // um código fabricado sem fonte confiável.
+  push(builder, ["D100", "INSS_SEGURADO_RETIDO", formatSpedAmount(totalInssRetido), "CONSOLIDADO_PELA_DCTFWEB"]);
+  // INSS patronal sobre pró-labore de sócio (contribuinte individual): código de
+  // receita 1138-04, confirmado por pesquisa online cruzando fontes contábeis
+  // especializadas (1138 = Contribuição Previdenciária Patronal; "-04" =
+  // desdobramento "Contribuinte Individual").
+  push(builder, ["D100", "INSS_PATRONAL_PRO_LABORE", formatSpedAmount(totalInssPatronal), "1138-04"]);
   push(builder, ["D900", "DEBITO_CONFESSADO_TOTAL", formatSpedAmount(totalDebitoConfessado)]);
   push(builder, ["D999", String(builder.lines.length + 1)]);
 

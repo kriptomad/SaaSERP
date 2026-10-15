@@ -159,7 +159,7 @@ export const DOCUMENT_TYPE_LABEL: Record<OfficialTaxDocumentGenerationType, stri
   ECD: "ECD — Escrituração Contábil Digital",
   DEFIS: "DEFIS — Simples Nacional",
   ECF: "ECF — Escrituração Contábil Fiscal",
-  EFD_REINF: "EFD-Reinf — Eventos de pró-labore",
+  EFD_REINF: "Pró-labore — eSocial S-1200/S-1210 (alimenta DCTFWeb)",
   DCTFWEB: "DCTFWeb — Débitos de INSS sobre pró-labore",
   INFORME_RENDIMENTOS_SOCIO: "Informe de Rendimentos do Sócio",
 };
