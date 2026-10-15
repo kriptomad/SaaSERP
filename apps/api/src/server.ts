@@ -325,6 +325,13 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 // rede (apps/desktop/src/screens/HostNetworkConfig.tsx).
 const PORT = Number(process.env.PORT ?? 3333);
 const HOST = process.env.HOST ?? "0.0.0.0";
-app.listen(PORT, HOST, () => {
-  logger.info({ port: PORT, host: HOST }, "filitech-api ouvindo");
-});
+// Em NODE_ENV=test (suíte de integração via supertest, ex.: tests/tenant-isolation.test.ts)
+// o app é importado sem subir um listener de verdade — evita porta ocupada/EADDRINUSE
+// quando vários arquivos de teste importam o módulo em paralelo.
+if (process.env.NODE_ENV !== "test") {
+  app.listen(PORT, HOST, () => {
+    logger.info({ port: PORT, host: HOST }, "filitech-api ouvindo");
+  });
+}
+
+export { app };
