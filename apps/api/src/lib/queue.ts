@@ -81,6 +81,11 @@ export const QUEUE_NAMES = {
   // `pg_dump`/shell — ver nota em `workers/encrypted-database-backup.worker.ts`),
   // consumida por esse worker. Cron diário 03:00 + disparo manual pelo painel admin.
   DATABASE_BACKUP: "database-backup",
+  // Capítulo 22.6 — atualização diária automática de cotação de ações/FIIs (via
+  // brapi.dev, ver nota de desvio de provedor em `lib/brapi-client.ts`) do Filitech
+  // Pessoal, consumida por `workers/personal-investment-quotes.worker.ts`. Cron
+  // diário após o fechamento do pregão da B3.
+  PERSONAL_INVESTMENT_QUOTES: "personal-investment-quotes",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -130,3 +135,7 @@ export const dataImportExecutionQueue = new Queue(QUEUE_NAMES.DATA_IMPORT_EXECUT
 });
 
 export const databaseBackupQueue = new Queue(QUEUE_NAMES.DATABASE_BACKUP, { connection: queueRedisConnection });
+
+export const personalInvestmentQuotesQueue = new Queue(QUEUE_NAMES.PERSONAL_INVESTMENT_QUOTES, {
+  connection: queueRedisConnection,
+});

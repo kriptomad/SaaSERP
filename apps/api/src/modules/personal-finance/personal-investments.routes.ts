@@ -74,10 +74,14 @@ personalInvestmentsRouter.post("/personal/investments", requireAuth, async (req:
 
 const updatePriceSchema = z.object({ currentPrice: z.number().positive(), priceDate: z.coerce.date().optional() });
 
-// Atualização manual do preço de mercado (o job diário de cotação via BrasilAPI,
-// Capítulo 22.6, fica pendente nesta correção — ver nota no final do arquivo).
-// Grava histórico diário em PersonalInvestmentPriceHistory de forma idempotente
-// (@@unique([investmentId, priceDate])) para nunca duplicar o ponto do gráfico.
+// Atualização MANUAL do preço de mercado — usada para os assetType sem fonte pública
+// de cotação automática (TESOURO_DIRETO, CDB, LCI_LCA, CRIPTO, PREVIDENCIA_PRIVADA,
+// POUPANCA) e como fallback/correção manual mesmo para ACOES/FII, que já têm
+// atualização diária automática via `workers/personal-investment-quotes.worker.ts`
+// (mega-audit round 3, r3-personal-finance-brasilapi — ver nota de desvio de
+// provedor BrasilAPI -> brapi.dev em `lib/brapi-client.ts`). Grava histórico diário em
+// PersonalInvestmentPriceHistory de forma idempotente (@@unique([investmentId,
+// priceDate])) para nunca duplicar o ponto do gráfico.
 personalInvestmentsRouter.patch("/personal/investments/:id/price", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialWrite(req, res))) return;
   const parsed = updatePriceSchema.safeParse(req.body);
