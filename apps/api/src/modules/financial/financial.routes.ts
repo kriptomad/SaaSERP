@@ -22,6 +22,11 @@ import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { createAsaasCustomer, createAsaasCharge, getAsaasPixQrCode, getAsaasBoletoIdentificationField } from "../billing/asaas.client";
 import { resolveServiceAnexo } from "../fiscal/fator-r-calculator.service";
+import {
+  calculateSimplesNacionalDas,
+  SimplesNacionalAnexoNaoCadastradoError,
+  SimplesNacionalRbt12AcimaDoSublimiteError,
+} from "../fiscal/simples-nacional-das.service";
 
 export const financialRouter = Router();
 
@@ -565,6 +570,38 @@ financialRouter.get("/reports/fator-r", requireAuth, async (req: Request, res: R
     },
     error: null,
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// APURAÇÃO REAL DO DAS — ALÍQUOTA EFETIVA DO SIMPLES NACIONAL (Capítulo 21.8)
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * GAP DE AUDITORIA CORRIGIDO (mega-audit round 2, achado crítico #1): até esta
+ * correção, não existia NENHUM cálculo real de alíquota efetiva do Simples
+ * Nacional por faixa de RBT12 — apenas o texto livre de
+ * `Tenant.simplesNacionalAnexo`. Exposto como relatório sob demanda (mesmo
+ * padrão de `/reports/fator-r`), nunca como um job que altera cadastro
+ * automaticamente.
+ */
+financialRouter.get("/reports/simples-nacional-das", requireAuth, async (req: Request, res: Response) => {
+  const { userId, role, tenantId } = req.session!;
+  if (!(await hasPermission(role, userId, "reports:*:read")) && !(await hasPermission(role, userId, "financial:*:read"))) {
+    return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite apurar o DAS do Simples Nacional." } });
+  }
+
+  try {
+    const result = await calculateSimplesNacionalDas(prisma, tenantId);
+    return res.json({ success: true, data: result, error: null });
+  } catch (err) {
+    if (err instanceof SimplesNacionalAnexoNaoCadastradoError) {
+      return res.status(400).json({ success: false, data: null, error: { code: "SIMPLES_NACIONAL_ANEXO_NAO_CADASTRADO", message: err.message } });
+    }
+    if (err instanceof SimplesNacionalRbt12AcimaDoSublimiteError) {
+      return res.status(409).json({ success: false, data: null, error: { code: "SIMPLES_NACIONAL_TETO_EXCEDIDO", message: err.message } });
+    }
+    throw err;
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────

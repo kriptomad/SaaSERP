@@ -112,7 +112,25 @@ export async function calculateTax(
   return {
     legacyIcmsAmount,
     legacyPisCofinsAmount:
-      tenant.taxRegime === "LUCRO_REAL" ? input.grossAmount.mul(0.0365) : new Prisma.Decimal(0),
+      // CORREÇÃO (mega-audit round 2, achado crítico #2): a alíquota de 3,65%
+      // (0,65% PIS + 3% COFINS, regime CUMULATIVO — Lei 9.718/1998, art. 8º) é a
+      // do LUCRO PRESUMIDO, não do LUCRO REAL. O Lucro Real é obrigatoriamente
+      // NÃO-CUMULATIVO (Leis 10.637/2002 e 10.833/2003): 1,65% PIS + 7,6% COFINS
+      // = 9,25% nominal sobre a receita bruta. O código anterior aplicava 3,65%
+      // ao Lucro Real (subavaliando o tributo devido) e NADA ao Lucro Presumido
+      // (omitindo PIS/COFINS por completo nesse regime) — ambos corrigidos aqui.
+      // Simplificação documentada: o regime não-cumulativo real permite o
+      // desconto de créditos sobre insumos/custos (o que reduziria o valor
+      // efetivo abaixo do nominal) — este motor aplica a alíquota NOMINAL cheia
+      // por segurança fiscal (nunca subestima o tributo), já que o cálculo pleno
+      // de créditos exigiria um módulo de apuração de créditos de PIS/COFINS
+      // não-cumulativo próprio, fora do escopo deste pacote (ver observação no
+      // Capítulo 21.6 do bible).
+      tenant.taxRegime === "LUCRO_REAL"
+        ? input.grossAmount.mul(0.0925)
+        : tenant.taxRegime === "LUCRO_PRESUMIDO"
+          ? input.grossAmount.mul(0.0365)
+          : new Prisma.Decimal(0), // SIMPLES_NACIONAL/MEI: já embutido no DAS, nunca destacado à parte
     ibsAmount: input.grossAmount.mul((rule.ibsAliquota ?? new Prisma.Decimal(0)).div(100)),
     cbsAmount: input.grossAmount.mul((rule.cbsAliquota ?? new Prisma.Decimal(0)).div(100)),
     selectiveTaxAmount: input.grossAmount.mul((rule.selectiveTaxAliquota ?? new Prisma.Decimal(0)).div(100)),

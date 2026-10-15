@@ -5,6 +5,17 @@
 // canal online/WhatsApp (Capítulo 8/20.2) a uma pessoa física em outro estado.
 import { Prisma } from "@filitech/db";
 
+// CORREÇÃO (mega-audit round 2, achado crítico #4): antes desta correção, a
+// ausência de `TaxRule` para a UF de origem/destino era silenciosamente coberta
+// por um "padrão conservador" de 12%/18% — o que podia subestimar ou superestimar
+// o DIFAL real de qualquer UF específica sem que ninguém percebesse (nenhuma venda
+// era bloqueada, nenhum alerta era emitido). Alinhado ao mesmo padrão "fail-closed"
+// já usado por `UsedVehicleTaxRuleMissingError` (used-vehicle-icms.service.ts) e
+// pela própria `calculateTax` (TaxRule ausente bloqueia a venda) — agora a ausência
+// de uma `TaxRule` de ICMS para a UF envolvida bloqueia a venda interestadual até
+// cadastro explícito da alíquota real daquela UF, nunca um chute silencioso.
+export class DifalTaxRuleMissingError extends Error {}
+
 interface DifalTaxEngineClient {
   tenant: {
     findUniqueOrThrow(args: { where: { id: string }; select: { taxRegime: true } }): Promise<{ taxRegime: string }>;
@@ -57,8 +68,19 @@ export async function calculateDifal(
     orderBy: [{ ncm: "desc" }, { effectiveFrom: "desc" }],
   });
 
-  const interstateAliquota = originRule?.icmsInterestadualAliquota ?? new Prisma.Decimal(12); // 12% como padrão conservador na ausência de regra específica (a maioria das rotas não-Sul/Sudeste)
-  const destinationInternalAliquota = destinationRule?.icmsAliquota ?? new Prisma.Decimal(18); // 18% é a alíquota interna mais comum entre as UFs na ausência de regra cadastrada
+  if (!originRule?.icmsInterestadualAliquota) {
+    throw new DifalTaxRuleMissingError(
+      `Nenhuma TaxRule com alíquota interestadual de ICMS cadastrada para a UF de origem ${input.originUf} — venda interestadual para consumidor final bloqueada até cadastro da regra (Capítulo 21.10).`,
+    );
+  }
+  if (!destinationRule?.icmsAliquota) {
+    throw new DifalTaxRuleMissingError(
+      `Nenhuma TaxRule com alíquota interna de ICMS cadastrada para a UF de destino ${input.destinationUf} — venda interestadual para consumidor final bloqueada até cadastro da regra (Capítulo 21.10).`,
+    );
+  }
+
+  const interstateAliquota = originRule.icmsInterestadualAliquota;
+  const destinationInternalAliquota = destinationRule.icmsAliquota;
 
   const icmsOrigem = input.grossAmount.mul(interstateAliquota).div(100);
   const difalDestino = input.grossAmount.mul(destinationInternalAliquota.minus(interstateAliquota)).div(100);
