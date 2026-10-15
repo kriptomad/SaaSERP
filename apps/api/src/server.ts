@@ -66,6 +66,8 @@ import { personalizationRouter } from "./modules/personalization/personalization
 import { businessAccountsRouter } from "./modules/construction/business-accounts.routes";
 import { tireWarrantyRouter } from "./modules/tires/tire-warranty.routes";
 import { carWashQueueRouter } from "./modules/car-wash/car-wash-queue.routes";
+import { dataExportRouter } from "./modules/data-portability/data-export.routes";
+import { dataImportRouter } from "./modules/data-portability/data-import.routes";
 import { productPricingRouter } from "./modules/catalog/product-pricing.routes";
 import { variantTurnoverRouter } from "./modules/catalog/variant-turnover.routes";
 import { prescriptionRecordsRouter } from "./modules/pharmacy/prescription-records.routes";
@@ -225,6 +227,8 @@ app.use(personalizationRouter);
 app.use(businessAccountsRouter);
 app.use(tireWarrantyRouter);
 app.use(carWashQueueRouter);
+app.use(dataExportRouter);
+app.use(dataImportRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ error: { code: "NOT_FOUND", message: "Rota não encontrada." } });

@@ -61,6 +61,21 @@ export const QUEUE_NAMES = {
   // (PersonalBill.reminderDaysBefore) e marcação automática de OVERDUE após o
   // vencimento, consumida por `workers/personal-bill-reminders.worker.ts`.
   PERSONAL_BILL_REMINDERS: "personal-bill-reminders",
+  // Capítulo 18.4 — geração do ZIP de exportação total de dados do tenant (CSVs +
+  // XMLs fiscais/fotos de O.S. do R2 + schema-reference.json), consumida por
+  // `workers/data-export-generation.worker.ts`. Job sob demanda (não repetível),
+  // enfileirado por `POST /data-export`.
+  DATA_EXPORT_GENERATION: "data-export-generation",
+  // Capítulo 18.5 — validação sem gravação de um `DataImportJob` (regras de negócio
+  // do cadastro manual rodadas linha a linha, sem tocar no banco), consumida por
+  // `workers/data-import-validation.worker.ts`. Job sob demanda, enfileirado por
+  // `POST /data-import/jobs/:id/validate`.
+  DATA_IMPORT_VALIDATION: "data-import-validation",
+  // Capítulo 18.5 — gravação transacional real dos registros validados, em lotes de
+  // 500 por transação Prisma, com progresso ao vivo via SSE, consumida por
+  // `workers/data-import-execution.worker.ts`. Job sob demanda, enfileirado por
+  // `POST /data-import/jobs/:id/confirm`.
+  DATA_IMPORT_EXECUTION: "data-import-execution",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -94,5 +109,17 @@ export const personalRecurrenceGenerationQueue = new Queue(QUEUE_NAMES.PERSONAL_
 });
 
 export const personalBillRemindersQueue = new Queue(QUEUE_NAMES.PERSONAL_BILL_REMINDERS, {
+  connection: queueRedisConnection,
+});
+
+export const dataExportGenerationQueue = new Queue(QUEUE_NAMES.DATA_EXPORT_GENERATION, {
+  connection: queueRedisConnection,
+});
+
+export const dataImportValidationQueue = new Queue(QUEUE_NAMES.DATA_IMPORT_VALIDATION, {
+  connection: queueRedisConnection,
+});
+
+export const dataImportExecutionQueue = new Queue(QUEUE_NAMES.DATA_IMPORT_EXECUTION, {
   connection: queueRedisConnection,
 });

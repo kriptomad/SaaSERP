@@ -24,9 +24,14 @@ export interface DecodedScaleBarcode {
   weightKg: number;
 }
 
-function isValidEan13CheckDigit(digits: string): boolean {
+// Exportado (além de usado internamente por decodeScaleBarcode) para ser reutilizado
+// pela validação de EAN-13 da Importação Assistida de Dados (Capítulo 18.5,
+// `workers/data-import-validation.worker.ts`) — mesma regra de negócio do cadastro
+// manual de produto, nunca reimplementada em um segundo lugar.
+export function isValidEan13CheckDigit(digits: string): boolean {
   // Algoritmo padrão EAN-13: soma alternada (peso 1/3) dos 12 primeiros dígitos,
   // dígito verificador = (10 - soma mod 10) mod 10.
+  if (!/^\d{13}$/.test(digits)) return false;
   let sum = 0;
   for (let i = 0; i < 12; i++) {
     const n = Number(digits[i]);

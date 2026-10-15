@@ -38,6 +38,8 @@ import { LicensingPage } from "./modules/licensing/LicensingPage";
 import { HardwarePage } from "./modules/settings/HardwarePage";
 import { BillingPage } from "./modules/settings/BillingPage";
 import { NotificationSettingsPage } from "./modules/notifications/NotificationSettingsPage";
+import { DataExportPage } from "./modules/settings/DataExportPage";
+import { DataImportWizardPage } from "./modules/settings/DataImportWizardPage";
 import { AbcCurveReportPage } from "./modules/reports/AbcCurveReportPage";
 import { WorkOrderReportsPage } from "./modules/work-orders/WorkOrderReportsPage";
 import { LiquorLedgerPage } from "./modules/liquor-ledger/LiquorLedgerPage";
@@ -163,6 +165,8 @@ export function App() {
             <Route path="/configuracoes/hardware" element={<HardwarePage />} />
             <Route path="/configuracoes/cobranca" element={<BillingPage />} />
             <Route path="/configuracoes/notificacoes" element={<NotificationSettingsPage />} />
+            <Route path="/configuracoes/dados" element={<DataExportPage />} />
+            <Route path="/configuracoes/importar-dados" element={<DataImportWizardPage />} />
             <Route path="/relatorios/curva-abc" element={<AbcCurveReportPage />} />
             <Route path="/os/relatorios" element={<WorkOrderReportsPage />} />
             <Route path="/adega/cascos" element={<LiquorLedgerPage />} />

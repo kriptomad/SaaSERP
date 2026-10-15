@@ -28,6 +28,18 @@ export const STORAGE_CATEGORIES = {
   "fiscal-xml": { allowedMimeTypes: ["text/xml", "application/xml"], maxBytes: 2 * 1024 * 1024 },
   "client-record-photos": { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"], maxBytes: 15 * 1024 * 1024 },
   "official-tax-documents": { allowedMimeTypes: ["text/plain", "application/xml"], maxBytes: 20 * 1024 * 1024 },
+  // Capítulo 18.4 — ZIP final gerado por `data-export-generation.worker.ts`, upload
+  // direto pelo backend (putObjectDirect), nunca pelo navegador.
+  "data-export": { allowedMimeTypes: ["application/zip"], maxBytes: 500 * 1024 * 1024 },
+  // Capítulo 18.5 — arquivo original (CSV/XLSX) enviado pelo lojista no wizard de
+  // importação assistida, via presignObjectUpload (upload direto do navegador).
+  "data-import-source": {
+    allowedMimeTypes: ["text/csv", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+    maxBytes: 20 * 1024 * 1024,
+  },
+  // Capítulo 18.5 — relatório de erros por linha (CSV) gerado pela etapa de
+  // validação, upload direto pelo backend.
+  "data-import-reports": { allowedMimeTypes: ["text/csv"], maxBytes: 10 * 1024 * 1024 },
 } as const;
 export type StorageCategory = keyof typeof STORAGE_CATEGORIES;
 
@@ -194,4 +206,27 @@ export async function testR2Connection(): Promise<{ success: boolean; message: s
   } catch (error) {
     return { success: false, message: `Falha ao conectar ao bucket R2: ${(error as Error).message}` };
   }
+}
+
+/**
+ * Download DIRETO pelo backend (sem presigned URL) — usado quando o próprio
+ * servidor precisa ler o binário para processá-lo (ex.: `exceljs` parseando o
+ * CSV/XLSX de importação, Capítulo 18.5; ou empacotar XMLs/fotos no ZIP de
+ * exportação total, Capítulo 18.4). Nunca usado para servir um download ao
+ * navegador — isso continua sendo `presignObjectDownload` (URL assinada direta no R2).
+ */
+export async function getObjectDirect(storageKey: string): Promise<Buffer> {
+  const { client, config } = await getR2Client();
+  const result = await client.send(new GetObjectCommand({ Bucket: config.bucket, Key: storageKey }));
+  const body = result.Body;
+  if (!body) {
+    throw new Error(`Objeto "${storageKey}" não retornou corpo de resposta do R2.`);
+  }
+  const chunks: Buffer[] = [];
+  // O SDK v3 tipa `Body` como `StreamingBlobPayloadOutputTypes` (union ampla); em
+  // runtime Node.js é sempre um `Readable` real, iterável com for-await.
+  for await (const chunk of body as AsyncIterable<Buffer | Uint8Array>) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }

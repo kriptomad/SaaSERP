@@ -213,6 +213,7 @@ model Tenant {
   onlineStoreSettings          OnlineStoreSettings? // Capítulo 8.5
   inventoryCounts              InventoryCount[] // Capítulo 17.9
   dataImportJobs               DataImportJob[] // Capítulo 18.5
+  tenantDataExportJobs         TenantDataExportJob[] // Capítulo 18.4
   referralCode                 ReferralCode? // Capítulo 2.8 — código próprio deste tenant como indicador
   referredAs                   Referral?                    @relation("ReferredTenant") // Capítulo 2.8 — registro de que este tenant foi indicado por outro
   loyaltyProgram               LoyaltyProgram? // Capítulo 4.1.1
@@ -603,6 +604,7 @@ model User {
   inventoryCountsApproved     InventoryCount[]             @relation("InventoryCountApprovedBy") // Capítulo 17.9
   inventoryCountItemsCounted  InventoryCountItem[] // Capítulo 17.9 — contagem individual em campo
   dataImportJobsCreated       DataImportJob[] // Capítulo 18.5
+  tenantDataExportJobsRequested TenantDataExportJob[] // Capítulo 18.4
   cashRegisterMovements       CashRegisterMovement[] // Capítulo 6.7 — sangrias/suprimentos realizados por este usuário
 
   @@unique([tenantId, email])
@@ -3294,6 +3296,33 @@ model DataImportJob {
 
   @@index([tenantId, status])
   @@map("data_import_jobs")
+}
+
+enum DataExportStatus {
+  QUEUED
+  GENERATING
+  COMPLETED
+  FAILED
+}
+
+// Capítulo 18.4 — Portabilidade Total de Dados: botão "Exportar todos os meus
+// dados" disponível em QUALQUER plano (inclusive Tier Free), gera um ZIP com todas
+// as tabelas tenant-scoped em CSV + documentos fiscais/fotos do R2 + schema-reference.json.
+model TenantDataExportJob {
+  id                String           @id @default(uuid())
+  tenantId          String
+  requestedByUserId String
+  status            DataExportStatus @default(QUEUED)
+  resultStorageKey  String? // ZIP final no R2, preenchido quando COMPLETED
+  failureReason     String?
+  createdAt         DateTime         @default(now())
+  completedAt       DateTime?
+
+  tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  requestedBy User   @relation(fields: [requestedByUserId], references: [id])
+
+  @@index([tenantId, status])
+  @@map("tenant_data_export_jobs")
 }
 
 enum IntegrationProvider {

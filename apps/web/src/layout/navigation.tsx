@@ -50,6 +50,8 @@ import PieChartIcon from "@mui/icons-material/PieChart";
 import RepeatIcon from "@mui/icons-material/Repeat";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import CalculateIcon from "@mui/icons-material/Calculate";
+import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 
 export interface NavItem {
   id: string;
@@ -192,6 +194,12 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: "hardware", label: "Hardware do PDV", path: "/configuracoes/hardware", icon: <SettingsInputComponentIcon /> },
       { id: "cobranca", label: "Assinatura e Cobrança", path: "/configuracoes/cobranca", icon: <CreditScoreIcon />, roles: ["OWNER", "MANAGER"] },
       { id: "notificacoes", label: "Notificações", path: "/configuracoes/notificacoes", icon: <NotificationsIcon /> },
+      // Importação de produtos (Product) só faz sentido para tenants BUSINESS — o
+      // grupo "administracao" em si fica sem restrição (outros itens, como
+      // Hardware/Notificações, são genéricos a qualquer tipo de tenant), mas estes
+      // dois itens específicos recebem `tenantTypes` no próprio NavItem.
+      { id: "exportar-dados", label: "Exportar dados", path: "/configuracoes/dados", icon: <CloudDownloadIcon /> },
+      { id: "importar-dados", label: "Importar dados", path: "/configuracoes/importar-dados", icon: <CloudUploadIcon />, tenantTypes: ["BUSINESS"] },
     ],
   },
   { id: "mercado", label: "Mercado / Conveniência", tenantTypes: ["BUSINESS"], items: [{ id: "curva-abc", label: "Curva ABC de produtos", path: "/relatorios/curva-abc", icon: <AssessmentIcon /> }] },

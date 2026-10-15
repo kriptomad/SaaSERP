@@ -13,6 +13,9 @@ import { startEnforceScheduledCancellationsWorker, scheduleEnforceScheduledCance
 import { startWebhookDeliveryWorker } from "./workers/webhook-delivery.worker";
 import { startPersonalRecurrenceGenerationWorker, schedulePersonalRecurrenceGenerationJob } from "./workers/personal-recurrence-generation.worker";
 import { startPersonalBillRemindersWorker, schedulePersonalBillRemindersJob } from "./workers/personal-bill-reminders.worker";
+import { startDataExportGenerationWorker } from "./workers/data-export-generation.worker";
+import { startDataImportValidationWorker } from "./workers/data-import-validation.worker";
+import { startDataImportExecutionWorker } from "./workers/data-import-execution.worker";
 
 async function main() {
   const log = createModuleLogger("worker");
@@ -30,8 +33,13 @@ async function main() {
   await schedulePersonalRecurrenceGenerationJob();
   const personalBillRemindersWorker = startPersonalBillRemindersWorker();
   await schedulePersonalBillRemindersJob();
+  // Capítulo 18.4/18.5 — jobs sob demanda (não repetíveis), por isso sem
+  // `schedule*Job()` equivalente ao dos workers acima.
+  const dataExportGenerationWorker = startDataExportGenerationWorker();
+  const dataImportValidationWorker = startDataImportValidationWorker();
+  const dataImportExecutionWorker = startDataImportExecutionWorker();
 
-  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker]) {
+  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker]) {
     worker.on("completed", (job) => {
       log.info({ queue: job.queueName, jobId: job.id, result: job.returnvalue }, "job concluído");
     });

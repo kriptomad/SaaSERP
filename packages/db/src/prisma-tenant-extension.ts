@@ -7,7 +7,11 @@ import { getCurrentTenantId } from "./tenant-context";
 // possuem a coluna tenantId — modelos de catálogo global (Plan, Module) são
 // deliberadamente excluídos, enquanto sua tabela de junção (TenantModule)
 // permanece protegida.
-const TENANT_SCOPED_MODELS = new Set([
+// Exportado (além de usado internamente) para que o worker de exportação total de
+// dados (Capítulo 18.4, `workers/data-export-generation.worker.ts`) itere sobre a
+// mesma fonte única de verdade ao gerar um CSV por modelo tenant-scoped, em vez de
+// manter uma segunda lista manual que inevitavelmente ficaria dessincronizada desta.
+export const TENANT_SCOPED_MODELS = new Set([
   "TenantModule", "Subscription",
   // NOTA: "BillingEvent" fica FORA desta lista — não possui coluna tenantId própria
   // (schema real: id, subscriptionId, provider, externalEventKey, type, payload,
@@ -143,6 +147,9 @@ const TENANT_SCOPED_MODELS = new Set([
   // padrão de SupportTicket/TenantApiKey acima: o painel de plataforma, ao listar
   // sessões de impersonação entre tenants, usa deliberadamente prismaUnscoped.
   "ImpersonationSession",
+  // Exportação total de dados (Capítulo 18.4) — tenantId único e simples, mesmo
+  // padrão de DataImportJob acima:
+  "TenantDataExportJob",
 ]);
 
 // NOTA CRÍTICA: Tenant em si NUNCA deve constar nesta lista. O modelo Tenant não
