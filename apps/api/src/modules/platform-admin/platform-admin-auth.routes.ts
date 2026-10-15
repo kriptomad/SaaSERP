@@ -449,7 +449,7 @@ platformAdminAuthRouter.post("/platform-admin/auth/password-reset/request", asyn
   if (admin && admin.active) {
     const rawToken = randomUUID();
     const tokenHash = createHash("sha256").update(rawToken).digest("hex");
-    await prisma.passwordResetToken.create({
+    const resetToken = await prisma.passwordResetToken.create({
       data: {
         platformAdminUserId: admin.id,
         tokenHash,
@@ -471,11 +471,17 @@ platformAdminAuthRouter.post("/platform-admin/auth/password-reset/request", asyn
       `<p>Olá, ${admin.name}.</p><p>Foi solicitada a redefinição da sua senha de administrador da plataforma. Clique no link abaixo para continuar (válido por ${PASSWORD_RESET_TOKEN_TTL_MINUTES} minutos):</p><p><a href="${resetLink}">${resetLink}</a></p><p>Se você não solicitou esta redefinição, ignore este e-mail.</p>`,
     );
     if (!emailResult.success) {
+      // CORREÇÃO (mega-audit rodada 5): a correção anterior ainda vazava o token em
+      // claro via `resetLink` no log estruturado quando o envio de e-mail falhava.
+      // Nunca logar o token/link — apenas o identificador do admin e o motivo da
+      // falha, para que um operador saiba que precisa assistir manualmente sem
+      // expor a credencial de uso único em nenhum destino (logs são frequentemente
+      // menos protegidos que o canal de e-mail).
       logger.warn({
         adminId: admin.id,
-        resetLink,
+        resetTokenId: resetToken.id,
         reason: emailResult.message,
-      }, "Link de reset de senha gerado (fallback de log: credencial de e-mail de plataforma não configurada ou falhou)");
+      }, "Falha ao enviar e-mail de reset de senha (token gerado, mas o link não pôde ser entregue — requer reenvio manual assistido por outro operador)");
     }
   }
 
@@ -502,17 +508,34 @@ platformAdminAuthRouter.post("/platform-admin/auth/password-reset/confirm", asyn
   }
 
   const newPasswordHash = await hashPassword(parsed.data.newPassword);
-  await prisma.$transaction([
-    prisma.platformAdminUser.update({ where: { id: resetToken.platformAdminUserId }, data: { passwordHash: newPasswordHash } }),
-    prisma.passwordResetToken.update({ where: { id: resetToken.id }, data: { usedAt: new Date() } }),
+  // CORREÇÃO (mega-audit rodada 5): o `findUnique` acima e o `update` abaixo não
+  // eram atômicos — duas requisições concorrentes com o mesmo token podiam passar
+  // ambas pela checagem de `usedAt` antes de qualquer uma marcar o token como
+  // usado, resultando em dupla redefinição de senha. Usamos transação interativa:
+  // a consumação do token é uma `updateMany` condicional (`usedAt: null`) e, se
+  // `count === 0` (outra requisição já consumiu o token), a transação é abortada
+  // ANTES de tocar em senha/sessões — nunca aplicamos a troca de senha
+  // "otimisticamente" e revertemos depois.
+  const tokenConsumed = await prisma.$transaction(async (tx) => {
+    const consumption = await tx.passwordResetToken.updateMany({
+      where: { id: resetToken.id, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+    if (consumption.count === 0) return false;
+
+    await tx.platformAdminUser.update({ where: { id: resetToken.platformAdminUserId! }, data: { passwordHash: newPasswordHash } });
     // Troca de senha revoga TODAS as sessões ativas — mesmo princípio de segurança
     // de "a troca de senha presume que a credencial anterior pode estar
     // comprometida", nunca deixando uma sessão antiga sobreviver à redefinição.
-    prisma.activeSession.updateMany({
-      where: { platformAdminUserId: resetToken.platformAdminUserId, revokedAt: null },
+    await tx.activeSession.updateMany({
+      where: { platformAdminUserId: resetToken.platformAdminUserId!, revokedAt: null },
       data: { revokedAt: new Date() },
-    }),
-  ]);
+    });
+    return true;
+  });
+  if (!tokenConsumed) {
+    return res.status(401).json({ success: false, data: null, error: { code: "INVALID_TOKEN", message: "Token de redefinição inválido, já utilizado ou expirado." } });
+  }
   await logAuthEvent(resetToken.platformAdminUserId, "AUTH_PASSWORD_RESET_COMPLETED", { ip: clientIp(req) });
 
   return res.json({ success: true, data: { message: "Senha redefinida com sucesso. Faça login novamente." }, error: null });

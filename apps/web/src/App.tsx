@@ -5,6 +5,7 @@ import { LandingPage } from "./landing/LandingPage";
 import { LoginPage } from "./pages/LoginPage";
 import { SignupPage } from "./pages/SignupPage";
 import { StatusPage } from "./pages/StatusPage";
+import { LegalPage } from "./pages/LegalPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { PosPage } from "./modules/market/pos/PosPage";
 import { SalesHistoryPage } from "./modules/market/sales/SalesHistoryPage";
@@ -123,6 +124,9 @@ export function App() {
             <Route path="/signup" element={<SignupPage />} />
             {/* Pública, sem auth: Cap. 15.1.5 — página de status da plataforma */}
             <Route path="/status" element={<StatusPage />} />
+            {/* Pública, sem auth: Termos de Uso e Política de Privacidade (linkados no cadastro) */}
+            <Route path="/termos" element={<LegalPage />} />
+            <Route path="/privacidade" element={<LegalPage />} />
             {/* Pública, sem auth: Cap. 11.6 — agendamento online self-service */}
             <Route path="/agendar/:tenantSlug" element={<PublicBookingPage />} />
             {/* Pública, sem auth: Cap. 8.5 — vitrine virtual/loja online */}

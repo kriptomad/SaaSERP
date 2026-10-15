@@ -154,6 +154,7 @@ export interface SignupInput {
   ownerName: string;
   ownerEmail: string;
   ownerPassword: string;
+  termsAccepted: true;
 }
 
 export interface LoginInput {

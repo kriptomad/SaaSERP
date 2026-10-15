@@ -104,15 +104,24 @@ app.use(
     origin: (origin, callback) => {
       getPlatformSecret("CORS_ORIGIN")
         .then((raw) => {
-          const allowedOrigins = raw?.split(",") ?? null;
-          if (!allowedOrigins) {
-            // Sem valor configurado (nem no painel, nem via env) — libera qualquer
-            // origem (*), igual ao comportamento histórico pré-painel admin.
+          const allowedOrigins = raw?.split(",").map((o) => o.trim()).filter(Boolean) ?? null;
+          if (!origin) {
+            // Sem header Origin (requisição server-to-server, curl, apps mobile/
+            // desktop) — não é uma requisição de navegador cross-origin, libera.
             return callback(null, true);
           }
-          if (!origin || allowedOrigins.includes(origin)) {
+          if (allowedOrigins && allowedOrigins.includes(origin)) {
             return callback(null, true);
           }
+          // CORREÇÃO (mega-audit rodada 5 — crítico de segurança): antes, quando
+          // CORS_ORIGIN não estava configurado (nem painel, nem env), o código
+          // liberava QUALQUER origem com `credentials: true`. Como o pacote `cors`
+          // reflete o header `Origin` da requisição (nunca usa `*` com
+          // credentials), isso permitia que qualquer site arbitrário fizesse
+          // requisições autenticadas (com cookies/sessão) ao backend — uma falha
+          // clássica de CORS mal configurado equivalente a CSRF amplo. Agora,
+          // falha FECHADO: sem allowlist configurada, nenhuma origem de navegador
+          // é aceita (apenas requisições sem header Origin continuam liberadas).
           return callback(new Error("Origem não permitida pela política de CORS."));
         })
         .catch((err) => callback(err as Error));
@@ -175,8 +184,20 @@ app.use(publicOnlineStoreRouter);
 // separado do tenant (Capítulo 14.2), com seu próprio esquema JWT de 3 audiences.
 // authMiddleware/tenantContextMiddleware/tenantLockoutMiddleware abaixo são no-ops
 // quando não há req.session de tenant, então esta rota segue sem qualquer tenant.
-app.use(platformAdminAuthRouter);
+//
+// CORREÇÃO (mega-audit rodada 5): `platformAdminAuthMiddleware` DEVE ser montado
+// ANTES de `platformAdminAuthRouter` — este último contém tanto rotas públicas
+// (login, 2FA, reset de senha) quanto rotas protegidas por sessão (listar/revogar
+// sessões ativas, CRUD da allowlist de IP, via `requireSession`). Com a ordem
+// antiga invertida, `req.platformAdminSession` NUNCA era preenchido para essas
+// rotas protegidas (sempre 401 "sessão ausente", mesmo com token válido) — a
+// allowlist de IP ficava, na prática, inacessível/não administrável pela própria
+// UI. O middleware é seguro para rodar incondicionalmente antes das rotas
+// públicas: ele nunca bloqueia a requisição (sempre chama `next()`), apenas
+// popula `req.platformAdminSession` quando há um Bearer token válido e não
+// revogado — rotas de login/2FA/reset seguem funcionando normalmente sem sessão.
 app.use(platformAdminAuthMiddleware);
+app.use(platformAdminAuthRouter);
 app.use(platformAdminRouter);
 app.use(platformSecretsRouter);
 app.use(systemStatusRouter);

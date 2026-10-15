@@ -1,7 +1,7 @@
 // apps/web/src/pages/SignupPage.tsx
 import { useState, FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
-import { Box, Button, Paper, TextField, Typography, Alert, Stack, MenuItem } from "@mui/material";
+import { useNavigate, Link as RouterLink } from "react-router-dom";
+import { Box, Button, Paper, TextField, Typography, Alert, Stack, MenuItem, FormControlLabel, Checkbox, Link as MuiLink } from "@mui/material";
 import { signup, lookupCnpj, ApiError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { ThemeToggleButton } from "../theme/ThemeToggleButton";
@@ -32,6 +32,7 @@ export function SignupPage() {
   const [loading, setLoading] = useState(false);
   const [cnpjLookupLoading, setCnpjLookupLoading] = useState(false);
   const [cnpjLookupNotice, setCnpjLookupNotice] = useState<string | null>(null);
+  const [termsAccepted, setTermsAccepted] = useState(false);
 
   function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -82,10 +83,14 @@ export function SignupPage() {
       setError(passwordPolicy.errors.join(" "));
       return;
     }
+    if (!termsAccepted) {
+      setError("É necessário aceitar os Termos de Uso e a Política de Privacidade para criar uma conta.");
+      return;
+    }
 
     setLoading(true);
     try {
-      const response = await signup({ ...form, cnpj: form.cnpj ? normalizeCnpj(form.cnpj) : undefined });
+      const response = await signup({ ...form, cnpj: form.cnpj ? normalizeCnpj(form.cnpj) : undefined, termsAccepted: true as const });
       setSession(response);
       navigate("/dashboard");
     } catch (err) {
@@ -159,7 +164,22 @@ export function SignupPage() {
               helperText="Mínimo 8 caracteres e 1 caractere especial (ex.: ! @ # $ % & *)"
             />
             <PasswordStrengthMeter password={form.ownerPassword} />
-            <Button type="submit" variant="contained" disabled={loading} fullWidth>
+            <FormControlLabel
+              control={<Checkbox checked={termsAccepted} onChange={(e) => setTermsAccepted(e.target.checked)} required />}
+              label={
+                <Typography variant="body2">
+                  Li e aceito os{" "}
+                  <MuiLink component={RouterLink} to="/termos" target="_blank" rel="noopener">
+                    Termos de Uso
+                  </MuiLink>{" "}
+                  e a{" "}
+                  <MuiLink component={RouterLink} to="/privacidade" target="_blank" rel="noopener">
+                    Política de Privacidade
+                  </MuiLink>
+                </Typography>
+              }
+            />
+            <Button type="submit" variant="contained" disabled={loading || !termsAccepted} fullWidth>
               {loading ? "Criando..." : "Criar espaço"}
             </Button>
           </Stack>

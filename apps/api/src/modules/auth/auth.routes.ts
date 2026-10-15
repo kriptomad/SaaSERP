@@ -26,6 +26,10 @@ const signupSchema = z.object({
   ownerName: z.string().min(2),
   ownerEmail: z.string().email(),
   ownerPassword: z.string().min(8),
+  // GAP DE AUDITORIA FECHADO (mega-audit rodada 5): aceite dos Termos de Uso e da
+  // Política de Privacidade agora é obrigatório e validado no backend (nunca apenas
+  // "confiado" ao frontend) — requisito legal (LGPD) para prova de consentimento.
+  termsAccepted: z.literal(true, { errorMap: () => ({ message: "É necessário aceitar os Termos de Uso e a Política de Privacidade para criar uma conta." }) }),
 });
 
 authRouter.post("/signup", async (req, res) => {
@@ -57,6 +61,17 @@ authRouter.post("/signup", async (req, res) => {
 
   const passwordHash = await hashPassword(input.ownerPassword);
 
+  // GAP DE AUDITORIA FECHADO (mega-audit rodada 5): `Tenant.termsVersionAccepted`/
+  // `privacyPolicyVersionAccepted` já existiam no schema, mas nenhuma rota de
+  // signup realmente consultava `LegalDocumentVersion` nem gravava o aceite —
+  // nunca gravamos uma versão "fixa"/hardcoded aqui: buscamos a versão REALMENTE
+  // publicada mais recente de cada tipo de documento no momento do cadastro, para
+  // que o registro de consentimento seja auditável mesmo após o texto mudar.
+  const [latestTerms, latestPrivacy] = await Promise.all([
+    prismaUnscoped.legalDocumentVersion.findFirst({ where: { documentType: "TERMS_OF_USE" }, orderBy: { publishedAt: "desc" } }),
+    prismaUnscoped.legalDocumentVersion.findFirst({ where: { documentType: "PRIVACY_POLICY" }, orderBy: { publishedAt: "desc" } }),
+  ]);
+
   let created;
   try {
     created = await prismaUnscoped.$transaction(async (tx) => {
@@ -68,6 +83,10 @@ authRouter.post("/signup", async (req, res) => {
         cnpj: input.cnpj ?? null,
         tenantType: input.tenantType,
         status: "TRIAL",
+        termsAcceptedAt: new Date(),
+        termsVersionAccepted: latestTerms?.version ?? null,
+        privacyPolicyAcceptedAt: new Date(),
+        privacyPolicyVersionAccepted: latestPrivacy?.version ?? null,
       },
     });
 
