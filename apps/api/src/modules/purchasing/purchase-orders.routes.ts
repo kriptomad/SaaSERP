@@ -455,8 +455,15 @@ purchaseOrdersRouter.post("/purchase-orders/:id/receive", requireAuth, async (re
   }
   const { tenantId } = req.session!;
 
-  try {
-    const result = await prisma.$transaction(
+  // Retry automático e limitado em caso de conflito de serialização (P2034): a
+  // isolação Serializable já impede fisicamente o double-increment de estoque entre
+  // dois recebimentos concorrentes do mesmo pedido (um deles é abortado pelo
+  // próprio Postgres), mas sem retry o operador recebia um 500 genérico por um
+  // conflito transitório e tinha que reenviar manualmente o mesmo formulário.
+  const MAX_SERIALIZATION_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_SERIALIZATION_RETRIES; attempt += 1) {
+    try {
+      const result = await prisma.$transaction(
       async (tx) => {
         const purchaseOrder = await tx.purchaseOrder.findFirst({ where: { id: req.params.id, tenantId }, include: { items: { include: { product: true } } } });
         if (!purchaseOrder) throw new Error("PURCHASE_ORDER_NOT_FOUND");
@@ -545,12 +552,17 @@ purchaseOrdersRouter.post("/purchase-orders/:id/receive", requireAuth, async (re
         return { purchaseOrder: updatedOrder, accountPayable, consignmentExcludedValue };
       },
       { isolationLevel: "Serializable" }, // mesmo nível do Capítulo 6.3 — concorrência de recebimento simultâneo do mesmo pedido
-    );
-    return res.status(200).json({ success: true, data: result, error: null });
-  } catch (err: any) {
-    const code = err?.message ?? "RECEIVE_FAILED";
-    const knownErrors = ["PURCHASE_ORDER_NOT_FOUND", "PURCHASE_ORDER_NOT_RECEIVABLE", "PURCHASE_ORDER_ITEM_NOT_FOUND", "RECEIVED_QUANTITY_EXCEEDS_ORDERED", "BATCH_AND_EXPIRATION_REQUIRED_FOR_TRACKED_PRODUCT"];
-    const status = code === "PURCHASE_ORDER_NOT_FOUND" || code === "PURCHASE_ORDER_ITEM_NOT_FOUND" ? 404 : knownErrors.includes(code) ? 409 : 500;
-    return res.status(status).json({ success: false, data: null, error: { code, message: code } });
+      );
+      return res.status(200).json({ success: true, data: result, error: null });
+    } catch (err: any) {
+      const isSerializationConflict = err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2034";
+      if (isSerializationConflict && attempt < MAX_SERIALIZATION_RETRIES) {
+      continue; // outro recebimento concorrente venceu a corrida nesta tentativa — tenta de novo com os dados já atualizados.
+      }
+      const code = isSerializationConflict ? "CONCURRENT_RECEIVE_CONFLICT" : (err?.message ?? "RECEIVE_FAILED");
+      const knownErrors = ["PURCHASE_ORDER_NOT_FOUND", "PURCHASE_ORDER_NOT_RECEIVABLE", "PURCHASE_ORDER_ITEM_NOT_FOUND", "RECEIVED_QUANTITY_EXCEEDS_ORDERED", "BATCH_AND_EXPIRATION_REQUIRED_FOR_TRACKED_PRODUCT"];
+      const status = code === "PURCHASE_ORDER_NOT_FOUND" || code === "PURCHASE_ORDER_ITEM_NOT_FOUND" ? 404 : knownErrors.includes(code) || isSerializationConflict ? 409 : 500;
+      return res.status(status).json({ success: false, data: null, error: { code, message: isSerializationConflict ? "Outro recebimento concorrente para este pedido está em andamento. Tente novamente." : code } });
+    }
   }
 });

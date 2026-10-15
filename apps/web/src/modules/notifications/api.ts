@@ -15,6 +15,7 @@ export const NOTIFICATION_CATEGORIES = [
   "STOCK_LOW",
   "FISCAL_DOCUMENT_REJECTED",
   "SYSTEM_ANNOUNCEMENT",
+  "TEF_CONFIRMATION_FAILED",
 ] as const;
 export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
 
@@ -27,6 +28,7 @@ export const NOTIFICATION_CATEGORY_LABEL: Record<NotificationCategory, string> =
   STOCK_LOW: "Estoque baixo",
   FISCAL_DOCUMENT_REJECTED: "Documento fiscal rejeitado",
   SYSTEM_ANNOUNCEMENT: "Comunicado do sistema",
+  TEF_CONFIRMATION_FAILED: "Falha ao confirmar TEF/maquininha",
 };
 
 export interface NotificationPreferenceChannels {

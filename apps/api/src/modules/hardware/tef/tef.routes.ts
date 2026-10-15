@@ -5,28 +5,47 @@
 // `IntegrationCredential` genérica (provider `TEF_CLISITEF`), cadastrada pelo lojista
 // em Configurações > Integrações — nunca hardcoded aqui.
 //
-// Estado de sessão TEF é mantido em memória (Map), por processo: a janela de uma
-// transação de cartão (cliente insere/aproxima o cartão e digita a senha no pinpad)
-// dura segundos, nunca sobrevive a um restart do processo, e exige o mesmo processo
-// Node que iniciou a chamada para falar com o daemon local — manter em banco seria
-// complexidade sem benefício real (nenhum outro processo precisa ler esse estado).
+// Estado de sessão TEF é persistido no Redis compartilhado (`tenant:{id}:tef:{sessionId}`,
+// TTL curto) em vez de um Map em memória por processo: o SitefAdapter não guarda
+// nenhuma conexão TCP/socket persistente (cada chamada é uma requisição HTTP
+// independente ao daemon local, reconstruída a partir da IntegrationCredential salva
+// no banco), então qualquer processo da API consegue retomar a sessão a partir do
+// mesmo `tenantId` — isso elimina a perda de sessão em restart/failover/scale-out
+// sem exigir nenhuma afinidade de processo.
 import { Router, Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../../middlewares/auth.middleware";
 import { decryptEnvelope } from "../../../lib/envelope-crypto";
+import { redis } from "../../../lib/redis";
+import { notifyTenant } from "../../notifications/notify.service";
 import { SitefAdapter, SitefConnectionConfig } from "./sitef-adapter";
 import { TefDaemonUnreachableError, TefProvider, TefSessionNotFoundError } from "./tef-provider";
 
 export const tefRouter = Router();
 
-interface TefSessionRecord {
-  tenantId: string;
-  provider: TefProvider;
+// TTL generoso o bastante para cobrir a janela de interação humana no pinpad
+// (inserir/aproximar cartão + digitar senha), mas curto o suficiente para nunca
+// deixar uma sessão travada indefinidamente no Redis caso o operador abandone o PDV.
+const TEF_SESSION_TTL_SECONDS = 180;
+
+function tefSessionKey(sessionId: string): string {
+  return `tef:session:${sessionId}`;
 }
 
-const activeSessions = new Map<string, TefSessionRecord>();
+async function saveTefSession(sessionId: string, tenantId: string): Promise<void> {
+  await redis.set(tefSessionKey(sessionId), tenantId, "EX", TEF_SESSION_TTL_SECONDS);
+}
+
+async function loadTefSession(sessionId: string): Promise<{ tenantId: string } | null> {
+  const tenantId = await redis.get(tefSessionKey(sessionId));
+  return tenantId ? { tenantId } : null;
+}
+
+async function clearTefSession(sessionId: string): Promise<void> {
+  await redis.del(tefSessionKey(sessionId));
+}
 
 function isSitefConnectionPayload(value: Record<string, unknown>): value is SitefConnectionConfig & Record<string, unknown> {
   return (
@@ -84,7 +103,7 @@ tefRouter.post("/hardware/tef/transactions", requireAuth, async (req: Request, r
     const provider = await resolveTefProvider(tenantId);
     const result = await provider.startTransaction(parsed.data);
     const sessionId = result.sessionId || randomUUID();
-    activeSessions.set(sessionId, { tenantId, provider });
+    await saveTefSession(sessionId, tenantId);
     return res.status(201).json({ success: true, data: { ...result, sessionId }, error: null });
   } catch (error) {
     return handleTefError(res, error);
@@ -100,12 +119,16 @@ tefRouter.post("/hardware/tef/transactions/:sessionId/continue", requireAuth, as
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
   }
-  const session = activeSessions.get(sessionId);
+  const session = await loadTefSession(sessionId);
   if (!session || session.tenantId !== tenantId) {
     return res.status(404).json({ success: false, data: null, error: { code: "TEF_SESSION_NOT_FOUND", message: "Sessão TEF não encontrada ou expirada." } });
   }
   try {
-    const result = await session.provider.continueTransaction(sessionId, parsed.data.fieldId, parsed.data.value);
+    // Renova o TTL a cada interação — a janela de 180s é por passo, não para a
+    // transação inteira (que pode ter N idas e vindas de `continue`).
+    await saveTefSession(sessionId, tenantId);
+    const provider = await resolveTefProvider(tenantId);
+    const result = await provider.continueTransaction(sessionId, parsed.data.fieldId, parsed.data.value);
     return res.json({ success: true, data: result, error: null });
   } catch (error) {
     return handleTefError(res, error);
@@ -115,14 +138,53 @@ tefRouter.post("/hardware/tef/transactions/:sessionId/continue", requireAuth, as
 tefRouter.post("/hardware/tef/transactions/:sessionId/confirm", requireAuth, async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
   const { sessionId } = req.params;
-  const session = activeSessions.get(sessionId);
+  const session = await loadTefSession(sessionId);
   if (!session || session.tenantId !== tenantId) {
     return res.status(404).json({ success: false, data: null, error: { code: "TEF_SESSION_NOT_FOUND", message: "Sessão TEF não encontrada ou expirada." } });
   }
   try {
-    await session.provider.confirmTransaction(sessionId);
-    activeSessions.delete(sessionId);
-    return res.json({ success: true, data: { sessionId, confirmed: true }, error: null });
+    const provider = await resolveTefProvider(tenantId);
+    // Retry local com backoff curto antes de desistir: a maioria das falhas de
+    // confirmação é uma instabilidade transitória de rede local até o daemon, não
+    // uma rejeição definitiva — tentar de novo silenciosamente evita incomodar o
+    // operador do caixa por um soluço momentâneo.
+    const delaysMs = [500, 1500, 4000];
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= delaysMs.length; attempt += 1) {
+      try {
+        await provider.confirmTransaction(sessionId);
+        await clearTefSession(sessionId);
+        return res.json({ success: true, data: { sessionId, confirmed: true }, error: null });
+      } catch (error) {
+        lastError = error;
+        if (attempt < delaysMs.length) {
+          await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt]));
+        }
+      }
+    }
+    // Todas as tentativas falharam: a adquirente pode ter aprovado o débito no
+    // cartão do cliente sem que o ERP tenha confirmado — isso NUNCA deve ficar só
+    // num toast que o operador pode perder. Mantém a sessão no Redis (não limpa)
+    // para permitir nova tentativa manual e dispara um alerta crítico persistente
+    // para o lojista reconciliar com o extrato da adquirente.
+    await notifyTenant({
+      tenantId,
+      category: "TEF_CONFIRMATION_FAILED",
+      severity: "CRITICAL",
+      title: "Falha ao confirmar transação TEF junto à adquirente",
+      body: `A sessão TEF ${sessionId} foi aprovada pelo cliente, mas o ERP não conseguiu confirmá-la junto à adquirente após ${delaysMs.length + 1} tentativas. Verifique o extrato da maquininha e, se o débito foi efetivado, reconcilie manualmente; caso contrário, a transação pode ter expirado sem captura. Erro: ${(lastError as Error)?.message ?? "desconhecido"}`,
+      linkRoute: "/configuracoes/hardware",
+      sourceType: "TEF_SESSION",
+      sourceId: sessionId,
+    });
+    return res.status(502).json({
+      success: false,
+      data: null,
+      error: {
+        code: "TEF_CONFIRMATION_FAILED",
+        message: "Venda registrada, mas não foi possível confirmar a transação na maquininha após múltiplas tentativas. Um alerta crítico foi enviado para o lojista reconciliar manualmente.",
+      },
+    });
   } catch (error) {
     return handleTefError(res, error);
   }
@@ -137,20 +199,20 @@ tefRouter.post("/hardware/tef/transactions/:sessionId/cancel", requireAuth, asyn
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
   }
-  let session = activeSessions.get(sessionId);
+  let session = await loadTefSession(sessionId);
   if (!session) {
-    try {
-      session = { tenantId, provider: await resolveTefProvider(tenantId) };
-    } catch (error) {
-      return handleTefError(res, error);
-    }
+    // Sessão já expirou/não existe no Redis (ex.: processo que a abriu caiu antes de
+    // persistir) — ainda assim tentamos cancelar no daemon usando só o tenantId do
+    // chamador autenticado, pois o SiTef identifica a transação pelo NSU informado.
+    session = { tenantId };
   }
   if (session.tenantId !== tenantId) {
     return res.status(404).json({ success: false, data: null, error: { code: "TEF_SESSION_NOT_FOUND", message: "Sessão TEF não encontrada ou expirada." } });
   }
   try {
-    await session.provider.cancelTransaction(sessionId, parsed.data.nsu, parsed.data.reason);
-    activeSessions.delete(sessionId);
+    const provider = await resolveTefProvider(tenantId);
+    await provider.cancelTransaction(sessionId, parsed.data.nsu, parsed.data.reason);
+    await clearTefSession(sessionId);
     return res.json({ success: true, data: { sessionId, cancelled: true }, error: null });
   } catch (error) {
     return handleTefError(res, error);

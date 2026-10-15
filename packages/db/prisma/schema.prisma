@@ -2198,6 +2198,10 @@ enum NotificationCategory {
   // vencimento (`VaccineRecord.nextDoseDueAt`), disparado via POST
   // /vaccine-records/notify-due-soon (client-records.routes.ts).
   VACCINE_REMINDER
+  // Capítulo 23.5 — TEF/SiTef: a adquirente pode ter aprovado o débito no cartão do
+  // cliente sem que o ERP tenha conseguido confirmar a transação após múltiplas
+  // tentativas; alerta crítico para o lojista reconciliar manualmente.
+  TEF_CONFIRMATION_FAILED
 }
 
 model NotificationPreference {

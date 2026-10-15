@@ -31,7 +31,8 @@ export interface NotifyTenantInput {
     | "STOCK_LOW"
     | "FISCAL_DOCUMENT_REJECTED"
     | "SYSTEM_ANNOUNCEMENT"
-    | "VACCINE_REMINDER";
+    | "VACCINE_REMINDER"
+    | "TEF_CONFIRMATION_FAILED";
   title: string;
   body: string;
   severity: "INFO" | "WARNING" | "CRITICAL";
@@ -57,6 +58,7 @@ const PREFERENCE_CATEGORIES = new Set([
   "STOCK_LOW",
   "FISCAL_DOCUMENT_REJECTED",
   "SYSTEM_ANNOUNCEMENT",
+  "TEF_CONFIRMATION_FAILED",
 ]);
 
 async function enqueueWhatsAppJob(tenantId: string, toPhone: string, body: string): Promise<void> {
