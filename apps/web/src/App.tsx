@@ -31,6 +31,7 @@ import { LoyaltyPage } from "./modules/loyalty/LoyaltyPage";
 import { ComandaPage } from "./modules/comanda/ComandaPage";
 import { ClientRecordsPage, VehiclesRecordsPage, VehicleListingsPage } from "./modules/client-records/ClientRecordsPage";
 import { MultiFilialDashboardPage } from "./modules/multi-filial/MultiFilialDashboardPage";
+import { SupportTicketsPage } from "./modules/support-tickets/SupportTicketsPage";
 import { OpticalLabPage } from "./modules/optical/OpticalLabPage";
 import { HealthInsurancePage } from "./modules/optical/HealthInsurancePage";
 import { AccountingOfficePage } from "./modules/accounting-office/AccountingOfficePage";
@@ -166,6 +167,7 @@ export function App() {
             <Route path="/oficina/veiculos" element={<VehiclesRecordsPage />} />
             <Route path="/veiculos-seminovos/anuncios" element={<VehicleListingsPage />} />
             <Route path="/multi-filial/dashboard" element={<MultiFilialDashboardPage />} />
+            <Route path="/suporte" element={<SupportTicketsPage />} />
             <Route path="/contabilidade" element={<AccountingOfficePage />} />
             <Route path="/contabilidade/carteira" element={<FirmPortfolioPage />} />
             <Route path="/configuracoes/hardware" element={<HardwarePage />} />

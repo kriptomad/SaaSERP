@@ -39,6 +39,7 @@ import { platformAdminRouter } from "./modules/platform-admin/platform-admin.rou
 import { platformSecretsRouter } from "./modules/platform-admin/platform-secrets.routes";
 import { databaseBackupsRouter } from "./modules/platform-admin/database-backups.routes";
 import { multiFilialRouter } from "./modules/multi-filial/multi-filial.routes";
+import { supportTicketsRouter } from "./modules/support-tickets/support-tickets.routes";
 import { fiscalCodeCatalogRouter } from "./modules/fiscal/fiscal-code-catalog.routes";
 import { ibsCbsRegimeElectionRouter } from "./modules/fiscal/ibs-cbs-regime-election.routes";
 import { cashRegisterRouter } from "./modules/cash-register/cash-register.routes";
@@ -167,6 +168,7 @@ app.use(platformAdminRouter);
 app.use(platformSecretsRouter);
 app.use(databaseBackupsRouter);
 app.use(multiFilialRouter);
+app.use(supportTicketsRouter);
 
 // A partir daqui, toda rota é tenant-aware: auth -> contexto de tenant -> lockout -> requireAuth.
 app.use(authMiddleware);

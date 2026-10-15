@@ -42,6 +42,7 @@ import ConstructionIcon from "@mui/icons-material/Construction";
 import TireRepairIcon from "@mui/icons-material/TireRepair";
 import LocalCarWashIcon from "@mui/icons-material/LocalCarWash";
 import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
+import SupportAgentIcon from "@mui/icons-material/SupportAgent";
 import SavingsIcon from "@mui/icons-material/Savings";
 import TrendingUpIcon from "@mui/icons-material/TrendingUp";
 import CreditCardIcon from "@mui/icons-material/CreditCard";
@@ -200,6 +201,7 @@ export const NAV_GROUPS: NavGroup[] = [
       // dois itens específicos recebem `tenantTypes` no próprio NavItem.
       { id: "exportar-dados", label: "Exportar dados", path: "/configuracoes/dados", icon: <CloudDownloadIcon /> },
       { id: "importar-dados", label: "Importar dados", path: "/configuracoes/importar-dados", icon: <CloudUploadIcon />, tenantTypes: ["BUSINESS"] },
+      { id: "suporte", label: "Suporte / Helpdesk", path: "/suporte", icon: <SupportAgentIcon /> },
     ],
   },
   { id: "mercado", label: "Mercado / Conveniência", tenantTypes: ["BUSINESS"], items: [{ id: "curva-abc", label: "Curva ABC de produtos", path: "/relatorios/curva-abc", icon: <AssessmentIcon /> }] },
