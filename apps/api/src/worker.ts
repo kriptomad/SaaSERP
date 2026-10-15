@@ -20,6 +20,7 @@ import { startDataImportExecutionWorker } from "./workers/data-import-execution.
 import { startEncryptedDatabaseBackupWorker, scheduleEncryptedDatabaseBackupJob } from "./workers/encrypted-database-backup.worker";
 import { startScheduledReportGenerationWorker, syncScheduledReportJobSchedulers } from "./workers/scheduled-report-generation.worker";
 import { startPersonalInvestmentQuotesWorker, schedulePersonalInvestmentQuotesJob } from "./workers/personal-investment-quotes.worker";
+import { startAccountingRecurringTasksWorker, scheduleAccountingRecurringTasksJob } from "./workers/accounting-recurring-tasks.worker";
 
 async function main() {
   const log = createModuleLogger("worker");
@@ -49,8 +50,10 @@ async function main() {
   await syncScheduledReportJobSchedulers();
   const personalInvestmentQuotesWorker = startPersonalInvestmentQuotesWorker();
   await schedulePersonalInvestmentQuotesJob();
+  const accountingRecurringTasksWorker = startAccountingRecurringTasksWorker();
+  await scheduleAccountingRecurringTasksJob();
 
-  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker]) {
+  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker]) {
     worker.on("completed", (job) => {
       log.info({ queue: job.queueName, jobId: job.id, result: job.returnvalue }, "job concluído");
     });

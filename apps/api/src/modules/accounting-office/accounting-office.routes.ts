@@ -11,8 +11,11 @@
 // ESCOPO DESTA 1ª IMPLEMENTAÇÃO (honestamente delimitado, sem mock):
 //   - Ciclo de vida completo do vínculo (conceder/aceitar/revogar) com trilha
 //     de auditoria real.
-//   - CRUD de leitura/atualização de `AccountingTask` (sem geração automática
-//     via cron — Capítulo 21.18.4, PENDENTE).
+//   - CRUD de leitura/atualização de `AccountingTask`, com GERAÇÃO AUTOMÁTICA
+//     mensal real via cron (Capítulo 21.18.4 — GAP FECHADO na Rodada 4, ver
+//     `workers/accounting-recurring-tasks.worker.ts`: gera DAS/DARF/folha/
+//     EFD-Reinf/DCTFWeb todo mês e ECD/ECF/DEFIS/IRPF em janeiro, a partir do
+//     `taxRegime` real de cada tenant-cliente com vínculo ACTIVE).
 //   - Geração real de ECD (SPED Contábil, blocos 0/I/J/9) e DEFIS (receita
 //     bruta mensal real) — `sped-ecd.service.ts`. ECF/EFD-Reinf/DCTFWeb/
 //     Informe de Rendimentos do Sócio permanecem PENDENTES (Capítulo
@@ -21,12 +24,12 @@
 //     no cabeçalho de `sped-ecd.service.ts`.
 //   - CRUD de `AccountingFirmProfile` (perfil público do escritório no
 //     marketplace — Capítulo 21.18.6, sem busca/listagem pública ainda).
-// PENDENTE (flagado explicitamente, não escondido): cron de geração de
-// tarefas (21.18.4), geração real de ECF/EFD-Reinf/DCTFWeb/Informe de
-// Rendimentos do Sócio (21.18.5/21.18.10/21.18.11/21.18.12 — dado-fonte
-// inexistente no schema), marketplace de busca pública + reviews
-// (21.18.6/21.18.9), espelhamento automático de honorário em AP/AR
-// (21.18.8), módulo sócios/pró-labore/IRPF (21.18.12).
+// PENDENTE (flagado explicitamente, não escondido): geração real de
+// ECF/EFD-Reinf/DCTFWeb/Informe de Rendimentos do Sócio
+// (21.18.5/21.18.10/21.18.11/21.18.12 — dado-fonte inexistente no schema),
+// marketplace de busca pública + reviews (21.18.6/21.18.9), espelhamento
+// automático de honorário em AP/AR (21.18.8), módulo sócios/pró-labore/IRPF
+// (21.18.12).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
@@ -323,8 +326,9 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, async (req
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// TAREFAS RECORRENTES (Capítulo 21.18.4 — geração automática PENDENTE;
-// aqui apenas leitura/atualização manual de status)
+// TAREFAS RECORRENTES (Capítulo 21.18.4 — geração automática mensal real via
+// `workers/accounting-recurring-tasks.worker.ts`; estas rotas cobrem a leitura
+// e o ajuste manual de status pelo contador)
 // ─────────────────────────────────────────────────────────────────────────
 
 accountingOfficeRouter.get("/accounting-tasks", requireAuth, async (req: Request, res: Response) => {

@@ -90,6 +90,13 @@ export const QUEUE_NAMES = {
   // Pessoal, consumida por `workers/personal-investment-quotes.worker.ts`. Cron
   // diário após o fechamento do pregão da B3.
   PERSONAL_INVESTMENT_QUOTES: "personal-investment-quotes",
+  // Capítulo 21.18.4 — geração mensal automática das AccountingTask padrão (DAS/DARF,
+  // fechamento de folha, EFD-Reinf/DCTFWeb, e as anuais ECD/ECF/DEFIS/IRPF em março)
+  // de cada AccountingEngagement ATIVO, consumida por
+  // `workers/accounting-recurring-tasks.worker.ts`. GAP DE AUDITORIA FECHADO
+  // (Rodada 4): antes só havia CRUD manual de AccountingTask, nenhuma geração
+  // automática existia (Capítulo 21.18.4 ficava expressamente PENDENTE).
+  ACCOUNTING_RECURRING_TASKS: "accounting-recurring-tasks",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -145,5 +152,9 @@ export const dataImportExecutionQueue = new Queue(QUEUE_NAMES.DATA_IMPORT_EXECUT
 export const databaseBackupQueue = new Queue(QUEUE_NAMES.DATABASE_BACKUP, { connection: queueRedisConnection });
 
 export const personalInvestmentQuotesQueue = new Queue(QUEUE_NAMES.PERSONAL_INVESTMENT_QUOTES, {
+  connection: queueRedisConnection,
+});
+
+export const accountingRecurringTasksQueue = new Queue(QUEUE_NAMES.ACCOUNTING_RECURRING_TASKS, {
   connection: queueRedisConnection,
 });
