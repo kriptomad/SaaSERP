@@ -62,6 +62,7 @@ interface FormState {
   trackingType: TrackingType;
   ncm: string;
   originUf: string;
+  icmsOrigin: string;
   unitPrice: string;
   wholesalePrice: string;
   wholesaleMinQty: string;
@@ -82,6 +83,7 @@ const EMPTY: FormState = {
   trackingType: "NONE",
   ncm: "00000000",
   originUf: "",
+  icmsOrigin: "0",
   unitPrice: "",
   wholesalePrice: "",
   wholesaleMinQty: "",
@@ -103,6 +105,7 @@ function fromProduct(p: ProductDetail): FormState {
     trackingType: p.trackingType,
     ncm: p.ncm,
     originUf: p.originUf ?? "",
+    icmsOrigin: p.icmsOrigin ?? "0",
     unitPrice: String(Number(p.unitPrice)),
     wholesalePrice: p.wholesalePrice ? String(Number(p.wholesalePrice)) : "",
     wholesaleMinQty: p.wholesaleMinQty ? String(p.wholesaleMinQty) : "",
@@ -160,6 +163,7 @@ function ProductForm({ product, onClose }: { product: ProductDetail | null; onCl
       trackingType: form.trackingType,
       ncm: form.ncm.trim() || "00000000",
       originUf: form.originUf.trim().toUpperCase() || null,
+      icmsOrigin: form.icmsOrigin,
       unitPrice,
       wholesalePrice: wholesalePrice && wholesalePrice > 0 ? wholesalePrice : null,
       wholesaleMinQty: wholesaleMinQty && wholesaleMinQty > 0 ? Math.round(wholesaleMinQty) : null,
@@ -204,6 +208,24 @@ function ProductForm({ product, onClose }: { product: ProductDetail | null; onCl
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
             <TextField label="NCM" value={form.ncm} onChange={set("ncm")} fullWidth />
             <TextField label="UF de origem" value={form.originUf} onChange={set("originUf")} inputProps={{ maxLength: 2 }} fullWidth />
+            <TextField
+              select
+              label="Origem da mercadoria (ICMS)"
+              value={form.icmsOrigin}
+              onChange={set("icmsOrigin")}
+              fullWidth
+              helperText="Tabela SEFAZ — afeta o CST/CSOSN e a emissão de NFC-e"
+            >
+              <MenuItem value="0">0 — Nacional</MenuItem>
+              <MenuItem value="1">1 — Estrangeira (importação direta)</MenuItem>
+              <MenuItem value="2">2 — Estrangeira (mercado interno)</MenuItem>
+              <MenuItem value="3">3 — Nacional, conteúdo importado &gt; 40%</MenuItem>
+              <MenuItem value="4">4 — Nacional, produção conforme processos produtivos básicos</MenuItem>
+              <MenuItem value="5">5 — Nacional, conteúdo importado ≤ 40%</MenuItem>
+              <MenuItem value="6">6 — Estrangeira (importação direta), sem similar nacional</MenuItem>
+              <MenuItem value="7">7 — Estrangeira (mercado interno), sem similar nacional</MenuItem>
+              <MenuItem value="8">8 — Nacional, conteúdo importado &gt; 70%</MenuItem>
+            </TextField>
             <TextField label="Estoque mínimo" value={form.minStockThreshold} onChange={set("minStockThreshold")} fullWidth />
             <TextField
               label="Estoque inicial"

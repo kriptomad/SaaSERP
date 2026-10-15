@@ -127,6 +127,9 @@ const createProductSchema = z.object({
   trackingType: z.enum(["NONE", "BATCH", "SERIAL", "VARIANT"]).default("NONE"),
   ncm: z.string().default("00000000"),
   originUf: z.string().length(2).nullable().optional(),
+  // Tabela SEFAZ "Origem da Mercadoria" (Convênio ICMS 38/2013): "0" nacional, "1"/"2"
+  // estrangeira, "3"-"8" conteúdo de importação — ver Product.icmsOrigin no schema.
+  icmsOrigin: z.enum(["0", "1", "2", "3", "4", "5", "6", "7", "8"]).default("0"),
   nicheCode: z.string().nullable().optional(),
   // Capítulo 11.4 — Loja de Roupas/Moda: tag de coleção/estação (ex.: "Verão 2026").
   collectionTag: z.string().trim().min(1).max(60).nullable().optional(),
@@ -182,6 +185,7 @@ productsRouter.post("/products", requireAuth, async (req: Request, res: Response
       trackingType: input.trackingType,
       ncm: input.ncm,
       originUf: input.originUf ?? null,
+      icmsOrigin: input.icmsOrigin,
       nicheCode: input.nicheCode ?? null,
       collectionTag: input.collectionTag ?? null,
       unitPrice: new Prisma.Decimal(input.unitPrice),
@@ -233,6 +237,7 @@ productsRouter.patch("/products/:id", requireAuth, async (req: Request, res: Res
         ...(input.trackingType !== undefined ? { trackingType: input.trackingType } : {}),
         ...(input.ncm !== undefined ? { ncm: input.ncm } : {}),
         ...(input.originUf !== undefined ? { originUf: input.originUf } : {}),
+        ...(input.icmsOrigin !== undefined ? { icmsOrigin: input.icmsOrigin } : {}),
         ...(input.nicheCode !== undefined ? { nicheCode: input.nicheCode } : {}),
         ...(input.collectionTag !== undefined ? { collectionTag: input.collectionTag } : {}),
         ...(input.unitPrice !== undefined ? { unitPrice: new Prisma.Decimal(input.unitPrice) } : {}),

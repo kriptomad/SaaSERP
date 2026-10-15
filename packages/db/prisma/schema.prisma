@@ -984,6 +984,16 @@ model Product {
   trackingType                  ProductTrackingType @default(NONE)
   ncm                           String?             @default("00000000") // Nomenclatura Comum do Mercosul — resolve a TaxRule (Capítulo 21.6) por produto
   originUf                      String? // UF de origem fiscal do produto/tenant, usada no cálculo de ICMS-ST interestadual (Capítulo 21.2)
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 5, Capítulo 21.7/21.19): a emissão de
+  // NFC-e gravava `icms_origem: "0"` (nacional) para TODO produto, sem distinguir
+  // mercadoria importada/com conteúdo de importação — uma informação fiscal
+  // incorreta na nota para qualquer loja que revenda produto importado (ex.:
+  // eletrônicos em Assistência Técnica/Informática). Tabela oficial SEFAZ "Origem
+  // da Mercadoria" (Convênio ICMS 38/2013): "0" nacional, "1" estrangeira
+  // (importação direta), "2" estrangeira (adquirida no mercado interno), "3" a "8"
+  // nacional/estrangeira com conteúdo de importação em faixas percentuais. Default
+  // "0" preserva o comportamento anterior para produtos já cadastrados.
+  icmsOrigin                    String              @default("0")
   nicheCode                     String? // ex.: "PHARMACY", "MARKET" — herda o nicho do Tenant no cadastro, mas pode ser sobrescrito por produto (ex.: farmácia que também vende conveniência)
   collectionTag                 String? // Capítulo 11.4 — Loja de Roupas/Moda: tag de coleção/estação (ex.: "Verão 2026"), usada no relatório de giro por coleção e na sinalização de liquidação
   unitPrice                     Decimal             @db.Decimal(12, 2)

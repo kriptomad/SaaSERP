@@ -242,7 +242,7 @@ export async function emitFiscalDocument(
         valor_bruto: Number(item.totalPrice),
         unidade_comercial: "UN",
         unidade_tributavel: "UN",
-        icms_origem: "0", // mercadoria nacional — Product não distingue origem importada nesta fase
+        icms_origem: product.icmsOrigin, // tabela SEFAZ "Origem da Mercadoria" (Convênio ICMS 38/2013), configurável por produto em Cadastros > Produtos
         icms_situacao_tributaria: cstCsosn,
       };
     }),
@@ -250,13 +250,23 @@ export async function emitFiscalDocument(
 
   const totalPayment = productItems.reduce((acc, item) => acc.plus(item.totalPrice), new Prisma.Decimal(0));
   const sefazPaymentCode = PAYMENT_METHOD_TO_SEFAZ_CODE[sale.paymentMethod] ?? "99";
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 5): `local_destino` (tabela SEFAZ
+  // "Local de destino da operação") estava fixo em "1" (operação interna) para
+  // TODA venda — inconsistente com o CFOP já resolvido por item acima (que
+  // corretamente distingue CFOP interno/interestadual via `isInterstate`). Uma
+  // NFC-e de entrega/vitrine (Capítulo 8.5/11.6) para cliente de outra UF é uma
+  // operação interestadual real (gera DIFAL, Capítulo 21.9) — declarar
+  // "1" nesse caso diverge do CFOP e pode gerar rejeição/autuação por
+  // inconsistência fiscal. "2" = operação interestadual; "3" = operação com o
+  // exterior nunca se aplica à NFC-e (consumidor final nacional).
+  const localDestino = tenant.uf && sale.client?.uf && sale.client.uf !== tenant.uf ? "2" : "1";
 
   const payload: Record<string, unknown> = {
     cnpj_emitente: onlyDigits(tenant.cnpj),
     data_emissao: new Date().toISOString(),
     presenca_comprador: resolvePresencaComprador(sale.channel),
     modalidade_frete: "9", // sem transporte — NFC-e é sempre venda direta ao consumidor final no balcão/entrega local
-    local_destino: "1", // operação interna (NFC-e nunca cruza fronteira estadual)
+    local_destino: localDestino,
     natureza_operacao: "VENDA AO CONSUMIDOR",
     items,
     formas_pagamento: [{ forma_pagamento: sefazPaymentCode, valor_pagamento: Number(totalPayment) }],

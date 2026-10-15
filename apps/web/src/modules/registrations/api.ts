@@ -69,6 +69,7 @@ export interface ProductListItem {
 
 export interface ProductDetail extends ProductListItem {
   originUf: string | null;
+  icmsOrigin: string;
   nicheCode: string | null;
   costPrice: string | null;
   minStockThreshold: string | null;
@@ -84,6 +85,7 @@ export interface ProductInput {
   trackingType: TrackingType;
   ncm: string;
   originUf: string | null;
+  icmsOrigin?: string;
   unitPrice: number;
   wholesalePrice: number | null;
   wholesaleMinQty: number | null;
