@@ -8,7 +8,14 @@ import { prismaUnscoped } from "@filitech/db";
 import { queueRedisConnection, QUEUE_NAMES } from "../lib/queue";
 import { getObjectDirect, putObjectDirect } from "../lib/object-storage";
 import { parseSpreadsheetBuffer } from "../lib/spreadsheet-parser";
-import { applyColumnMapping, validateMappedProductRow } from "../modules/data-portability/product-import-mapping";
+import {
+  applyColumnMapping,
+  validateMappedProductRow,
+  validateMappedPartyRow,
+  normalizeDocument,
+  MappedProductRow,
+  MappedPartyRow,
+} from "../modules/data-portability/product-import-mapping";
 import { createModuleLogger } from "../lib/logger";
 
 const log = createModuleLogger("data-import-validation.worker");
@@ -39,13 +46,8 @@ export async function dataImportValidationProcessor(job: Job<DataImportValidatio
 
   try {
     const importJob = await prismaUnscoped.dataImportJob.findFirstOrThrow({ where: { id: jobId, tenantId } });
-    if (importJob.targetEntity !== "PRODUCT") {
-      // Única entidade implementada nesta rodada (Capítulo 18.5, texto integral só
-      // detalha o wizard para `Product`) — GAP DE AUDITORIA DOCUMENTADO: CLIENT/
-      // SUPPLIER ficam para uma rodada futura, o schema já está pronto para eles
-      // (`targetEntity` é String livre), mas nenhuma regra de validação/gravação
-      // existe ainda para essas duas entidades.
-      throw new Error(`Validação de importação ainda não implementada para a entidade "${importJob.targetEntity}" (somente PRODUCT nesta versão).`);
+    if (importJob.targetEntity !== "PRODUCT" && importJob.targetEntity !== "CLIENT" && importJob.targetEntity !== "SUPPLIER") {
+      throw new Error(`Validação de importação não suportada para a entidade "${importJob.targetEntity}".`);
     }
 
     const columnMapping = importJob.columnMapping as Record<string, string>;
@@ -59,13 +61,54 @@ export async function dataImportValidationProcessor(job: Job<DataImportValidatio
     const [headers, ...dataRows] = rows;
 
     const errorEntries: RowErrorReportEntry[] = [];
-    dataRows.forEach((rawRow, index) => {
-      const mapped = applyColumnMapping(headers, rawRow, columnMapping);
-      const errors = validateMappedProductRow(mapped);
-      if (errors.length > 0) {
-        errorEntries.push({ row: index + 2, errors }); // +2: linha 1 é cabeçalho, humano conta a partir de 1
-      }
-    });
+
+    if (importJob.targetEntity === "PRODUCT") {
+      dataRows.forEach((rawRow, index) => {
+        const mapped = applyColumnMapping<MappedProductRow>(headers, rawRow, columnMapping);
+        const errors = validateMappedProductRow(mapped);
+        if (errors.length > 0) {
+          errorEntries.push({ row: index + 2, errors }); // +2: linha 1 é cabeçalho, humano conta a partir de 1
+        }
+      });
+    } else {
+      // CLIENT/SUPPLIER: além da validação sintática por linha, checa duplicidade de
+      // `document` (CPF/CNPJ) tanto entre linhas do próprio arquivo quanto contra o
+      // que já existe no banco para este tenant (`@@unique([tenantId, document])`) —
+      // sem isso, o passo de validação aprovaria o arquivo e a gravação em lote
+      // falharia inteira no meio por violação de unicidade (Capítulo 18.5: "tudo-ou-
+      // nada", mas o objetivo da validação prévia é nunca deixar chegar nesse ponto).
+      const mappedRows = dataRows.map((rawRow) => applyColumnMapping<MappedPartyRow>(headers, rawRow, columnMapping));
+
+      const documentsInFile = mappedRows
+        .map((r) => (r.document ? normalizeDocument(r.document) : null))
+        .filter((d): d is string => Boolean(d));
+
+      const existing =
+        documentsInFile.length === 0
+          ? []
+          : importJob.targetEntity === "CLIENT"
+            ? await prismaUnscoped.client.findMany({ where: { tenantId, document: { in: documentsInFile } }, select: { document: true } })
+            : await prismaUnscoped.supplier.findMany({ where: { tenantId, document: { in: documentsInFile } }, select: { document: true } });
+      const existingDocuments = new Set(existing.map((e) => e.document).filter((d): d is string => Boolean(d)));
+      const seenInFile = new Map<string, number>(); // document -> primeira linha onde apareceu
+
+      mappedRows.forEach((mapped, index) => {
+        const errors = validateMappedPartyRow(mapped);
+        if (mapped.document) {
+          const normalized = normalizeDocument(mapped.document);
+          if (existingDocuments.has(normalized)) {
+            errors.push(`Documento "${mapped.document}" já está cadastrado neste tenant.`);
+          } else if (seenInFile.has(normalized)) {
+            errors.push(`Documento "${mapped.document}" duplicado neste arquivo (já aparece na linha ${seenInFile.get(normalized)}).`);
+          } else {
+            seenInFile.set(normalized, index + 2);
+          }
+        }
+        if (errors.length > 0) {
+          errorEntries.push({ row: index + 2, errors });
+        }
+      });
+    }
 
     let errorReportKey: string | null = null;
     if (errorEntries.length > 0) {

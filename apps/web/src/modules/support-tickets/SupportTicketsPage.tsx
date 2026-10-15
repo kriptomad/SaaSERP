@@ -23,9 +23,11 @@ import {
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
+import AttachFileIcon from "@mui/icons-material/AttachFile";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Page, PageHeader, QueryState, errorMessage } from "../../shared/ui/PageLayout";
 import { formatDate } from "../../shared/ui/format";
+import { uploadFileToStorage, resolveStorageDownloadUrl } from "../../shared/storage/upload";
 import {
   supportTicketsApi,
   TICKET_CATEGORY_LABEL,
@@ -49,16 +51,32 @@ function NewTicketDialog({ onClose }: { onClose: () => void }) {
   const [category, setCategory] = useState<TicketCategory>("HOW_TO");
   const [priority, setPriority] = useState<TicketPriority>("NORMAL");
   const [body, setBody] = useState("");
+  const [attachmentKeys, setAttachmentKeys] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const create = useMutation({
-    mutationFn: () => supportTicketsApi.create({ subject: subject.trim(), category, priority, body: body.trim() }),
+    mutationFn: () => supportTicketsApi.create({ subject: subject.trim(), category, priority, body: body.trim(), attachmentUrls: attachmentKeys }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["support-tickets"] });
       onClose();
     },
     onError: (e) => setError(errorMessage(e)),
   });
+
+  async function handleAttachmentSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const storageKey = await uploadFileToStorage(file, "support-ticket-attachments");
+      setAttachmentKeys((prev) => [...prev, storageKey]);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setUploading(false);
+    }
+  }
 
   return (
     <Dialog open onClose={onClose} fullWidth maxWidth="sm">
@@ -79,13 +97,22 @@ function NewTicketDialog({ onClose }: { onClose: () => void }) {
             <MenuItem value="URGENT">Urgente (sistema fora do ar / venda travada)</MenuItem>
           </TextField>
           <TextField label="Descreva o problema" value={body} onChange={(e) => setBody(e.target.value)} required multiline minRows={4} />
+          <Button component="label" variant="outlined" size="small" startIcon={<AttachFileIcon />} disabled={uploading}>
+            {uploading ? "Enviando anexo…" : "Anexar foto/print"}
+            <input type="file" hidden accept="image/jpeg,image/png,image/webp,application/pdf" onChange={handleAttachmentSelected} />
+          </Button>
+          {attachmentKeys.length > 0 && (
+            <Typography variant="caption" color="text.secondary">
+              {attachmentKeys.length} anexo(s) prontos para envio.
+            </Typography>
+          )}
         </Stack>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} disabled={create.isPending}>Cancelar</Button>
         <Button
           variant="contained"
-          disabled={create.isPending}
+          disabled={create.isPending || uploading}
           onClick={() => {
             setError(null);
             if (!subject.trim() || !body.trim()) return setError("Assunto e descrição são obrigatórios.");
@@ -102,16 +129,36 @@ function NewTicketDialog({ onClose }: { onClose: () => void }) {
 function TicketDetailDialog({ ticketId, onClose }: { ticketId: string; onClose: () => void }) {
   const queryClient = useQueryClient();
   const [reply, setReply] = useState("");
+  const [attachmentKeys, setAttachmentKeys] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
   const query = useQuery({ queryKey: ["support-tickets", ticketId], queryFn: () => supportTicketsApi.get(ticketId) });
 
   const sendReply = useMutation({
-    mutationFn: () => supportTicketsApi.addMessage(ticketId, reply.trim()),
+    mutationFn: () => supportTicketsApi.addMessage(ticketId, reply.trim(), attachmentKeys),
     onSuccess: () => {
       setReply("");
+      setAttachmentKeys([]);
       void queryClient.invalidateQueries({ queryKey: ["support-tickets", ticketId] });
       void queryClient.invalidateQueries({ queryKey: ["support-tickets"] });
     },
   });
+
+  async function handleAttachmentSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const storageKey = await uploadFileToStorage(file, "support-ticket-attachments");
+      setAttachmentKeys((prev) => [...prev, storageKey]);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleOpenAttachment(storageKey: string) {
+    const url = await resolveStorageDownloadUrl(storageKey);
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
 
   return (
     <Dialog open onClose={onClose} fullWidth maxWidth="sm">
@@ -143,23 +190,45 @@ function TicketDetailDialog({ ticketId, onClose }: { ticketId: string; onClose: 
                       {m.authorType === "TENANT_USER" ? "Você" : "Suporte Filitech"} · {formatDate(m.createdAt)}
                     </Typography>
                     <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>{m.body}</Typography>
+                    {m.attachmentUrls.length > 0 && (
+                      <Stack direction="row" spacing={1} sx={{ mt: 0.5, flexWrap: "wrap" }}>
+                        {m.attachmentUrls.map((key, i) => (
+                          <Button key={key} size="small" variant="text" startIcon={<AttachFileIcon fontSize="small" />} onClick={() => handleOpenAttachment(key)}>
+                            Anexo {i + 1}
+                          </Button>
+                        ))}
+                      </Stack>
+                    )}
                   </Paper>
                 ))}
               </Stack>
               {ticket.status !== "CLOSED" && (
-                <Stack direction="row" spacing={1}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    placeholder="Escreva uma resposta…"
-                    value={reply}
-                    onChange={(e) => setReply(e.target.value)}
-                    multiline
-                    minRows={2}
-                  />
-                  <Button variant="contained" disabled={!reply.trim() || sendReply.isPending} onClick={() => sendReply.mutate()}>
-                    Enviar
-                  </Button>
+                <Stack spacing={1}>
+                  <Stack direction="row" spacing={1}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      placeholder="Escreva uma resposta…"
+                      value={reply}
+                      onChange={(e) => setReply(e.target.value)}
+                      multiline
+                      minRows={2}
+                    />
+                    <Button variant="contained" disabled={!reply.trim() || sendReply.isPending} onClick={() => sendReply.mutate()}>
+                      Enviar
+                    </Button>
+                  </Stack>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Button component="label" size="small" variant="outlined" startIcon={<AttachFileIcon />} disabled={uploading}>
+                      {uploading ? "Enviando…" : "Anexar foto/print"}
+                      <input type="file" hidden accept="image/jpeg,image/png,image/webp,application/pdf" onChange={handleAttachmentSelected} />
+                    </Button>
+                    {attachmentKeys.length > 0 && (
+                      <Typography variant="caption" color="text.secondary">
+                        {attachmentKeys.length} anexo(s) prontos para enviar com a resposta.
+                      </Typography>
+                    )}
+                  </Stack>
                 </Stack>
               )}
             </Stack>

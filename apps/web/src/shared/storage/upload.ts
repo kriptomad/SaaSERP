@@ -5,7 +5,7 @@
 // passar pela API (evita duplicar tráfego/memória do processo Node).
 import { api } from "../../api/client";
 
-export type StorageCategory = "work-order-photos" | "avatars" | "fiscal-xml" | "client-record-photos";
+export type StorageCategory = "work-order-photos" | "avatars" | "fiscal-xml" | "client-record-photos" | "support-ticket-attachments";
 
 interface PresignUploadResponse {
   uploadUrl: string;

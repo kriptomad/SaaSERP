@@ -11,7 +11,15 @@ import { prismaUnscoped } from "@filitech/db";
 import { queueRedisConnection, QUEUE_NAMES } from "../lib/queue";
 import { getObjectDirect } from "../lib/object-storage";
 import { parseSpreadsheetBuffer } from "../lib/spreadsheet-parser";
-import { applyColumnMapping, validateMappedProductRow, MappedProductRow } from "../modules/data-portability/product-import-mapping";
+import {
+  applyColumnMapping,
+  validateMappedProductRow,
+  validateMappedPartyRow,
+  buildClientCreateData,
+  buildSupplierCreateData,
+  MappedProductRow,
+  MappedPartyRow,
+} from "../modules/data-portability/product-import-mapping";
 import { broadcastToTenant } from "../lib/sse";
 import { createModuleLogger } from "../lib/logger";
 
@@ -84,15 +92,28 @@ export async function dataImportExecutionProcessor(job: Job<DataImportExecutionJ
     try {
       await prismaUnscoped.$transaction(async (tx) => {
         for (const rawRow of batch) {
-          const mapped = applyColumnMapping(headers, rawRow, columnMapping);
-          const errors = validateMappedProductRow(mapped);
-          if (errors.length > 0) {
-            // Não deveria acontecer (a linha já passou pela validação prévia), mas o
-            // lote inteiro é abortado (tudo-ou-nada) em vez de gravar parcialmente —
-            // mesmo princípio de "fail-closed" usado na extensão de tenant (Capítulo 7.2).
-            throw new Error(`Linha reprovaria na validação durante a gravação: ${errors.join(" | ")}`);
+          if (importJob.targetEntity === "PRODUCT") {
+            const mapped = applyColumnMapping<MappedProductRow>(headers, rawRow, columnMapping);
+            const errors = validateMappedProductRow(mapped);
+            if (errors.length > 0) {
+              // Não deveria acontecer (a linha já passou pela validação prévia), mas o
+              // lote inteiro é abortado (tudo-ou-nada) em vez de gravar parcialmente —
+              // mesmo princípio de "fail-closed" usado na extensão de tenant (Capítulo 7.2).
+              throw new Error(`Linha reprovaria na validação durante a gravação: ${errors.join(" | ")}`);
+            }
+            await tx.product.create({ data: buildProductCreateData(tenantId, mapped) });
+          } else {
+            const mapped = applyColumnMapping<MappedPartyRow>(headers, rawRow, columnMapping);
+            const errors = validateMappedPartyRow(mapped);
+            if (errors.length > 0) {
+              throw new Error(`Linha reprovaria na validação durante a gravação: ${errors.join(" | ")}`);
+            }
+            if (importJob.targetEntity === "CLIENT") {
+              await tx.client.create({ data: buildClientCreateData(tenantId, mapped) });
+            } else {
+              await tx.supplier.create({ data: buildSupplierCreateData(tenantId, mapped) });
+            }
           }
-          await tx.product.create({ data: buildProductCreateData(tenantId, mapped) });
         }
         processedRows += batch.length;
         await tx.dataImportJob.update({ where: { id: jobId }, data: { processedRows } });

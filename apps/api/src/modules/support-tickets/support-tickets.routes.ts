@@ -24,6 +24,7 @@ const createTicketSchema = z.object({
   category: z.enum(["BILLING", "BUG", "HOW_TO", "INTEGRATION", "OUTAGE"]),
   priority: z.enum(["LOW", "NORMAL", "HIGH", "URGENT"]).default("NORMAL"),
   body: z.string().min(1),
+  attachmentUrls: z.array(z.string()).default([]),
 });
 
 // POST /support-tickets — abre um chamado novo, já com a primeira mensagem (o
@@ -34,13 +35,13 @@ supportTicketsRouter.post("/support-tickets", requireAuth, async (req: Request, 
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
   }
   const { tenantId, userId } = req.session!;
-  const { subject, category, priority, body } = parsed.data;
+  const { subject, category, priority, body, attachmentUrls } = parsed.data;
 
   const ticket = await prisma.supportTicket.create({
     data: { tenantId, openedByUserId: userId, subject, category, priority, status: "OPEN" },
   });
   const message = await prisma.supportTicketMessage.create({
-    data: { ticketId: ticket.id, authorType: "TENANT_USER", authorId: userId, body, attachmentUrls: [] },
+    data: { ticketId: ticket.id, authorType: "TENANT_USER", authorId: userId, body, attachmentUrls },
   });
 
   return res.status(201).json({ success: true, data: { ...ticket, messages: [message] }, error: null });

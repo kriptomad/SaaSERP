@@ -20,6 +20,20 @@
 // então cifrado (AES-256-GCM) antes do upload — nenhum byte não cifrado chega a
 // tocar o disco do worker (tudo em memória/stream), igual ao espírito do capítulo.
 // Restauração: `apps/api/scripts/restore-encrypted-backup.mjs` (script complementar).
+//
+// REVISÃO FINAL (fechamento do item residual `backup-pgdump-review` da mega-audit):
+// avaliada a alternativa de trazer o binário real `pg_dump`/libpq para dentro da
+// imagem distroless via multi-stage COPY (ambos os estágios do Dockerfile são
+// baseados em Debian 12, então os `.so` resolvidos por `ldd` no estágio de build
+// seriam binário-compatíveis com o estágio final). Decisão: NÃO adotar. Motivos:
+// (1) reintroduz binários nativos arbitrários na imagem de produção, o oposto do
+// que a distroless promete (Capítulo 3.1); (2) qualquer incompatibilidade de
+// versão de libpq/OpenSSL só seria descoberta em produção — este ambiente de
+// trabalho não tem Docker disponível para construir e rodar o container e validar
+// a mudança com segurança antes do deploy; (3) o dump lógico via Prisma já entrega
+// a mesma garantia funcional (cifra + upload + restauração) sem downtime e sem
+// abrir mão da superfície de ataque mínima. Decisão arquitetural considerada
+// DEFINITIVA, não mais um gap em aberto.
 import { Worker, Job } from "bullmq";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";

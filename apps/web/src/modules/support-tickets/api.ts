@@ -35,6 +35,7 @@ export interface CreateTicketInput {
   category: TicketCategory;
   priority?: TicketPriority;
   body: string;
+  attachmentUrls?: string[];
 }
 
 export const TICKET_CATEGORY_LABEL: Record<TicketCategory, string> = {
@@ -57,5 +58,6 @@ export const supportTicketsApi = {
   list: (status?: TicketStatus) => api.get<SupportTicket[]>("/support-tickets", status ? { status } : undefined),
   get: (id: string) => api.get<SupportTicket>(`/support-tickets/${id}`),
   create: (input: CreateTicketInput) => api.post<SupportTicket>("/support-tickets", input),
-  addMessage: (id: string, body: string) => api.post<SupportTicketMessage>(`/support-tickets/${id}/messages`, { body }),
+  addMessage: (id: string, body: string, attachmentUrls: string[] = []) =>
+    api.post<SupportTicketMessage>(`/support-tickets/${id}/messages`, { body, attachmentUrls }),
 };

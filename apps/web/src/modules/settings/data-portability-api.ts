@@ -56,13 +56,24 @@ export interface SuggestMappingResult {
 }
 
 export const PRODUCT_IMPORT_TARGET_FIELDS = ["name", "barcodeEan13", "costPrice", "unitPrice", "stockQuantity", "categoryName"] as const;
+export const CLIENT_IMPORT_TARGET_FIELDS = ["name", "document", "phone", "email"] as const;
+export const SUPPLIER_IMPORT_TARGET_FIELDS = ["name", "document", "phone", "email"] as const;
+
+export type ImportTargetEntity = "PRODUCT" | "CLIENT" | "SUPPLIER";
+
+export function importTargetFieldsForEntity(entity: ImportTargetEntity): readonly string[] {
+  if (entity === "PRODUCT") return PRODUCT_IMPORT_TARGET_FIELDS;
+  if (entity === "CLIENT") return CLIENT_IMPORT_TARGET_FIELDS;
+  return SUPPLIER_IMPORT_TARGET_FIELDS;
+}
 
 export const dataImportApi = {
   list: () => api.get<DataImportJob[]>("/data-import/jobs"),
   detail: (id: string) => api.get<DataImportJobDetail>(`/data-import/jobs/${id}`),
   presignUpload: (fileName: string, mimeType: string, fileSizeBytes: number) =>
     api.post<PresignUploadResult>("/data-import/presign-upload", { fileName, mimeType, fileSizeBytes }),
-  createJob: (sourceFileKey: string) => api.post<DataImportJob>("/data-import/jobs", { targetEntity: "PRODUCT", sourceFileKey }),
+  createJob: (sourceFileKey: string, targetEntity: ImportTargetEntity = "PRODUCT") =>
+    api.post<DataImportJob>("/data-import/jobs", { targetEntity, sourceFileKey }),
   suggestMapping: (id: string) => api.post<SuggestMappingResult>(`/data-import/jobs/${id}/suggest-mapping`),
   updateMapping: (id: string, columnMapping: Record<string, string>) => api.patch<DataImportJob>(`/data-import/jobs/${id}`, { columnMapping }),
   validate: (id: string) => api.post<{ jobId: string; status: string }>(`/data-import/jobs/${id}/validate`),

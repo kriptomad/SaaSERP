@@ -27,7 +27,7 @@ import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import { Page, PageHeader, errorMessage } from "../../shared/ui/PageLayout";
 import { useToast } from "../../shared/ui/Toast";
 import { useSseStream } from "../../shared/useSseStream";
-import { dataImportApi, PRODUCT_IMPORT_TARGET_FIELDS, uploadImportSourceFile } from "./data-portability-api";
+import { dataImportApi, ImportTargetEntity, importTargetFieldsForEntity, uploadImportSourceFile } from "./data-portability-api";
 
 const TARGET_FIELD_LABEL: Record<string, string> = {
   name: "Nome do produto",
@@ -36,6 +36,15 @@ const TARGET_FIELD_LABEL: Record<string, string> = {
   unitPrice: "Preço de venda",
   stockQuantity: "Quantidade em estoque",
   categoryName: "Categoria",
+  document: "CPF/CNPJ",
+  phone: "Telefone",
+  email: "E-mail",
+};
+
+const ENTITY_LABEL: Record<ImportTargetEntity, string> = {
+  PRODUCT: "Produtos",
+  CLIENT: "Clientes",
+  SUPPLIER: "Fornecedores",
 };
 
 const STEPS = ["Upload", "Mapeamento", "Validação", "Confirmação"];
@@ -44,6 +53,7 @@ export function DataImportWizardPage() {
   const toast = useToast();
   const queryClient = useQueryClient();
   const [activeStep, setActiveStep] = useState(0);
+  const [targetEntity, setTargetEntity] = useState<ImportTargetEntity>("PRODUCT");
   const [jobId, setJobId] = useState<string | null>(null);
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [progress, setProgress] = useState<{ processedRows: number; totalRows: number } | null>(null);
@@ -70,7 +80,7 @@ export function DataImportWizardPage() {
   const uploadMutation = useMutation({
     mutationFn: async (file: File) => {
       const storageKey = await uploadImportSourceFile(file);
-      return dataImportApi.createJob(storageKey);
+      return dataImportApi.createJob(storageKey, targetEntity);
     },
     onSuccess: async (job) => {
       setJobId(job.id);
@@ -131,7 +141,7 @@ export function DataImportWizardPage() {
     <Page>
       <PageHeader
         title="Importação Assistida de Dados"
-        subtitle="Envie um CSV/XLSX de produtos, mapeie as colunas, valide sem gravar nada e só então confirme a gravação real, em lotes transacionais."
+        subtitle="Envie um CSV/XLSX de produtos, clientes ou fornecedores, mapeie as colunas, valide sem gravar nada e só então confirme a gravação real, em lotes transacionais."
       />
 
       <Stepper activeStep={activeStep} sx={{ mb: 3 }}>
@@ -145,9 +155,21 @@ export function DataImportWizardPage() {
       {activeStep === 0 && (
         <Paper sx={{ p: 3 }}>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Envie um arquivo CSV ou XLSX com seu catálogo de produtos. O arquivo é processado no servidor — nunca no
-            seu navegador.
+            Selecione o tipo de dado e envie um arquivo CSV ou XLSX. O arquivo é processado no servidor — nunca no seu
+            navegador.
           </Typography>
+          <Select
+            size="small"
+            value={targetEntity}
+            onChange={(e) => setTargetEntity(e.target.value as ImportTargetEntity)}
+            sx={{ minWidth: 220, mb: 2, display: "block" }}
+          >
+            {(Object.keys(ENTITY_LABEL) as ImportTargetEntity[]).map((entity) => (
+              <MenuItem key={entity} value={entity}>
+                {ENTITY_LABEL[entity]}
+              </MenuItem>
+            ))}
+          </Select>
           <Button component="label" variant="contained" startIcon={<CloudUploadIcon />} disabled={uploadMutation.isPending || suggestMappingMutation.isPending}>
             {uploadMutation.isPending || suggestMappingMutation.isPending ? "Enviando…" : "Selecionar arquivo"}
             <input type="file" hidden accept=".csv,.xlsx,.xls" onChange={handleFileSelected} />
@@ -185,9 +207,9 @@ export function DataImportWizardPage() {
                       sx={{ minWidth: 220 }}
                     >
                       <MenuItem value="">— Ignorar esta coluna —</MenuItem>
-                      {PRODUCT_IMPORT_TARGET_FIELDS.map((field) => (
+                      {importTargetFieldsForEntity(targetEntity).map((field) => (
                         <MenuItem key={field} value={field}>
-                          {TARGET_FIELD_LABEL[field]}
+                          {TARGET_FIELD_LABEL[field] ?? field}
                         </MenuItem>
                       ))}
                     </Select>

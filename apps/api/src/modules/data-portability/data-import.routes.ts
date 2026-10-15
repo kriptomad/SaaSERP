@@ -1,11 +1,9 @@
 // apps/api/src/modules/data-portability/data-import.routes.ts
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 18.5 — Importação Assistida de Dados: o
 // wizard de 4 passos (Upload -> Mapeamento -> Validação -> Confirmação), nunca
-// aplicando a importação sem confirmação visual prévia. Esta rodada implementa
-// somente `targetEntity = "PRODUCT"` (único detalhado no texto do capítulo) — o
-// schema `DataImportJob.targetEntity` já é String livre e aceita CLIENT/SUPPLIER no
-// futuro sem migração, mas a validação/gravação real dessas duas entidades é GAP DE
-// AUDITORIA DOCUMENTADO, deliberadamente fora do escopo desta rodada.
+// aplicando a importação sem confirmação visual prévia. Agora cobre PRODUCT, CLIENT
+// e SUPPLIER (gap de auditoria original fechado: CLIENT/SUPPLIER tinham suporte de
+// schema desde a primeira rodada, mas nenhuma validação/gravação real).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
@@ -13,7 +11,7 @@ import { requireAuth } from "../../middlewares/auth.middleware";
 import { presignObjectUpload, presignObjectDownload, getObjectDirect } from "../../lib/object-storage";
 import { dataImportValidationQueue, dataImportExecutionQueue } from "../../lib/queue";
 import { parseSpreadsheetBuffer } from "../../lib/spreadsheet-parser";
-import { suggestColumnMapping } from "./product-import-mapping";
+import { suggestColumnMapping, ImportTargetEntity } from "./product-import-mapping";
 
 export const dataImportRouter = Router();
 
@@ -39,7 +37,7 @@ dataImportRouter.post("/data-import/presign-upload", requireAuth, async (req: Re
 });
 
 const createJobSchema = z.object({
-  targetEntity: z.enum(["PRODUCT"]), // CLIENT/SUPPLIER: GAP DE AUDITORIA DOCUMENTADO acima
+  targetEntity: z.enum(["PRODUCT", "CLIENT", "SUPPLIER"]),
   sourceFileKey: z.string().min(1),
 });
 
@@ -105,7 +103,7 @@ dataImportRouter.post("/data-import/jobs/:id/suggest-mapping", requireAuth, asyn
     }
     const [headers, ...dataRows] = rows;
     const previewRows = dataRows.slice(0, 5);
-    const suggestedMapping = suggestColumnMapping(headers);
+    const suggestedMapping = suggestColumnMapping(headers, job.targetEntity as ImportTargetEntity);
 
     return res.json({ success: true, data: { headers, previewRows, suggestedMapping }, error: null });
   } catch (error) {

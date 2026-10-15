@@ -44,6 +44,10 @@ export const STORAGE_CATEGORIES = {
   // upload (o arquivo em si é binário opaco — ".enc" não é um mimetype IANA real,
   // mas identifica inequivocamente "já cifrado" para quem navegar o bucket).
   "database-backups": { allowedMimeTypes: ["application/octet-stream"], maxBytes: 5 * 1024 * 1024 * 1024 },
+  // Capítulo 15.3 — anexos (foto/print) de chamados de helpdesk, enviados pelo
+  // lojista junto do relato do problema ou de uma resposta — mesmo padrão de upload
+  // direto do navegador usado em work-order-photos/client-record-photos.
+  "support-ticket-attachments": { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp", "application/pdf"], maxBytes: 10 * 1024 * 1024 },
 } as const;
 export type StorageCategory = keyof typeof STORAGE_CATEGORIES;
 
