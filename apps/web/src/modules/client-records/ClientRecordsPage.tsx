@@ -436,7 +436,7 @@ function NewVehicleDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function VehiclesTab() {
+export function VehiclesTab() {
   const query = useQuery({ queryKey: ["vehicles"], queryFn: () => vehiclesApi.list() });
   const [newOpen, setNewOpen] = useState(false);
 
@@ -653,7 +653,7 @@ function ConsignmentPayoutCell({ listing }: { listing: VehicleListing }) {
   );
 }
 
-function VehicleListingsTab() {
+export function VehicleListingsTab() {
   const query = useQuery({ queryKey: ["vehicle-listings"], queryFn: () => vehicleListingsApi.list() });
   const [newOpen, setNewOpen] = useState(false);
   const [markSoldFor, setMarkSoldFor] = useState<VehicleListing | null>(null);
@@ -873,17 +873,38 @@ export function ClientRecordsPage() {
   const [tab, setTab] = useState(0);
   return (
     <Page>
-      <PageHeader title="Prontuários de clientes" subtitle="Pet, veículo, veículo seminovo e receita óptica, vinculados a um Client." />
+      <PageHeader title="Prontuários de clientes" subtitle="Pet e receita óptica, vinculados a um Client. Veículos (oficina) e veículos seminovos (consignação) têm telas dedicadas em seus próprios menus de nicho." />
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }}>
         <Tab label="Pets" />
-        <Tab label="Veículos" />
-        <Tab label="Veículos seminovos" />
         <Tab label="Receitas ópticas" />
       </Tabs>
       {tab === 0 && <PetsTab />}
-      {tab === 1 && <VehiclesTab />}
-      {tab === 2 && <VehicleListingsTab />}
-      {tab === 3 && <OpticalPrescriptionsTab />}
+      {tab === 1 && <OpticalPrescriptionsTab />}
+    </Page>
+  );
+}
+
+// ───────────────────────── Telas dedicadas por nicho ─────────────────────────
+// GAP DE AUDITORIA FECHADO (nicho-ui-dedicada): Veículos (Oficina Mecânica) e
+// Veículos seminovos (Loja de Veículos) antes viviam escondidos como abas dentro
+// da tela genérica "Prontuários", compartilhada com Pets/Receitas ópticas — um
+// tenant de Oficina via abas de Pet/Ótica irrelevantes, e vice-versa. Cada nicho
+// agora tem sua própria rota e item de menu dedicados (ver navigation.tsx).
+
+export function VehiclesRecordsPage() {
+  return (
+    <Page>
+      <PageHeader title="Veículos de clientes" subtitle="Cadastro de veículos vinculados a um Client, usado nas Ordens de Serviço da Oficina Mecânica/Autoelétrica." />
+      <VehiclesTab />
+    </Page>
+  );
+}
+
+export function VehicleListingsPage() {
+  return (
+    <Page>
+      <PageHeader title="Estoque de veículos seminovos" subtitle="Anúncios de veículos próprios ou em consignação, com baixa automática e cálculo de repasse ao consignante na venda." />
+      <VehicleListingsTab />
     </Page>
   );
 }

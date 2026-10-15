@@ -105,7 +105,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: "clientes", label: "Clientes", path: "/cadastros/clientes", icon: <PeopleIcon /> },
       { id: "fornecedores", label: "Fornecedores", path: "/cadastros/fornecedores", icon: <LocalShippingIcon /> },
       { id: "produtos", label: "Produtos", path: "/cadastros/produtos", icon: <CategoryIcon /> },
-      { id: "prontuarios", label: "Prontuários (pet/veículo/ótica)", path: "/cadastros/prontuarios", icon: <PetsIcon />, moduleCodes: ["PETSHOP_VET", "OPTICAL_LAB", "AUTO_REPAIR_SHOP", "VEHICLE_DEALERSHIP"] },
+      { id: "prontuarios", label: "Prontuários (pet/ótica)", path: "/cadastros/prontuarios", icon: <PetsIcon />, moduleCodes: ["PETSHOP_VET", "OPTICAL_LAB"] },
     ],
   },
   {
@@ -289,7 +289,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: "pneus-garantia", label: "Garantia de pneus por lote", path: "/pneus/garantia", icon: <TireRepairIcon />, moduleCode: "TIRE_WARRANTY" },
       { id: "estetica-fila", label: "Fila de atendimento (lava-rápido)", path: "/estetica-automotiva/fila", icon: <LocalCarWashIcon />, moduleCode: "CAR_WASH_QUEUE" },
       { id: "oficina-os", label: "Ordens de Serviço (Oficina)", path: "/os", icon: <BuildIcon />, moduleCode: "AUTO_REPAIR_SHOP" },
-      { id: "veiculos-estoque", label: "Estoque de veículos (consignação)", path: "/cadastros/prontuarios", icon: <PetsIcon />, moduleCode: "VEHICLE_DEALERSHIP" },
+      { id: "oficina-veiculos", label: "Veículos de clientes", path: "/oficina/veiculos", icon: <BuildIcon />, moduleCode: "AUTO_REPAIR_SHOP" },
+      { id: "veiculos-estoque", label: "Estoque de veículos (consignação)", path: "/veiculos-seminovos/anuncios", icon: <PetsIcon />, moduleCode: "VEHICLE_DEALERSHIP" },
     ],
   },
 ];
