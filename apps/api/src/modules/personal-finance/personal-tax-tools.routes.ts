@@ -13,6 +13,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { applyPrivacyFilter } from "./personal-accounts.routes";
 
 export const personalTaxToolsRouter = Router();
 
@@ -54,8 +55,8 @@ export function resolveInvoiceCompetence(purchaseDate: Date, closingDay: number)
   return { year, month };
 }
 
-export async function getCurrentInvoiceTotal(accountId: string): Promise<Prisma.Decimal> {
-  const account = await prisma.personalAccount.findUniqueOrThrow({ where: { id: accountId } });
+export async function getCurrentInvoiceTotal(accountId: string, tenantId: string, requestingUserId: string): Promise<Prisma.Decimal> {
+  const account = await prisma.personalAccount.findFirstOrThrow({ where: { id: accountId, tenantId } });
   if (account.type !== "CREDIT_CARD" || !account.invoiceClosingDay) {
     throw new Error("Conta não é do tipo CREDIT_CARD ou não possui dia de fechamento configurado.");
   }
@@ -65,8 +66,11 @@ export async function getCurrentInvoiceTotal(accountId: string): Promise<Prisma.
   const invoiceStart = new Date(competence.year, competence.month - 1, account.invoiceClosingDay);
   const invoiceEnd = new Date(competence.year, competence.month, account.invoiceClosingDay);
 
+  // Capítulo 22.3 — mesma blindagem de privacidade das transações: o total da
+  // fatura (e o limite disponível derivado dele) não pode somar despesas
+  // privadas de outro usuário em conta compartilhada, nem vazar entre tenants.
   const result = await prisma.personalTransaction.aggregate({
-    where: { accountId, type: "EXPENSE", transactionDate: { gte: invoiceStart, lt: invoiceEnd } },
+    where: applyPrivacyFilter({ accountId, tenantId, type: "EXPENSE", transactionDate: { gte: invoiceStart, lt: invoiceEnd } }, requestingUserId),
     _sum: { amount: true },
   });
   return result._sum.amount ?? new Prisma.Decimal(0);
@@ -74,7 +78,7 @@ export async function getCurrentInvoiceTotal(accountId: string): Promise<Prisma.
 
 personalTaxToolsRouter.get("/personal/accounts/:id/invoice-summary", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
-  const { tenantId } = req.session!;
+  const { tenantId, userId } = req.session!;
   const account = await prisma.personalAccount.findFirst({ where: { id: req.params.id, tenantId } });
   if (!account) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Conta não encontrada." } });
@@ -83,7 +87,7 @@ personalTaxToolsRouter.get("/personal/accounts/:id/invoice-summary", requireAuth
     return res.status(400).json({ success: false, data: null, error: { code: "NOT_A_CREDIT_CARD", message: "Esta conta não é um cartão de crédito com dia de fechamento configurado." } });
   }
 
-  const currentInvoiceTotal = await getCurrentInvoiceTotal(account.id);
+  const currentInvoiceTotal = await getCurrentInvoiceTotal(account.id, tenantId, userId);
   const creditLimit = account.creditLimit ?? new Prisma.Decimal(0);
   const availableLimit = creditLimit.minus(currentInvoiceTotal);
   const competence = resolveInvoiceCompetence(new Date(), account.invoiceClosingDay);

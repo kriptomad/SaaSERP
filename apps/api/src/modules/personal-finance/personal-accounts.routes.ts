@@ -47,7 +47,7 @@ async function requireFinancialWrite(req: Request, res: Response): Promise<boole
 // Capítulo 22.3 — reforçado na camada de dados (nunca apenas escondido na UI):
 // uma transação marcada `isPrivate` só é visível para quem a criou, mesmo que
 // outro usuário pertença ao mesmo tenant/residência.
-function applyPrivacyFilter(baseWhere: Prisma.PersonalTransactionWhereInput, requestingUserId: string): Prisma.PersonalTransactionWhereInput {
+export function applyPrivacyFilter(baseWhere: Prisma.PersonalTransactionWhereInput, requestingUserId: string): Prisma.PersonalTransactionWhereInput {
   return { AND: [baseWhere, { OR: [{ isPrivate: false }, { isPrivate: true, createdByUserId: requestingUserId }] }] };
 }
 
@@ -133,12 +133,18 @@ personalAccountsRouter.patch("/personal/accounts/:id", requireAuth, async (req: 
 // performance: o caminho quente continua lendo o saldo em cache.
 personalAccountsRouter.post("/personal/accounts/:id/reconcile", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialWrite(req, res))) return;
-  const { tenantId } = req.session!;
+  const { tenantId, userId } = req.session!;
   const account = await prisma.personalAccount.findFirst({ where: { id: req.params.id, tenantId } });
   if (!account) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Conta não encontrada." } });
   }
-  const transactions = await prisma.personalTransaction.findMany({ where: { accountId: account.id, tenantId }, select: { type: true, amount: true, description: true } });
+  // Capítulo 22.3 — a reconciliação não pode somar transações privadas de outro
+  // usuário em conta compartilhada: vazaria o valor (ainda que não a descrição)
+  // dessas transações para quem reconcilia, via diferença entre saldo anterior e novo.
+  const transactions = await prisma.personalTransaction.findMany({
+    where: applyPrivacyFilter({ accountId: account.id, tenantId }, userId),
+    select: { type: true, amount: true, description: true },
+  });
   const recalculated = transactions.reduce((balance, t) => {
     if (t.type === "INCOME") return balance.plus(t.amount);
     if (t.type === "EXPENSE") return balance.minus(t.amount);
