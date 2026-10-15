@@ -38,11 +38,21 @@
 // compatibilidade retroativa — nenhuma rota cria mais `IntegrationCredential` com
 // este provider.
 //
-// Provedores sem contrato de teste ainda pesquisado/confirmado (SMS_ZENVIA,
-// BANK_OPEN_FINANCE_PLUGGY) fazem apenas o "teste de decodificação":
-// confirmam que o payload cifrado é decifrável e tem o formato mínimo esperado, mas
-// marcam explicitamente `success: false` com mensagem honesta de que o teste de rede
-// real ainda não foi implementado — NUNCA simulam um sucesso de rede que não ocorreu.
+// GAP DE AUDITORIA FECHADO (Mega-Audit Rodada 4): o ENVIO real de SMS via Zenvia
+// (POST /v2/channels/sms/messages) já está implementado em
+// `modules/notifications/channels/sms.channel.ts` e é usado de verdade no fan-out de
+// notificações. O botão de "testar credencial" deste arquivo, porém, continua fazendo
+// apenas o "teste de decodificação" abaixo: a Zenvia não documenta publicamente um
+// endpoint GET leve e sem efeito colateral para validar só o token (as opções
+// conhecidas ou disparam uma mensagem real e cobrada, ou não têm contrato oficial
+// confirmado) — então, para não arriscar cobrar o lojista só para "testar", mantemos
+// aqui apenas a confirmação de que o payload cifrado é decifrável e tem o formato
+// mínimo esperado, com `success: false` e mensagem honesta de que o teste de REDE
+// (distinto do envio real, que funciona) não é seguro de automatizar sem custo.
+// `BANK_OPEN_FINANCE_PLUGGY` segue com o mesmo tratamento por motivo diferente: é
+// uma credencial de PLATAFORMA (não por tenant — ver `lib/pluggy-client.ts`,
+// `getPlatformSecret`), então nunca deveria aparecer aqui como `IntegrationCredential`
+// de tenant; nenhuma rota cria esse provider por tenant, igual ao R2 acima.
 import type { IntegrationCredential } from "@filitech/db";
 import { createConnection } from "node:net";
 import Stripe from "stripe";

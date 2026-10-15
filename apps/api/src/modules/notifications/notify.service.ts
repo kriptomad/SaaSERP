@@ -11,7 +11,7 @@
 // assíncrono, retry/backoff via BullMQ, mesmo padrão de enqueueFiscalEmission), e-mail
 // e push são disparados direto (fire-and-forget, nunca bloqueiam o caller).
 import { prismaUnscoped } from "@filitech/db";
-import { whatsappNotificationsQueue } from "../../lib/queue";
+import { whatsappNotificationsQueue, smsNotificationsQueue } from "../../lib/queue";
 import { sendTransactionalEmail } from "./channels/email.channel";
 import { sendExpoPushNotifications } from "./channels/push.channel";
 import { createModuleLogger } from "../../lib/logger";
@@ -43,7 +43,7 @@ export interface NotifyTenantInput {
 
 // Mesmos defaults de notification-settings.routes.ts para categorias ainda sem linha
 // de NotificationPreference (upsert nunca aconteceu para aquele usuário/categoria).
-const DEFAULT_CHANNELS = { inApp: true, email: true, push: false, whatsapp: false };
+const DEFAULT_CHANNELS = { inApp: true, email: true, push: false, whatsapp: false, sms: false };
 
 // Categoria de NotificationPreference não inclui VACCINE_REMINDER (catálogo mais
 // restrito, só as categorias expostas em /notification-preferences); quando
@@ -78,6 +78,19 @@ async function enqueueWhatsAppJob(tenantId: string, toPhone: string, body: strin
   }
 }
 
+async function enqueueSmsJob(tenantId: string, toPhone: string, body: string): Promise<void> {
+  try {
+    // Mesmo padrão de enqueueWhatsAppJob.
+    await smsNotificationsQueue.add(
+      "send-sms-notification",
+      { tenantId, toPhone, body },
+      { attempts: 5, backoff: { type: "exponential", delay: 5_000 }, removeOnComplete: true },
+    );
+  } catch (error) {
+    log.error({ tenantId, err: error }, "falha ao enfileirar notificação SMS");
+  }
+}
+
 async function dispatchUserChannels(input: NotifyTenantInput): Promise<void> {
   if (!input.userId || !PREFERENCE_CATEGORIES.has(input.category)) {
     // Notificação tenant-wide (ex.: SYSTEM_ANNOUNCEMENT sem userId) — não há um único
@@ -102,10 +115,18 @@ async function dispatchUserChannels(input: NotifyTenantInput): Promise<void> {
     email: preference?.email ?? DEFAULT_CHANNELS.email,
     push: preference?.push ?? DEFAULT_CHANNELS.push,
     whatsapp: preference?.whatsapp ?? DEFAULT_CHANNELS.whatsapp,
+    sms: preference?.sms ?? DEFAULT_CHANNELS.sms,
   };
 
   if (channels.whatsapp && user.whatsappPhone) {
     await enqueueWhatsAppJob(input.tenantId, user.whatsappPhone, `${input.title}\n\n${input.body}`);
+  }
+
+  // Reaproveita o mesmo `User.whatsappPhone` (E.164) como destino do SMS — não existe
+  // um segundo campo de telefone redundante só para este canal (ver nota em
+  // schema.prisma/NotificationPreference.sms).
+  if (channels.sms && user.whatsappPhone) {
+    await enqueueSmsJob(input.tenantId, user.whatsappPhone, `${input.title}: ${input.body}`);
   }
 
   if (channels.email) {

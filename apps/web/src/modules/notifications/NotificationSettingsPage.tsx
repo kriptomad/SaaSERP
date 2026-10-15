@@ -39,7 +39,7 @@ export function NotificationSettingsPage() {
   }, [contactQuery.data]);
 
   const updatePreference = useMutation({
-    mutationFn: ({ category, channel, value }: { category: NotificationCategory; channel: "inApp" | "email" | "whatsapp"; value: boolean }) =>
+    mutationFn: ({ category, channel, value }: { category: NotificationCategory; channel: "inApp" | "email" | "whatsapp" | "sms"; value: boolean }) =>
       notificationSettingsApi.updatePreference(category, { [channel]: value }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["notification-preferences"] });
@@ -69,7 +69,7 @@ export function NotificationSettingsPage() {
           Telefone para WhatsApp
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Formato internacional E.164, ex.: +5511999998888. Necessário para ativar o canal "WhatsApp" abaixo.
+          Formato internacional E.164, ex.: +5511999998888. Necessário para ativar os canais "WhatsApp" e "SMS" abaixo (o SMS reaproveita o mesmo número).
         </Typography>
         {phoneError && (
           <Alert severity="error" sx={{ mb: 2 }}>
@@ -112,6 +112,7 @@ export function NotificationSettingsPage() {
                     <TableCell align="center">No app</TableCell>
                     <TableCell align="center">E-mail</TableCell>
                     <TableCell align="center">WhatsApp</TableCell>
+                    <TableCell align="center">SMS</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -135,6 +136,13 @@ export function NotificationSettingsPage() {
                             checked={pref?.whatsapp ?? false}
                             disabled={updatePreference.isPending}
                             onChange={(e) => updatePreference.mutate({ category, channel: "whatsapp", value: e.target.checked })}
+                          />
+                        </TableCell>
+                        <TableCell align="center">
+                          <Switch
+                            checked={pref?.sms ?? false}
+                            disabled={updatePreference.isPending}
+                            onChange={(e) => updatePreference.mutate({ category, channel: "sms", value: e.target.checked })}
                           />
                         </TableCell>
                       </TableRow>

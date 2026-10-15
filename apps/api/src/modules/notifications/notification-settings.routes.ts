@@ -27,7 +27,7 @@ const CATEGORIES = [
 type Category = (typeof CATEGORIES)[number];
 
 // Defaults do schema (inApp/email true; push/whatsapp false) para categorias ainda sem linha.
-const DEFAULTS = { inApp: true, email: true, push: false, whatsapp: false };
+const DEFAULTS = { inApp: true, email: true, push: false, whatsapp: false, sms: false };
 
 const fail = (res: Response, status: number, code: string, message: string, details?: unknown) =>
   res.status(status).json({ success: false, data: null, error: { code, message, ...(details ? { details } : {}) } });
@@ -52,6 +52,7 @@ notificationSettingsRouter.get("/notification-preferences", requireAuth, async (
       email: r?.email ?? DEFAULTS.email,
       push: r?.push ?? DEFAULTS.push,
       whatsapp: r?.whatsapp ?? DEFAULTS.whatsapp,
+      sms: r?.sms ?? DEFAULTS.sms,
       isDefault: !r,
     };
   });
@@ -63,6 +64,7 @@ const channelsSchema = z.object({
   email: z.boolean().optional(),
   push: z.boolean().optional(),
   whatsapp: z.boolean().optional(),
+  sms: z.boolean().optional(),
 });
 
 async function upsertPreference(tenantId: string, userId: string, category: Category, channels: z.infer<typeof channelsSchema>) {

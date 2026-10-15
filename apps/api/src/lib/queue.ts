@@ -26,6 +26,10 @@ queueRedisConnection.on("error", (err) => {
 
 export const QUEUE_NAMES = {
   WHATSAPP_NOTIFICATIONS: "whatsapp-notifications",
+  // Capítulo 20.2/20.8 — canal SMS real (Zenvia), espelhando exatamente o padrão da
+  // fila acima: produzida por `notify.service.ts`, consumida por
+  // `workers/sms-notifications.worker.ts`. GAP DE AUDITORIA FECHADO (Rodada 4).
+  SMS_NOTIFICATIONS: "sms-notifications",
   FISCAL_EMISSION: "fiscal-emission",
   NFE_XML_INGESTION: "nfe-xml-ingestion",
   REPORT_GENERATION: "report-generation",
@@ -89,6 +93,10 @@ export const QUEUE_NAMES = {
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
+  connection: queueRedisConnection,
+});
+
+export const smsNotificationsQueue = new Queue(QUEUE_NAMES.SMS_NOTIFICATIONS, {
   connection: queueRedisConnection,
 });
 

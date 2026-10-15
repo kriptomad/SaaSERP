@@ -53,6 +53,7 @@ import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import CalculateIcon from "@mui/icons-material/Calculate";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import CableIcon from "@mui/icons-material/Cable";
 
 export interface NavItem {
   id: string;
@@ -199,6 +200,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: "licenciamento", label: "Licença Mestra", path: "/admin/licenciamento", icon: <VerifiedUserIcon />, roles: ["OWNER"] },
       { id: "hardware", label: "Hardware do PDV", path: "/configuracoes/hardware", icon: <SettingsInputComponentIcon /> },
+      { id: "integracoes", label: "Integrações", path: "/configuracoes/integracoes", icon: <CableIcon />, roles: ["OWNER", "MANAGER"] },
       { id: "cobranca", label: "Assinatura e Cobrança", path: "/configuracoes/cobranca", icon: <CreditScoreIcon />, roles: ["OWNER", "MANAGER"] },
       { id: "notificacoes", label: "Notificações", path: "/configuracoes/notificacoes", icon: <NotificationsIcon /> },
       // Importação de produtos (Product) só faz sentido para tenants BUSINESS — o

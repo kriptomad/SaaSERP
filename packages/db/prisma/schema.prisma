@@ -2352,6 +2352,11 @@ model NotificationPreference {
   email    Boolean              @default(true)
   push     Boolean              @default(false) // exige PushDeviceToken ativo (abaixo)
   whatsapp Boolean              @default(false) // reaproveita a integração real do Capítulo 20, nunca um canal paralelo
+  // GAP DE AUDITORIA FECHADO (Mega-Audit Rodada 4): canal SMS real via Zenvia
+  // (`IntegrationProvider.SMS_ZENVIA`, `modules/notifications/channels/sms.channel.ts`),
+  // mesmo número E.164 de `User.whatsappPhone` (reaproveitado — SMS e WhatsApp usam o
+  // mesmo telefone de contato do usuário, nunca um segundo campo redundante).
+  sms      Boolean              @default(false)
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)

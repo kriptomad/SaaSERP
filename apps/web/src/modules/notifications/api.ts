@@ -37,6 +37,7 @@ export interface NotificationPreferenceChannels {
   email: boolean;
   push: boolean;
   whatsapp: boolean;
+  sms: boolean;
   isDefault: boolean;
 }
 
@@ -45,6 +46,7 @@ export interface NotificationPreferenceUpdateInput {
   email?: boolean;
   push?: boolean;
   whatsapp?: boolean;
+  sms?: boolean;
 }
 
 export interface PushDeviceSummary {

@@ -40,6 +40,7 @@ import { AccountingOfficePage } from "./modules/accounting-office/AccountingOffi
 import { FirmPortfolioPage } from "./modules/accounting-office/FirmPortfolioPage";
 import { LicensingPage } from "./modules/licensing/LicensingPage";
 import { HardwarePage } from "./modules/settings/HardwarePage";
+import { IntegrationsPage } from "./modules/settings/IntegrationsPage";
 import { BillingPage } from "./modules/settings/BillingPage";
 import { NotificationSettingsPage } from "./modules/notifications/NotificationSettingsPage";
 import { DataExportPage } from "./modules/settings/DataExportPage";
@@ -188,6 +189,7 @@ export function App() {
             <Route path="/contabilidade" element={<AccountingOfficePage />} />
             <Route path="/contabilidade/carteira" element={<FirmPortfolioPage />} />
             <Route path="/configuracoes/hardware" element={<HardwarePage />} />
+            <Route path="/configuracoes/integracoes" element={<IntegrationsPage />} />
             <Route path="/configuracoes/cobranca" element={<BillingPage />} />
             <Route path="/configuracoes/notificacoes" element={<NotificationSettingsPage />} />
             <Route path="/configuracoes/dados" element={<DataExportPage />} />
