@@ -29,7 +29,7 @@
 // (21.18.8), módulo sócios/pró-labore/IRPF (21.18.12).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import {
   grantAccountingEngagement,
@@ -41,6 +41,15 @@ import {
   NoActiveEngagementError,
 } from "../../services/accounting-office/engagement.service";
 import { generateSpedEcd, generateDefis, NoActiveLayoutVersionError } from "../../services/accounting-office/sped-ecd.service";
+import {
+  generateEcf,
+  generateEfdReinf,
+  generateDctfWeb,
+  generateInformeRendimentosSocio,
+  EcfNotApplicableError,
+  NoPartnerPayoutsFoundError,
+  EcfActivityType,
+} from "../../services/accounting-office/ecf-reinf-dctfweb.service";
 import { putObjectDirect, presignObjectDownload } from "../../lib/object-storage";
 
 export const accountingOfficeRouter = Router();
@@ -93,6 +102,24 @@ async function requireDocumentWrite(req: Request, res: Response): Promise<boolea
   const { userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "accounting-office:document:write"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite gerar documentos oficiais." } });
+    return false;
+  }
+  return true;
+}
+
+async function requirePartnerRead(req: Request, res: Response): Promise<boolean> {
+  const { userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "accounting-office:partner:read"))) {
+    res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar sócios/pró-labore." } });
+    return false;
+  }
+  return true;
+}
+
+async function requirePartnerManage(req: Request, res: Response): Promise<boolean> {
+  const { userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "accounting-office:partner:manage"))) {
+    res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite cadastrar sócios/lançar pró-labore." } });
     return false;
   }
   return true;
@@ -382,11 +409,16 @@ accountingOfficeRouter.get("/official-tax-documents", requireAuth, async (req: R
 
 const generateDocumentSchema = z.object({
   clientTenantId: z.string().uuid().optional(), // omitido quando o próprio tenant gera para si (Caminho B, sem escritório contratado)
-  documentType: z.enum(["ECD", "DEFIS"]),
-  // ECD exige período (competência contábil); DEFIS exige apenas o ano-calendário.
+  documentType: z.enum(["ECD", "DEFIS", "ECF", "EFD_REINF", "DCTFWEB", "INFORME_RENDIMENTOS_SOCIO"]),
+  // ECD exige período (competência contábil); DEFIS/ECF exigem apenas o ano-calendário;
+  // EFD_REINF/DCTFWEB exigem competência mensal; INFORME_RENDIMENTOS_SOCIO exige
+  // ano-calendário + partnerId.
   competenciaInicio: z.string().datetime().optional(),
   competenciaFim: z.string().datetime().optional(),
   calendarYear: z.number().int().min(2000).max(2100).optional(),
+  competencia: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(), // "AAAA-MM"
+  activityType: z.enum(["COMERCIO", "SERVICO"]).optional(), // obrigatório apenas para ECF (Lucro Presumido/Real)
+  partnerId: z.string().uuid().optional(), // obrigatório apenas para INFORME_RENDIMENTOS_SOCIO
 });
 
 /**
@@ -424,6 +456,7 @@ accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, asy
     let layoutVersion: string;
     let competenciaInicio: Date;
     let competenciaFim: Date;
+    let status: "GENERATED" | "DRAFT" = "GENERATED";
 
     if (parsed.data.documentType === "ECD") {
       if (!parsed.data.competenciaInicio || !parsed.data.competenciaFim) {
@@ -434,7 +467,7 @@ accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, asy
       const result = await generateSpedEcd(ownerTenantId, competenciaInicio, competenciaFim);
       content = result.content;
       layoutVersion = result.layoutVersion;
-    } else {
+    } else if (parsed.data.documentType === "DEFIS") {
       if (!parsed.data.calendarYear) {
         return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "DEFIS exige calendarYear." } });
       }
@@ -443,6 +476,44 @@ accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, asy
       const result = await generateDefis(ownerTenantId, parsed.data.calendarYear);
       content = result.content;
       layoutVersion = result.layoutVersion;
+    } else if (parsed.data.documentType === "ECF") {
+      if (!parsed.data.calendarYear || !parsed.data.activityType) {
+        return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "ECF exige calendarYear e activityType (COMERCIO|SERVICO)." } });
+      }
+      competenciaInicio = new Date(Date.UTC(parsed.data.calendarYear, 0, 1));
+      competenciaFim = new Date(Date.UTC(parsed.data.calendarYear, 11, 31, 23, 59, 59));
+      const result = await generateEcf(ownerTenantId, parsed.data.calendarYear, parsed.data.activityType as EcfActivityType);
+      content = result.content;
+      layoutVersion = result.layoutVersion;
+    } else if (parsed.data.documentType === "EFD_REINF" || parsed.data.documentType === "DCTFWEB") {
+      if (!parsed.data.competencia) {
+        return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: `${parsed.data.documentType} exige competencia no formato "AAAA-MM".` } });
+      }
+      const [year, month] = parsed.data.competencia.split("-").map(Number);
+      competenciaInicio = new Date(Date.UTC(year, month - 1, 1));
+      competenciaFim = new Date(Date.UTC(year, month, 0, 23, 59, 59));
+      const result =
+        parsed.data.documentType === "EFD_REINF"
+          ? await generateEfdReinf(ownerTenantId, parsed.data.competencia)
+          : await generateDctfWeb(ownerTenantId, parsed.data.competencia);
+      content = result.content;
+      layoutVersion = result.layoutVersion;
+      // Ambos carregam campos de "código de receita" pendentes de confirmação do
+      // contador junto à tabela vigente da RFB (ver cabeçalho de
+      // ecf-reinf-dctfweb.service.ts) — nasce DRAFT, nunca GENERATED, até revisão humana.
+      status = "DRAFT";
+    } else {
+      // INFORME_RENDIMENTOS_SOCIO — documento interno, sem leiaute SPED/transmissão a
+      // órgão (ver comentário do enum OfficialTaxDocumentType), por isso não chama
+      // `resolveActiveLayoutVersion`.
+      if (!parsed.data.calendarYear || !parsed.data.partnerId) {
+        return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "INFORME_RENDIMENTOS_SOCIO exige calendarYear e partnerId." } });
+      }
+      competenciaInicio = new Date(Date.UTC(parsed.data.calendarYear, 0, 1));
+      competenciaFim = new Date(Date.UTC(parsed.data.calendarYear, 11, 31, 23, 59, 59));
+      const result = await generateInformeRendimentosSocio(ownerTenantId, parsed.data.partnerId, parsed.data.calendarYear);
+      content = result.content;
+      layoutVersion = "INTERNO — SEM LEIAUTE SPED (documento entregue ao sócio para sua própria DIRPF)";
     }
 
     const fileName = `${parsed.data.documentType}-${competenciaInicio.toISOString().slice(0, 10)}-${competenciaFim.toISOString().slice(0, 10)}.txt`;
@@ -463,7 +534,7 @@ accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, asy
         competenciaInicio,
         competenciaFim,
         fileUrl: storageKey,
-        status: "GENERATED",
+        status,
       },
     });
 
@@ -471,6 +542,12 @@ accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, asy
   } catch (err) {
     if (err instanceof NoActiveLayoutVersionError) {
       return res.status(422).json({ success: false, data: null, error: { code: "NO_ACTIVE_LAYOUT_VERSION", message: err.message } });
+    }
+    if (err instanceof EcfNotApplicableError) {
+      return res.status(409).json({ success: false, data: null, error: { code: "ECF_NOT_APPLICABLE", message: err.message } });
+    }
+    if (err instanceof NoPartnerPayoutsFoundError) {
+      return res.status(404).json({ success: false, data: null, error: { code: "NO_PARTNER_PAYOUTS_FOUND", message: err.message } });
     }
     throw err;
   }
@@ -501,3 +578,145 @@ accountingOfficeRouter.get("/official-tax-documents/:id/download", requireAuth, 
   return res.json({ success: true, data: { downloadUrl, expiresInSeconds }, error: null });
 });
 
+// ─────────────────────────────────────────────────────────────────────────
+// SÓCIOS E PRÓ-LABORE (Capítulo 21.18.12) — GAP DE AUDITORIA FECHADO: os
+// modelos `CompanyPartner`/`PartnerPayout` já existiam no schema desde um
+// passe anterior, mas sem NENHUMA rota/serviço consumidor (mesmo padrão do
+// gap de `OnlineStoreSettings` fechado no item 11 deste mega-audit). É o
+// dado-fonte real que faltava para EFD-Reinf/DCTFWeb/Informe de Rendimentos
+// do Sócio (ver `ecf-reinf-dctfweb.service.ts`).
+// ─────────────────────────────────────────────────────────────────────────
+
+accountingOfficeRouter.get("/company-partners", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requirePartnerRead(req, res))) return;
+  const { tenantId } = req.session!;
+  const partners = await prisma.companyPartner.findMany({ where: { tenantId }, orderBy: { name: "asc" } });
+  return res.json({ success: true, data: partners, error: null });
+});
+
+const upsertPartnerSchema = z.object({
+  name: z.string().min(1),
+  cpf: z.string().min(11),
+  participationPercentage: z.number().min(0).max(100),
+});
+
+accountingOfficeRouter.post("/company-partners", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requirePartnerManage(req, res))) return;
+  const { tenantId } = req.session!;
+  const parsed = upsertPartnerSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+  try {
+    const partner = await prisma.companyPartner.create({
+      data: { tenantId, name: parsed.data.name, cpf: parsed.data.cpf.replace(/\D/g, ""), participationPercentage: parsed.data.participationPercentage },
+    });
+    return res.status(201).json({ success: true, data: partner, error: null });
+  } catch (err: any) {
+    if (err?.code === "P2002") {
+      return res.status(409).json({ success: false, data: null, error: { code: "PARTNER_CPF_ALREADY_REGISTERED", message: "Já existe um sócio cadastrado com este CPF." } });
+    }
+    throw err;
+  }
+});
+
+accountingOfficeRouter.patch("/company-partners/:id", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requirePartnerManage(req, res))) return;
+  const { tenantId } = req.session!;
+  const parsed = upsertPartnerSchema.partial().safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+  const existing = await prisma.companyPartner.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!existing) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Sócio não encontrado." } });
+  }
+  const partner = await prisma.companyPartner.update({
+    where: { id: existing.id },
+    data: {
+      ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
+      ...(parsed.data.cpf !== undefined ? { cpf: parsed.data.cpf.replace(/\D/g, "") } : {}),
+      ...(parsed.data.participationPercentage !== undefined ? { participationPercentage: parsed.data.participationPercentage } : {}),
+    },
+  });
+  return res.json({ success: true, data: partner, error: null });
+});
+
+accountingOfficeRouter.delete("/company-partners/:id", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requirePartnerManage(req, res))) return;
+  const { tenantId } = req.session!;
+  const existing = await prisma.companyPartner.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!existing) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Sócio não encontrado." } });
+  }
+  // Bloqueia a exclusão se já existir histórico de pró-labore/distribuição lançado —
+  // o relacionamento é `onDelete: Cascade` no schema, mas apagar um sócio com
+  // pagamentos reais já lançados destruiria o histórico auditável usado pelo
+  // EFD-Reinf/DCTFWeb/Informe de Rendimentos já gerados (mesmo princípio de
+  // "nunca apagar histórico fiscal" já aplicado a ChartOfAccount/CostCenter).
+  const payoutCount = await prisma.partnerPayout.count({ where: { partnerId: existing.id } });
+  if (payoutCount > 0) {
+    return res.status(409).json({ success: false, data: null, error: { code: "PARTNER_HAS_PAYOUT_HISTORY", message: "Este sócio já possui pró-labore/distribuição lançados — não pode ser excluído (histórico fiscal). Edite o cadastro em vez de excluir." } });
+  }
+  await prisma.companyPartner.delete({ where: { id: existing.id } });
+  return res.json({ success: true, data: { deleted: true }, error: null });
+});
+
+accountingOfficeRouter.get("/company-partners/:id/payouts", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requirePartnerRead(req, res))) return;
+  const { tenantId } = req.session!;
+  const partner = await prisma.companyPartner.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!partner) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Sócio não encontrado." } });
+  }
+  const payouts = await prisma.partnerPayout.findMany({ where: { tenantId, partnerId: partner.id }, orderBy: { paidAt: "desc" } });
+  return res.json({ success: true, data: payouts, error: null });
+});
+
+const createPayoutSchema = z
+  .object({
+    type: z.enum(["PRO_LABORE", "PROFIT_DISTRIBUTION"]),
+    competencia: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+    grossAmount: z.number().positive(),
+    inssWithheld: z.number().min(0).default(0),
+    irrfWithheld: z.number().min(0).default(0),
+    paidAt: z.string().datetime(),
+  })
+  .refine((data) => data.type !== "PROFIT_DISTRIBUTION" || (data.inssWithheld === 0 && data.irrfWithheld === 0), {
+    message: "Distribuição de lucros é isenta por lei (Lei 9.249/1995, art. 10) — inssWithheld e irrfWithheld devem ser 0.",
+  })
+  .refine((data) => data.inssWithheld + data.irrfWithheld <= data.grossAmount, {
+    message: "A soma de inssWithheld + irrfWithheld não pode exceder grossAmount.",
+  });
+
+accountingOfficeRouter.post("/company-partners/:id/payouts", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requirePartnerManage(req, res))) return;
+  const { tenantId } = req.session!;
+  const partner = await prisma.companyPartner.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!partner) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Sócio não encontrado." } });
+  }
+  const parsed = createPayoutSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+  const grossAmount = new Prisma.Decimal(parsed.data.grossAmount);
+  const inssWithheld = new Prisma.Decimal(parsed.data.inssWithheld);
+  const irrfWithheld = new Prisma.Decimal(parsed.data.irrfWithheld);
+  const netAmount = grossAmount.minus(inssWithheld).minus(irrfWithheld);
+
+  const payout = await prisma.partnerPayout.create({
+    data: {
+      tenantId,
+      partnerId: partner.id,
+      type: parsed.data.type,
+      competencia: parsed.data.competencia,
+      grossAmount,
+      inssWithheld,
+      irrfWithheld,
+      netAmount,
+      paidAt: new Date(parsed.data.paidAt),
+    },
+  });
+  return res.status(201).json({ success: true, data: payout, error: null });
+});

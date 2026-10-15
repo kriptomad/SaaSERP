@@ -418,6 +418,8 @@ const OWNER_PERMISSIONS = [
   "accounting-office:task:write",
   "accounting-office:document:read",
   "accounting-office:document:write",
+  "accounting-office:partner:read",
+  "accounting-office:partner:manage",
   // Licença Mestra (Capítulo 2.10) — exclusivamente Owner: ativação/renovação/trial da
   // licença mestra é decisão de dono do negócio, nunca do Manager/operação do dia a dia
   // (mesmo tratamento dado a "billing:subscription:manage" acima).
@@ -493,6 +495,8 @@ const MANAGER_PERMISSIONS = [
   "accounting-office:task:write",
   "accounting-office:document:read",
   "accounting-office:document:write",
+  "accounting-office:partner:read",
+  "accounting-office:partner:manage",
   // Capítulo 4.2/4.3/4.5 — MANAGER administra comissão, cascos e receita/validade no
   // dia a dia da loja (OWNER também tem via matriz acima; CASHIER só o necessário no balcão).
   "work-order:commission:manage",
@@ -568,6 +572,10 @@ const ACCOUNTANT_PERMISSIONS = [
   "accounting-office:task:read",
   "accounting-office:task:write",
   "accounting-office:document:read",
+  // Contador precisa consultar sócios/pró-labore já lançados para gerar
+  // EFD-Reinf/DCTFWeb/Informe de Rendimentos do Sócio (Capítulo 21.18.12), mas o
+  // lançamento do pró-labore em si é decisão do lojista/RH, nunca do contador.
+  "accounting-office:partner:read",
 ];
 
 // Capítulo 22.1 — cônjuge/parceiro(a) convidado em tenant PERSONAL: lê e lança

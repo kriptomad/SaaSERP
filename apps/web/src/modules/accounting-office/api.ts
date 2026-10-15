@@ -56,8 +56,45 @@ export interface OfficialTaxDocument {
   id: string;
   tenantId: string;
   documentType: string;
+  status: "DRAFT" | "GENERATED" | "TRANSMITTED" | "REJECTED";
   generatedAt: string;
 }
+
+export type OfficialTaxDocumentGenerationType = "ECD" | "DEFIS" | "ECF" | "EFD_REINF" | "DCTFWEB" | "INFORME_RENDIMENTOS_SOCIO";
+
+export interface GenerateDocumentInput {
+  documentType: OfficialTaxDocumentGenerationType;
+  clientTenantId?: string;
+  competenciaInicio?: string;
+  competenciaFim?: string;
+  calendarYear?: number;
+  competencia?: string; // "AAAA-MM"
+  activityType?: "COMERCIO" | "SERVICO";
+  partnerId?: string;
+}
+
+export interface CompanyPartner {
+  id: string;
+  tenantId: string;
+  name: string;
+  cpf: string;
+  participationPercentage: string;
+}
+
+export type PartnerPayoutType = "PRO_LABORE" | "PROFIT_DISTRIBUTION";
+
+export interface PartnerPayout {
+  id: string;
+  partnerId: string;
+  type: PartnerPayoutType;
+  competencia: string;
+  grossAmount: string;
+  inssWithheld: string;
+  irrfWithheld: string;
+  netAmount: string;
+  paidAt: string;
+}
+
 
 export interface FirmPortfolioClient {
   engagementId: string;
@@ -101,8 +138,35 @@ export const accountingOfficeApi = {
 
   listOfficialDocuments: (params?: { documentType?: string; clientTenantId?: string }) =>
     api.get<OfficialTaxDocument[]>("/official-tax-documents", params),
+  generateDocument: (input: GenerateDocumentInput) => api.post<OfficialTaxDocument>("/official-tax-documents/generate", input),
+  downloadDocument: (id: string) => api.get<{ downloadUrl: string; expiresInSeconds: number }>(`/official-tax-documents/${id}/download`),
+
+  listPartners: () => api.get<CompanyPartner[]>("/company-partners"),
+  createPartner: (input: { name: string; cpf: string; participationPercentage: number }) => api.post<CompanyPartner>("/company-partners", input),
+  updatePartner: (id: string, input: Partial<{ name: string; cpf: string; participationPercentage: number }>) =>
+    api.patch<CompanyPartner>(`/company-partners/${id}`, input),
+  deletePartner: (id: string) => api.delete(`/company-partners/${id}`),
+  listPartnerPayouts: (partnerId: string) => api.get<PartnerPayout[]>(`/company-partners/${partnerId}/payouts`),
+  createPartnerPayout: (
+    partnerId: string,
+    input: { type: PartnerPayoutType; competencia: string; grossAmount: number; inssWithheld?: number; irrfWithheld?: number; paidAt: string },
+  ) => api.post<PartnerPayout>(`/company-partners/${partnerId}/payouts`, input),
 
   getFirmPortfolio: () => api.get<FirmPortfolio>("/accounting-firm-portfolio"),
+};
+
+export const DOCUMENT_TYPE_LABEL: Record<OfficialTaxDocumentGenerationType, string> = {
+  ECD: "ECD — Escrituração Contábil Digital",
+  DEFIS: "DEFIS — Simples Nacional",
+  ECF: "ECF — Escrituração Contábil Fiscal",
+  EFD_REINF: "EFD-Reinf — Eventos de pró-labore",
+  DCTFWEB: "DCTFWeb — Débitos de INSS sobre pró-labore",
+  INFORME_RENDIMENTOS_SOCIO: "Informe de Rendimentos do Sócio",
+};
+
+export const PARTNER_PAYOUT_TYPE_LABEL: Record<PartnerPayoutType, string> = {
+  PRO_LABORE: "Pró-labore (tributável)",
+  PROFIT_DISTRIBUTION: "Distribuição de lucros (isenta)",
 };
 
 export const ENGAGEMENT_SCOPE_LABEL: Record<AccountingEngagementScope, string> = {
