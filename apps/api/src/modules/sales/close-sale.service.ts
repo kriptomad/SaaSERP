@@ -6,7 +6,7 @@
 // produto, (3) cálculo tributário real via TaxEngine, e (4) enfileiramento da emissão
 // fiscal (fora da transação de banco).
 import { Prisma, TenantScopedPrismaClient } from "@filitech/db";
-import { calculateTax } from "../fiscal/tax-engine.service";
+import { calculateFullTax } from "../fiscal/tax-engine.service";
 import { resolveTaxReformPhase } from "../fiscal/tax-reform-phase.service";
 import { deductStockFefoWithinTx } from "../../services/stock/deduct-stock-fefo.service";
 import { InsufficientStockError } from "../../services/stock/deduct-stock-fefo.service";
@@ -143,8 +143,15 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
     async (tx) => {
       const tenant = await tx.tenant.findUniqueOrThrow({
         where: { id: input.tenantId },
-        select: { taxRegime: true, opticalAdditionalWarrantyDays: true },
+        select: { taxRegime: true, opticalAdditionalWarrantyDays: true, uf: true },
       });
+      // Capítulo 21.10 — DIFAL: UF de destino e contribuinte de ICMS vêm do cliente
+      // vinculado à venda (quando houver); venda sem cliente identificado (balcão
+      // anônimo) nunca cruza fronteira estadual de fato, então cai para a UF do
+      // próprio tenant (destino = origem, DIFAL inaplicável por definição).
+      const saleClient = input.clientId
+        ? await tx.client.findFirst({ where: { id: input.clientId, tenantId: input.tenantId }, select: { uf: true, icmsContributor: true } })
+        : null;
       // O caixa precisa pertencer ao tenant da sessão — nunca aceita um cashRegisterId alheio.
       // Não exige status OPEN: vendas do PDV offline (Capítulo 8.3) podem sincronizar
       // depois do fechamento do caixa em que foram realizadas.
@@ -160,6 +167,9 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
       let ibsTotal = new Prisma.Decimal(0);
       let cbsTotal = new Prisma.Decimal(0);
       let selectiveTaxTotal = new Prisma.Decimal(0);
+      let difalTotal = new Prisma.Decimal(0);
+      let monofasicoSegregatedTotal = new Prisma.Decimal(0);
+      let usedVehicleIcmsTotal = new Prisma.Decimal(0);
       // Capítulo 11.2 — Ótica: armações/lentes em consignação (`Product.isConsignment`)
       // não geram `AccountPayable` no recebimento (purchase-orders.routes.ts); a
       // obrigação só nasce AQUI, na baixa de estoque pela venda efetiva — uma
@@ -352,12 +362,24 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
 
         // 2. Tributação real por item — nunca um percentual fixo aplicado ao total da
         //    venda, pois cada produto pode ter NCM/regra fiscal diferente (Capítulo 21).
-        const taxResult = await calculateTax(tx, {
+        //    `calculateFullTax` (21.14) soma, sobre o núcleo de 21.6: DIFAL (21.10),
+        //    PIS/COFINS monofásico (21.9), ICMS de veículo usado (21.12) e CFOP
+        //    dinâmico (21.13) — item de produto, nunca de mão de obra de O.S.
+        const originUf = tenant.uf ?? product.originUf ?? "SP";
+        const destinationUf = saleClient?.uf ?? originUf;
+        const productRecipe = await tx.recipe.findUnique({ where: { productId: product.id }, select: { id: true } });
+        const taxResult = await calculateFullTax(tx, {
           tenantId: input.tenantId,
           ncm: product.ncm ?? "00000000",
           uf: product.originUf ?? "SP",
           nicheCode: product.nicheCode ?? "MARKET",
           grossAmount: lineGross,
+          originUf,
+          destinationUf,
+          buyerIsIcmsContributor: saleClient?.icmsContributor ?? false,
+          isServiceItem: false,
+          isOwnProduction: Boolean(productRecipe), // Capítulo 21.13 — produto com Ficha Técnica (BOM) é produção própria do próprio tenant
+          isReturn: false,
         });
 
         legacyIcmsTotal = legacyIcmsTotal.plus(taxResult.legacyIcmsAmount);
@@ -365,12 +387,17 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
         ibsTotal = ibsTotal.plus(taxResult.ibsAmount);
         cbsTotal = cbsTotal.plus(taxResult.cbsAmount);
         selectiveTaxTotal = selectiveTaxTotal.plus(taxResult.selectiveTaxAmount);
+        difalTotal = difalTotal.plus(taxResult.difalAmount);
+        monofasicoSegregatedTotal = monofasicoSegregatedTotal.plus(taxResult.monofasicoSegregatedAmount);
+        usedVehicleIcmsTotal = usedVehicleIcmsTotal.plus(taxResult.usedVehicleIcmsAmount);
         totalTaxesApprox = totalTaxesApprox
           .plus(taxResult.legacyIcmsAmount)
           .plus(taxResult.legacyPisCofinsAmount)
           .plus(taxResult.ibsAmount)
           .plus(taxResult.cbsAmount)
-          .plus(taxResult.selectiveTaxAmount);
+          .plus(taxResult.selectiveTaxAmount)
+          .plus(taxResult.difalAmount)
+          .plus(taxResult.usedVehicleIcmsAmount);
 
         totalAmount = totalAmount.plus(lineGross);
         // Capítulo 11.2 — Ótica: garantia legal CDC (90 dias, art. 26, II) + garantia
@@ -580,6 +607,9 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
           ibsAmount: ibsTotal,
           cbsAmount: cbsTotal,
           selectiveTaxAmount: selectiveTaxTotal,
+          difalAmount: difalTotal,
+          monofasicoSegregatedRevenue: monofasicoSegregatedTotal,
+          usedVehicleIcmsAmount: usedVehicleIcmsTotal,
           totalTaxesApprox,
           taxRegimeSnapshot: tenant.taxRegime,
           // Resolvido pela data real da venda, nunca por uma escolha do usuário

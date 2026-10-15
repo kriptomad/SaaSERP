@@ -21,6 +21,7 @@ import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { createAsaasCustomer, createAsaasCharge, getAsaasPixQrCode, getAsaasBoletoIdentificationField } from "../billing/asaas.client";
+import { resolveServiceAnexo } from "../fiscal/fator-r-calculator.service";
 
 export const financialRouter = Router();
 
@@ -526,6 +527,42 @@ financialRouter.get("/reports/dre", requireAuth, async (req: Request, res: Respo
   return res.json({
     success: true,
     data: { periodStart, periodEnd, revenueLines, expenseLines, grossRevenue, totalExpenses, netResult },
+    error: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// FATOR "r" DO SIMPLES NACIONAL — ANEXO III vs. V (Capítulo 21.8)
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Apuração sob demanda do Fator "r" (LC 123/2006, art. 18, §5º-J): folha de
+ * pagamento / faturamento bruto dos últimos 12 meses. Exposto como relatório
+ * (mesmo padrão de /reports/dre) em vez de um cron automático que reescreveria
+ * `Tenant.simplesNacionalAnexo` sozinho — a migração de Anexo tem efeito
+ * tributário real e documentado, e deve ser uma decisão consciente do
+ * contador/lojista confirmada manualmente em Configurações Fiscais, nunca uma
+ * alteração silenciosa de fundo.
+ */
+financialRouter.get("/reports/fator-r", requireAuth, async (req: Request, res: Response) => {
+  const { userId, role, tenantId } = req.session!;
+  if (!(await hasPermission(role, userId, "reports:*:read")) && !(await hasPermission(role, userId, "financial:*:read"))) {
+    return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite apurar o Fator \"r\"." } });
+  }
+
+  const result = await resolveServiceAnexo(prisma, tenantId);
+
+  return res.json({
+    success: true,
+    data: {
+      fatorR: result.fatorR,
+      anexoApurado: result.anexo,
+      folhaUltimos12Meses: result.folhaUltimos12Meses,
+      faturamentoUltimos12Meses: result.faturamentoUltimos12Meses,
+      limiarMigracao: new Prisma.Decimal(0.28),
+      observacao:
+        'Migração de Anexo exige confirmação manual em Configurações Fiscais (Tenant.simplesNacionalAnexo) — esta apuração nunca altera o cadastro automaticamente (Capítulo 21.8).',
+    },
     error: null,
   });
 });

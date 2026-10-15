@@ -37,6 +37,7 @@ import { notifyTenant } from "../notifications/notify.service";
 import { withCircuitBreaker } from "../../lib/circuit-breaker";
 import { dispatchWebhookEvent } from "../../lib/webhook-dispatch";
 import { createModuleLogger } from "../../lib/logger";
+import { resolveCfop } from "./cfop-resolver.service";
 
 const FOCUS_NFE_BREAKER = "focus-nfe";
 
@@ -77,15 +78,17 @@ function onlyDigits(value: string): string {
 /**
  * Resolve CFOP/CST-CSOSN aplicável ao item, reaproveitando a mesma TaxRule central
  * (Capítulo 21.6) consultada por tax-engine.service.ts, com a mesma precedência
- * (regra mais específica por NCM/UF/nicho vence a mais genérica). Cai para os
- * defaults documentados do próprio exemplo oficial Focus NFe quando nenhuma TaxRule
- * específica declara cfop/cstCsosn — nunca lançado como erro bloqueante, pois
- * ausência de override fiscal fino não pode impedir a emissão de uma venda já
- * fechada e paga.
+ * (regra mais específica por NCM/UF/nicho vence a mais genérica). Quando nenhuma
+ * TaxRule específica declara `cfop`, cai para `resolveCfop` (Capítulo 21.13) em vez
+ * de um valor fixo — nunca "5102 para tudo", que seria incompatível com vendas
+ * interestaduais/sujeitas a ICMS-ST e geraria autuação por CFOP divergente da
+ * natureza real da operação. CST-CSOSN segue com o default documentado do próprio
+ * exemplo oficial Focus NFe — nunca lançado como erro bloqueante, pois ausência de
+ * override fiscal fino não pode impedir a emissão de uma venda já fechada e paga.
  */
 async function resolveItemFiscalCodes(
   prisma: TenantScopedPrismaClient,
-  params: { tenantId: string; ncm: string; uf: string; nicheCode: string; isSimplesNacional: boolean },
+  params: { tenantId: string; ncm: string; uf: string; destinationUf: string; nicheCode: string; isSimplesNacional: boolean },
 ): Promise<{ cfop: string; cstCsosn: string }> {
   const rule = await prisma.taxRule.findFirst({
     where: {
@@ -99,11 +102,18 @@ async function resolveItemFiscalCodes(
       ],
     },
     orderBy: [{ ncm: "desc" }, { uf: "desc" }, { nicheCode: "desc" }],
-    select: { cfop: true, cstCsosn: true },
+    select: { cfop: true, cstCsosn: true, icmsStMva: true },
   });
 
   return {
-    cfop: rule?.cfop ?? "5102", // venda de mercadoria adquirida/recebida de terceiros (operação interna)
+    cfop:
+      rule?.cfop ??
+      resolveCfop({
+        isInterstate: params.uf !== params.destinationUf,
+        isSubjectToIcmsSt: Boolean(rule?.icmsStMva),
+        isOwnProduction: false, // produção própria já é resolvida/gravada em calculateFullTax no fechamento da venda (close-sale.service.ts) — aqui só preenche o fallback residual quando a TaxRule não declara CFOP explícito
+        isReturn: false,
+      }),
     cstCsosn: rule?.cstCsosn ?? (params.isSimplesNacional ? "102" : "00"), // CSOSN 102 (Simples) / CST 00 (Normal) — tributação padrão sem benefício
   };
 }
@@ -192,11 +202,13 @@ export async function emitFiscalDocument(
       const product = item.product!;
       const ncm = product.ncm ?? "00000000";
       const uf = product.originUf ?? tenant.uf ?? "SP";
+      const destinationUf = sale.client?.uf ?? uf;
       const nicheCode = product.nicheCode ?? "MARKET";
       const { cfop, cstCsosn } = await resolveItemFiscalCodes(prisma, {
         tenantId: params.tenantId,
         ncm,
         uf,
+        destinationUf,
         nicheCode,
         isSimplesNacional,
       });

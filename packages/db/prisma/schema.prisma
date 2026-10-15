@@ -678,6 +678,14 @@ model Client {
   // exigem que o cliente tenha um plano vinculado (close-sale.service.ts).
   healthInsurancePlanId       String?
   healthInsurancePlanMemberId String? // número de carteirinha/matrícula do convênio
+  // Capítulo 21.10 — DIFAL: UF de destino do cliente (venda interestadual a
+  // consumidor final). Nulo = cliente local (mesma UF do tenant) ou sem endereço
+  // cadastrado — `calculateFullTax` trata nulo como "sem DIFAL aplicável".
+  uf                          String?
+  // Capítulo 21.10 — true quando o cliente é PJ inscrito como contribuinte de ICMS
+  // (ex.: revenda B2B); nestes casos a venda interestadual segue CFOP 6.xxx comum,
+  // SEM partilha de DIFAL (que é exclusiva de consumidor final não contribuinte).
+  icmsContributor             Boolean   @default(false)
   createdAt                   DateTime  @default(now())
   updatedAt                   DateTime  @updatedAt
 
@@ -1663,6 +1671,12 @@ model FiscalDocument {
   federalIrrfWithheld          Decimal?              @db.Decimal(12, 2) // retenção de IRRF esperada do tomador PJ (Capítulo 21.17) — nulo quando o prestador é Simples/MEI (dispensa legal)
   federalPisCofinsCsllWithheld Decimal?              @db.Decimal(12, 2) // retenção unificada PIS/COFINS/CSLL (Capítulo 21.17)
   federalInssWithheld          Decimal?              @db.Decimal(12, 2) // retenção de INSS quando o serviço é cessão de mão de obra/empreitada (Capítulo 21.17)
+  // Capítulo 21.10/21.9/21.12 — agregados de `calculateFullTax` persistidos no
+  // documento fiscal da venda, no mesmo padrão dos agregados legados acima (soma de
+  // todos os SaleItem da venda, calculada em close-sale.service.ts).
+  difalAmount                  Decimal?              @db.Decimal(12, 2) // DIFAL devido à UF de destino em venda interestadual a consumidor final não contribuinte
+  monofasicoSegregatedRevenue   Decimal?              @db.Decimal(12, 2) // receita de itens com PIS/COFINS monofásico (já tributados na origem) — excluída da base do DAS/apuração
+  usedVehicleIcmsAmount         Decimal?              @db.Decimal(12, 2) // ICMS com base de cálculo reduzida de revenda de veículo usado (Capítulo 21.12)
   createdAt                    DateTime              @default(now())
   updatedAt                    DateTime              @updatedAt
 
