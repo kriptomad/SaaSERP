@@ -2,11 +2,21 @@
 // GAP DE AUDITORIA FECHADO (Mega-Audit Rodada 2, item 9, Capítulo 15.1): dashboard
 // de saúde do sistema para o painel interno — banco, Redis e as 15 filas BullMQ,
 // com profundidade/falhas visíveis (informação operacional, nunca exposta na
-// página pública /status). Atualização automática a cada 15s, sem WebSocket/SSE —
-// não há necessidade de tempo real estrito aqui, só uma visão corrente.
+// página pública /status).
+// GAP DE AUDITORIA FECHADO (mega-audit round 3, r3-health-dashboard-realtime):
+// antes atualizava via `setInterval(refresh, 15_000)` (polling HTTP simples). Agora
+// consome `GET /platform-admin/system-status/stream` via SSE
+// (`useSseStream`, com `getStoredPlatformAdminToken` — sessão de administração de
+// plataforma é separada da sessão de tenant) — o servidor empurra uma nova leitura
+// a cada 5s sem o cliente reabrir conexão HTTP repetidamente. Fallback automático:
+// se o SSE cair, `useSseStream` reconecta sozinho com backoff; mantemos também uma
+// leitura via `GET` simples no primeiro render para já exibir dado antes do
+// primeiro evento SSE chegar.
 import { useEffect, useState, useCallback } from "react";
 import { Alert, Box, Chip, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Typography } from "@mui/material";
 import { fetchSystemStatus, SystemStatusSnapshot, ComponentStatus } from "./system-status.api";
+import { useSseStream } from "../../shared/useSseStream";
+import { getStoredPlatformAdminToken } from "./platform-admin-client";
 
 const STATUS_COLOR: Record<ComponentStatus, "success" | "warning" | "error"> = {
   operational: "success",
@@ -33,24 +43,28 @@ function formatUptime(seconds: number): string {
 export function SystemStatusPage() {
   const [data, setData] = useState<SystemStatusSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [live, setLive] = useState(false);
 
-  const refresh = useCallback(() => {
+  useEffect(() => {
     fetchSystemStatus()
       .then(setData)
       .catch((err) => setError((err as Error).message));
   }, []);
 
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 15_000);
-    return () => clearInterval(id);
-  }, [refresh]);
+  const handleSseEvent = useCallback((event: { type: string; data: unknown }) => {
+    if (event.type !== "status") return;
+    setData(event.data as SystemStatusSnapshot);
+    setError(null);
+    setLive(true);
+  }, []);
+
+  useSseStream("/platform-admin/system-status/stream", handleSseEvent, true, getStoredPlatformAdminToken);
 
   return (
     <Box sx={{ p: 3, maxWidth: 1100, mx: "auto" }}>
       <Typography variant="h5" sx={{ mb: 1 }}>Status do sistema</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        Snapshot ao vivo — banco de dados, Redis e todas as filas de processamento em segundo plano (BullMQ). Atualiza a cada 15s.
+        {live ? "Ao vivo (SSE)" : "Conectando..."} — banco de dados, Redis e todas as filas de processamento em segundo plano (BullMQ). Atualiza a cada 5s.
       </Typography>
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
       {data && (

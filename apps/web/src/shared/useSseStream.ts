@@ -2,9 +2,15 @@
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 8.2 — SSE sem memory leaks no frontend.
 // GAP DE AUDITORIA ENCONTRADO E CORRIGIDO: nenhum consumidor de EventSource existia.
 // Usa `fetch` + ReadableStream (em vez do EventSource nativo) porque o backend
-// exige `Authorization: Bearer <token>` e EventSource não permite headers
+// exige um cabeçalho Authorization customizado e EventSource não permite headers
 // customizados. O AbortController garante que a conexão é fechada e nenhum
 // listener/timer sobrevive ao unmount do componente (useEffect cleanup).
+// GAP DE AUDITORIA FECHADO (mega-audit round 3, r3-health-dashboard-realtime):
+// `getToken` agora é parametrizável (antes hardcoded no token de sessão de
+// tenant) — o painel de administração de plataforma usa uma sessão
+// completamente separada (`getStoredPlatformAdminToken`, nunca o token de
+// tenant) e precisava do mesmo hook sem duplicar toda a lógica de parsing/
+// reconexão.
 import { useEffect, useRef } from "react";
 import { resolveApiBaseUrl, getStoredToken } from "../api/client";
 
@@ -17,9 +23,16 @@ export interface SseEvent {
  * Conecta ao endpoint SSE informado (path relativo, ex.: "/notifications/stream")
  * e chama `onEvent` para cada evento `event: <tipo>\ndata: <json>` recebido.
  * Reconecta automaticamente com backoff simples se a conexão cair, e para de
- * tentar reconectar assim que o componente desmonta.
+ * tentar reconectar assim que o componente desmonta. `getToken` por padrão lê a
+ * sessão de tenant; passe `getStoredPlatformAdminToken` (ou equivalente) para
+ * conectar usando outra sessão.
  */
-export function useSseStream(path: string, onEvent: (event: SseEvent) => void, enabled: boolean): void {
+export function useSseStream(
+  path: string,
+  onEvent: (event: SseEvent) => void,
+  enabled: boolean,
+  getToken: () => string | null = getStoredToken,
+): void {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
 
@@ -30,7 +43,7 @@ export function useSseStream(path: string, onEvent: (event: SseEvent) => void, e
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
     async function connect() {
-      const token = getStoredToken();
+      const token = getToken();
       if (!token) return;
       try {
         const response = await fetch(`${resolveApiBaseUrl()}${path}`, {
@@ -80,5 +93,5 @@ export function useSseStream(path: string, onEvent: (event: SseEvent) => void, e
       if (retryTimer) clearTimeout(retryTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, enabled]);
+  }, [path, enabled, getToken]);
 }
