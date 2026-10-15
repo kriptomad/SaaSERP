@@ -79,6 +79,12 @@ import { getPlatformSecret } from "./lib/platform-secrets";
 
 const app = express();
 
+// Railway e Vercel terminam TLS/proxy antes da aplicação — sem isso, `req.ip`
+// retornaria o IP interno do proxy reverso, nunca o IP real do cliente, quebrando
+// silenciosamente qualquer lógica dependente de IP (allowlist de admin, Capítulo
+// 14.5; rate limit e AuditLog por IP, Capítulo 14.4).
+app.set("trust proxy", true);
+
 app.use(helmet());
 app.use(
   cors({

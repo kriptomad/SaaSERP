@@ -22,6 +22,7 @@ import { JWT_PRIVATE_KEY as PRIVATE_KEY, JWT_PUBLIC_KEY as PUBLIC_KEY } from "..
 export interface PlatformAdminSessionClaims {
   platformAdminUserId: string;
   role: "SUPER_ADMIN" | "SUPPORT_AGENT" | "FINANCE_ANALYST";
+  sid: string; // Capítulo 14.4 — identificador único da sessão (nunca reaproveitado), usado como chave de revogação (`ActiveSession.refreshTokenHash` = sha256(sid)); sem ele, um JWT stateless seria impossível de revogar antes do seu `exp` natural.
 }
 
 export function signPlatformAdminSessionToken(claims: PlatformAdminSessionClaims): string {
