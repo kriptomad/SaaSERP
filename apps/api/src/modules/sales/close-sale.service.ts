@@ -145,6 +145,17 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
         where: { id: input.tenantId },
         select: { taxRegime: true, opticalAdditionalWarrantyDays: true, uf: true },
       });
+      // Capítulo 2.6/6.6 (r5-gatekeeper-global) — FISCAL_NFCE é módulo pago
+      // (MODULE_CATALOG, R$49,90/mês): a venda em si nunca é bloqueada por falta
+      // desse módulo, mas a emissão real via Focus NFe só é enfileirada se o
+      // tenant contratou. Sem o módulo, o FiscalDocument nasce NOT_CONTRACTED —
+      // a tributação ainda é calculada e persistida (devido ao fisco independente
+      // de o lojista ter contratado a automação de emissão).
+      const fiscalModule = await tx.tenantModule.findFirst({
+        where: { tenantId: input.tenantId, moduleCode: "FISCAL_NFCE", active: true },
+        select: { id: true },
+      });
+      const fiscalNfceContracted = Boolean(fiscalModule);
       // Capítulo 21.10 — DIFAL: UF de destino e contribuinte de ICMS vêm do cliente
       // vinculado à venda (quando houver); venda sem cliente identificado (balcão
       // anônimo) nunca cruza fronteira estadual de fato, então cai para a UF do
@@ -621,7 +632,7 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
         data: {
           tenantId: input.tenantId,
           type: "NFCE",
-          status: "PENDING",
+          status: fiscalNfceContracted ? "PENDING" : "NOT_CONTRACTED",
           saleId: sale.id,
           legacyIcmsAmount: legacyIcmsTotal,
           legacyPisCofinsAmount: legacyPisCofinsTotal,
@@ -650,7 +661,7 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
 //    segurar o lock de estoque esperando resposta de rede externa.
 export async function closeSaleAndEmitFiscalDocument(prisma: TenantScopedPrismaClient, input: CloseSaleServerInput) {
   const result = await closeSale(prisma, input);
-  if (!result.isReplay && result.fiscalDocument) {
+  if (!result.isReplay && result.fiscalDocument && result.fiscalDocument.status !== "NOT_CONTRACTED") {
     await enqueueFiscalEmission({ fiscalDocumentId: result.fiscalDocument.id, tenantId: input.tenantId });
     // Capítulo 15.4 — webhook de saída "sale.completed" (ver schema.prisma,
     // TenantWebhookEndpoint.eventTypes). Não bloqueia o fechamento da venda caso o

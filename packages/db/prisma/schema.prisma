@@ -1789,6 +1789,7 @@ enum FiscalDocumentStatus {
   AUTHORIZED
   REJECTED
   CANCELLED
+  NOT_CONTRACTED
 }
 
 model FiscalDocument {

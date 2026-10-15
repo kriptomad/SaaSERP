@@ -38,6 +38,7 @@ const FISCAL_STATUS_LABEL: Record<string, { label: string; color: "success" | "w
   PENDING: { label: "Emissão pendente", color: "warning" },
   REJECTED: { label: "Rejeitada pela SEFAZ", color: "error" },
   CANCELLED: { label: "Cancelada", color: "default" },
+  NOT_CONTRACTED: { label: "Emissão fiscal não contratada", color: "default" },
 };
 
 export function SalesHistoryPage() {
