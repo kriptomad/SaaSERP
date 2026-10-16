@@ -67,6 +67,41 @@ async function main() {
   }
 
   log.info("processo de filas BullMQ iniciado");
+
+  const allWorkers = [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker, fetchIncomingNfeWorker];
+
+  // GAP DE AUDITORIA FECHADO: sem handler de SIGTERM, um rolling deploy do
+  // processo de workers mataria o processo com jobs BullMQ em andamento (ex.:
+  // emissão fiscal síncrona de nota, backup criptografado em progresso) —
+  // `Worker.close()` do BullMQ espera o job atualmente em processamento
+  // terminar antes de encerrar a conexão com o Redis, evitando que o job
+  // fique marcado como "stalled" e seja reprocessado do zero por outra réplica
+  // enquanto ainda está rodando na réplica que está sendo desligada.
+  const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 30_000;
+  let shuttingDown = false;
+  async function gracefulShutdown(signal: string) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log.info({ signal }, "sinal de encerramento recebido, aguardando jobs em andamento finalizarem");
+
+    const forceExitTimer = setTimeout(() => {
+      log.error("graceful shutdown dos workers excedeu o timeout, forçando encerramento do processo");
+      process.exit(1);
+    }, GRACEFUL_SHUTDOWN_TIMEOUT_MS);
+    forceExitTimer.unref();
+
+    try {
+      await Promise.all(allWorkers.map((worker) => worker.close()));
+      log.info("todos os workers BullMQ encerrados graciosamente");
+    } catch (err) {
+      log.error({ err }, "erro ao encerrar workers BullMQ durante graceful shutdown");
+    }
+    clearTimeout(forceExitTimer);
+    process.exit(0);
+  }
+
+  process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
 }
 
 main().catch((error) => {

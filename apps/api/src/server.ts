@@ -331,9 +331,51 @@ const HOST = process.env.HOST ?? "0.0.0.0";
 // o app é importado sem subir um listener de verdade — evita porta ocupada/EADDRINUSE
 // quando vários arquivos de teste importam o módulo em paralelo.
 if (process.env.NODE_ENV !== "test") {
-  app.listen(PORT, HOST, () => {
+  const httpServer = app.listen(PORT, HOST, () => {
     logger.info({ port: PORT, host: HOST }, "filitech-api ouvindo");
   });
+
+  // GAP DE AUDITORIA FECHADO: sem handler de SIGTERM, um rolling deploy no
+  // Docker Swarm/K8s (Capítulo 3) mataria o processo imediatamente — toda
+  // requisição HTTP em andamento no instante do deploy (ex.: fechamento de
+  // venda, emissão fiscal síncrona) seria abortada no meio, sem resposta ao
+  // cliente e com a transação potencialmente em estado intermediário.
+  // Graceful shutdown: para de aceitar NOVAS conexões, espera as requisições
+  // em andamento terminarem (http.Server.close espera todos os sockets keep-
+  // alive ociosos fecharem e as conexões ativas finalizarem antes do callback),
+  // encerra Prisma/Redis, e só então sai do processo — com um timeout de
+  // segurança para nunca travar indefinidamente um deploy caso alguma conexão
+  // fique presa (ex.: cliente lento/conexão quebrada que nunca fecha o socket).
+  const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 15_000;
+  let shuttingDown = false;
+  async function gracefulShutdown(signal: string) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info({ signal }, "sinal de encerramento recebido, iniciando graceful shutdown");
+
+    const forceExitTimer = setTimeout(() => {
+      logger.error("graceful shutdown excedeu o timeout, forçando encerramento do processo");
+      process.exit(1);
+    }, GRACEFUL_SHUTDOWN_TIMEOUT_MS);
+    forceExitTimer.unref();
+
+    httpServer.close(async (err) => {
+      if (err) {
+        logger.error({ err }, "erro ao fechar o servidor HTTP durante graceful shutdown");
+      }
+      try {
+        await Promise.all([prismaUnscoped.$disconnect(), redis.quit()]);
+      } catch (disconnectErr) {
+        logger.error({ err: disconnectErr }, "erro ao desconectar Prisma/Redis durante graceful shutdown");
+      }
+      clearTimeout(forceExitTimer);
+      logger.info("graceful shutdown concluído");
+      process.exit(0);
+    });
+  }
+
+  process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
 }
 
 export { app };
