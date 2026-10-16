@@ -24,8 +24,16 @@ export interface CloseSaleOfflineInput {
       electronicPrescriptionNumber?: string;
     };
   }[];
-  paymentMethod: "CASH" | "DEBIT_CARD" | "CREDIT_CARD" | "PIX" | "BOLETO" | "STORE_CREDIT";
+  paymentMethod?: "CASH" | "DEBIT_CARD" | "CREDIT_CARD" | "PIX" | "BOLETO" | "STORE_CREDIT";
   amountTendered?: number;
+  // Pagamento Dividido/Split (Capítulo 9) — alternativa a `paymentMethod` para vendas
+  // pagas em 2+ métodos (ex.: parte em dinheiro, parte no cartão). Exatamente um dos
+  // dois deve ser informado pelo chamador (PosPage valida isso antes de chamar aqui).
+  payments?: {
+    method: "CASH" | "DEBIT_CARD" | "CREDIT_CARD" | "PIX" | "BOLETO" | "STORE_CREDIT";
+    amount: number;
+    amountTendered?: number;
+  }[];
 }
 
 export interface CloseSaleOfflineResult {
@@ -43,8 +51,13 @@ export interface CloseSaleOfflineResult {
 export async function closeSaleOffline(input: CloseSaleOfflineInput): Promise<CloseSaleOfflineResult> {
   const localId = uuid();
   const totalAmount = input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
-  const changeDue =
-    input.paymentMethod === "CASH" && input.amountTendered ? Math.max(0, input.amountTendered - totalAmount) : 0;
+  const changeDue = input.payments
+    ? input.payments
+        .filter((p) => p.method === "CASH" && p.amountTendered)
+        .reduce((sum, p) => sum + Math.max(0, p.amountTendered! - p.amount), 0)
+    : input.paymentMethod === "CASH" && input.amountTendered
+      ? Math.max(0, input.amountTendered - totalAmount)
+      : 0;
 
   await offlineDb.pendingSales.add({
     localId,
@@ -53,8 +66,9 @@ export async function closeSaleOffline(input: CloseSaleOfflineInput): Promise<Cl
       cashRegisterId: input.cashRegisterId,
       ...(input.clientId ? { clientId: input.clientId } : {}),
       items: input.items,
-      paymentMethod: input.paymentMethod,
-      amountTendered: input.amountTendered,
+      ...(input.payments
+        ? { payments: input.payments }
+        : { paymentMethod: input.paymentMethod, amountTendered: input.amountTendered }),
     },
     createdAt: Date.now(),
     syncStatus: "PENDING",

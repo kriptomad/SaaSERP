@@ -26,6 +26,7 @@ import {
   OpticalPrescriptionRequiredError,
   ConsignmentSupplierRequiredError,
   KitCompositionMissingError,
+  SplitPaymentValidationError,
 } from "./close-sale.service";
 import { RateLimitExceededError } from "../../lib/rate-limit";
 import { InsufficientStockError } from "../../services/stock/deduct-stock-fefo.service";
@@ -92,15 +93,40 @@ const closeSaleSchema = z.object({
       }),
     )
     .min(1),
-  paymentMethod: z.enum(["CASH", "DEBIT_CARD", "CREDIT_CARD", "PIX", "BOLETO", "STORE_CREDIT", "HEALTH_INSURANCE"]),
+  paymentMethod: z.enum(["CASH", "DEBIT_CARD", "CREDIT_CARD", "PIX", "BOLETO", "STORE_CREDIT", "HEALTH_INSURANCE"]).optional(),
   amountTendered: z.number().nonnegative().optional(),
+  // Pagamento Dividido/Split (Capítulo 9) — alternativa a `paymentMethod` para
+  // vendas pagas com 2+ métodos (ex.: metade PIX, metade cartão). Validação
+  // definitiva de soma/combinação proibida (STORE_CREDIT/HEALTH_INSURANCE nunca
+  // divididos) acontece em close-sale.service.ts, dentro da transação — aqui só a
+  // forma do payload.
+  payments: z
+    .array(
+      z.object({
+        method: z.enum(["CASH", "DEBIT_CARD", "CREDIT_CARD", "PIX", "BOLETO", "STORE_CREDIT", "HEALTH_INSURANCE"]),
+        amount: z.number().positive(),
+        amountTendered: z.number().nonnegative().optional(),
+      }),
+    )
+    .min(2)
+    .optional(),
   closedAtClientTimestamp: z.string().datetime().optional(),
-}).refine((data) => data.paymentMethod !== "STORE_CREDIT" || Boolean(data.clientId), {
+}).refine((data) => Boolean(data.paymentMethod) !== Boolean(data.payments), {
+  // Informe exatamente um dos dois formatos — nunca ambos, nunca nenhum.
+  message: "Informe paymentMethod (método único) OU payments (dividido) — nunca os dois nem nenhum.",
+  path: ["paymentMethod"],
+}).refine((data) => {
+  const methods = data.payments ? data.payments.map((p) => p.method) : data.paymentMethod ? [data.paymentMethod] : [];
+  return !methods.includes("STORE_CREDIT") || Boolean(data.clientId);
+}, {
   // Capítulo 4.6 — Varejo Geral (Crediário/Fiado): sem clientId não há de quem
   // debitar o saldo de crediário — a venda STORE_CREDIT não pode ser anônima.
   message: "Venda a prazo (STORE_CREDIT) exige clientId.",
   path: ["clientId"],
-}).refine((data) => data.paymentMethod !== "HEALTH_INSURANCE" || Boolean(data.clientId), {
+}).refine((data) => {
+  const methods = data.payments ? data.payments.map((p) => p.method) : data.paymentMethod ? [data.paymentMethod] : [];
+  return !methods.includes("HEALTH_INSURANCE") || Boolean(data.clientId);
+}, {
   // Capítulo 11.2 — Ótica: sem clientId não há convênio para identificar — a venda
   // HEALTH_INSURANCE não pode ser anônima.
   message: "Venda por convênio (HEALTH_INSURANCE) exige clientId.",
@@ -154,6 +180,7 @@ salesRouter.post("/sales", requireAuth, async (req: Request, res: Response) => {
       items: input.items,
       paymentMethod: input.paymentMethod,
       amountTendered: input.amountTendered,
+      payments: input.payments,
     });
 
     return res.status(result.isReplay ? 200 : 201).json({
@@ -222,6 +249,7 @@ function resolveSaleCloseError(err: unknown): { status: number; code: string; me
   if (err instanceof OpticalPrescriptionRequiredError) return { status: 400, code: "OPTICAL_PRESCRIPTION_REQUIRED", message: err.message };
   if (err instanceof ConsignmentSupplierRequiredError) return { status: 400, code: "CONSIGNMENT_SUPPLIER_REQUIRED", message: err.message };
   if (err instanceof KitCompositionMissingError) return { status: 400, code: "KIT_COMPOSITION_MISSING", message: err.message };
+  if (err instanceof SplitPaymentValidationError) return { status: 400, code: "SPLIT_PAYMENT_VALIDATION_ERROR", message: err.message };
   return null;
 }
 

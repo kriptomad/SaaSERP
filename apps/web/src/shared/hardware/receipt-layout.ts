@@ -95,6 +95,12 @@ export function translatePaymentMethod(method: string): string {
     PIX: "PIX",
     BOLETO: "Boleto",
     STORE_CREDIT: "Crédito da Loja",
+    HEALTH_INSURANCE: "Convênio",
+    MARKETPLACE: "Marketplace",
+    // Pagamento Dividido/Split (Capítulo 9) — rótulo agregado de Sale.paymentMethod
+    // quando a venda teve 2+ métodos diferentes; o detalhamento real de cada parte
+    // fica nas linhas de Payment, não neste rótulo.
+    MIXED: "Dividido (múltiplos métodos)",
   };
   return map[method] ?? method;
 }

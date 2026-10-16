@@ -141,6 +141,7 @@ export async function emitFiscalDocument(
         include: {
           client: true,
           items: { include: { product: true, service: true } },
+          payments: true,
         },
       },
     },
@@ -253,7 +254,19 @@ export async function emitFiscalDocument(
   );
 
   const totalPayment = productItems.reduce((acc, item) => acc.plus(item.totalPrice), new Prisma.Decimal(0));
-  const sefazPaymentCode = PAYMENT_METHOD_TO_SEFAZ_CODE[sale.paymentMethod] ?? "99";
+  // GAP DE AUDITORIA FECHADO (Rodada 6 — Pagamento Dividido/Split): a NFC-e sempre
+  // declarava UMA única `forma_pagamento` baseada em `sale.paymentMethod`, mesmo
+  // quando a venda real foi paga em mais de um método (ex.: metade PIX, metade
+  // cartão) — o leiaute 4.00 da NFC-e (Nota Técnica 2020.006) suporta
+  // `<detPag>` repetido exatamente para isso. Agora cada `Payment` real da venda
+  // (ver Payment model, sempre criado em closeSale) vira uma linha própria — nunca
+  // mais um único valor "achatado" que poderia nem bater com o total da nota quando
+  // havia troco em espécie envolvido (changeDue nunca entra no valor declarado à
+  // SEFAZ, é devolução ao cliente, não faz parte da receita da venda).
+  const formasPagamento = sale.payments.map((payment) => ({
+    forma_pagamento: PAYMENT_METHOD_TO_SEFAZ_CODE[payment.method] ?? "99",
+    valor_pagamento: Number(payment.amount),
+  }));
   // CORREÇÃO DE AUDITORIA (mega-audit rodada 5): `local_destino` (tabela SEFAZ
   // "Local de destino da operação") estava fixo em "1" (operação interna) para
   // TODA venda — inconsistente com o CFOP já resolvido por item acima (que
@@ -273,7 +286,7 @@ export async function emitFiscalDocument(
     local_destino: localDestino,
     natureza_operacao: "VENDA AO CONSUMIDOR",
     items,
-    formas_pagamento: [{ forma_pagamento: sefazPaymentCode, valor_pagamento: Number(totalPayment) }],
+    formas_pagamento: formasPagamento.length > 0 ? formasPagamento : [{ forma_pagamento: PAYMENT_METHOD_TO_SEFAZ_CODE[sale.paymentMethod] ?? "99", valor_pagamento: Number(totalPayment) }],
   };
 
   if (sale.client?.document) {

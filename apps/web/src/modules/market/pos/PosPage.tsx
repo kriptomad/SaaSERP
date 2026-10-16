@@ -87,6 +87,14 @@ export function PosPage() {
   const [lastSaleMessage, setLastSaleMessage] = useState<string | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH");
+  // Pagamento Dividido/Split (Capítulo 9) — o cenário real mais comum de PDV físico:
+  // parte em dinheiro, parte no cartão (débito OU crédito, nunca os dois juntos nesta
+  // UI simplificada — cobrir 3+ métodos simultâneos exigiria 2 transações TEF
+  // sequenciais, fora de escopo desta primeira entrega). `splitEnabled=false` mantém
+  // 100% do fluxo de método único inalterado.
+  const [splitEnabled, setSplitEnabled] = useState(false);
+  const [splitCashAmount, setSplitCashAmount] = useState("0.00");
+  const [splitCardMethod, setSplitCardMethod] = useState<"DEBIT_CARD" | "CREDIT_CARD">("DEBIT_CARD");
   const [hardwareConfig] = useState<HardwareConfig>(() => loadHardwareConfig());
   const [printerConnected, setPrinterConnected] = useState(false);
   const [hardwareMessage, setHardwareMessage] = useState<string | null>(null);
@@ -344,7 +352,9 @@ export function PosPage() {
             totalPrice: line.quantity * line.unitPrice,
           })),
           totalAmount,
-          paymentMethod,
+          paymentMethod: splitEnabled
+            ? `MIXED (Dinheiro R$ ${splitCashAmount} + ${splitCardMethod === "CREDIT_CARD" ? "Crédito" : "Débito"})`
+            : paymentMethod,
           totalTaxesApprox: null,
           fiscalAccessKey: null,
           fiscalProtocolNumber: null,
@@ -361,18 +371,29 @@ export function PosPage() {
   async function handleCloseSale() {
     if (!user || cart.length === 0 || !cashRegisterId) return;
 
+    const splitCashValue = Number(splitCashAmount) || 0;
+    const splitCardValue = Math.round((total - splitCashValue) * 100) / 100;
+    if (splitEnabled && (splitCashValue <= 0 || splitCardValue <= 0)) {
+      setHardwareMessage("Pagamento dividido exige valor positivo em dinheiro E no cartão — some exatamente o total da venda.");
+      return;
+    }
+
     let tefSessionId: string | null = null;
     let tefNsu: string | null = null;
     // Capítulo 23.5 — pagamento em cartão passa pelo TEF (SiTef) ANTES de fechar a
     // venda: só gravamos a venda como paga por cartão se a adquirente de fato aprovou.
-    if (paymentMethod === "DEBIT_CARD" || paymentMethod === "CREDIT_CARD") {
+    // Pagamento Dividido/Split (Capítulo 9): o valor cobrado na maquininha é só a
+    // PARTE do cartão (`splitCardValue`), nunca o total da venda.
+    const cardAmount = splitEnabled ? splitCardValue : total;
+    const cardMethod = splitEnabled ? splitCardMethod : paymentMethod;
+    if (cardMethod === "DEBIT_CARD" || cardMethod === "CREDIT_CARD") {
       setTefBusy(true);
       setHardwareMessage("Enviando transação para a maquininha (TEF)…");
       try {
         const saleReference = `pdv-${Date.now()}`;
         const result = await startTefTransaction({
-          amountCents: Math.round(total * 100),
-          transactionType: paymentMethod === "CREDIT_CARD" ? "CREDIT" : "DEBIT",
+          amountCents: Math.round(cardAmount * 100),
+          transactionType: cardMethod === "CREDIT_CARD" ? "CREDIT" : "DEBIT",
           saleReference,
         });
         if (result.status !== "APPROVED") {
@@ -404,7 +425,14 @@ export function PosPage() {
         unitPrice: line.unitPrice,
         ...(line.prescriptionData ? { prescriptionData: line.prescriptionData } : {}),
       })),
-      paymentMethod,
+      ...(splitEnabled
+        ? {
+            payments: [
+              { method: "CASH" as const, amount: splitCashValue, amountTendered: splitCashValue },
+              { method: splitCardMethod, amount: splitCardValue },
+            ],
+          }
+        : { paymentMethod }),
     }).catch(async (error) => {
       // A adquirente já aprovou o débito no cartão do cliente, mas o ERP falhou ao
       // registrar a venda localmente — sem estornar agora, o cliente seria cobrado
@@ -425,7 +453,8 @@ export function PosPage() {
       );
     }
 
-    if (paymentMethod === "CASH" && hardwareConfig.openCashDrawerOnCashSale && printerRef.current?.isConnected) {
+    const hadCashComponent = splitEnabled ? splitCashValue > 0 : paymentMethod === "CASH";
+    if (hadCashComponent && hardwareConfig.openCashDrawerOnCashSale && printerRef.current?.isConnected) {
       printerRef.current.openCashDrawer().catch((error) => setHardwareMessage(`Falha ao abrir gaveta: ${(error as Error).message}`));
     }
     await printSaleReceipt(result.localId, result.totalAmount);
@@ -436,6 +465,8 @@ export function PosPage() {
     );
     setCart([]);
     setClient(null);
+    setSplitEnabled(false);
+    setSplitCashAmount("0.00");
   }
 
   return (
@@ -575,17 +606,52 @@ export function PosPage() {
             </Alert>
           )}
           <Typography variant="h6">Total: R$ {total.toFixed(2)}</Typography>
-          <ToggleButtonGroup
-            exclusive
-            size="small"
-            value={paymentMethod}
-            onChange={(_e, value) => value && setPaymentMethod(value)}
-            sx={{ mt: 1, mb: 1 }}
-          >
-            <ToggleButton value="CASH">Dinheiro</ToggleButton>
-            <ToggleButton value="DEBIT_CARD">Débito (TEF)</ToggleButton>
-            <ToggleButton value="CREDIT_CARD">Crédito (TEF)</ToggleButton>
-          </ToggleButtonGroup>
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 1 }}>
+            <ToggleButtonGroup
+              exclusive
+              size="small"
+              value={splitEnabled ? "SPLIT" : "SINGLE"}
+              onChange={(_e, value) => value && setSplitEnabled(value === "SPLIT")}
+            >
+              <ToggleButton value="SINGLE">Método único</ToggleButton>
+              <ToggleButton value="SPLIT">Dividir pagamento</ToggleButton>
+            </ToggleButtonGroup>
+          </Stack>
+          {splitEnabled ? (
+            <Stack spacing={1} sx={{ mt: 1, mb: 1 }}>
+              <TextField
+                size="small"
+                type="number"
+                label="Valor em dinheiro (R$)"
+                value={splitCashAmount}
+                onChange={(e) => setSplitCashAmount(e.target.value)}
+              />
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={splitCardMethod}
+                onChange={(_e, value) => value && setSplitCardMethod(value)}
+              >
+                <ToggleButton value="DEBIT_CARD">Restante no Débito (TEF)</ToggleButton>
+                <ToggleButton value="CREDIT_CARD">Restante no Crédito (TEF)</ToggleButton>
+              </ToggleButtonGroup>
+              <Typography variant="body2" color="text.secondary">
+                Restante no cartão: R$ {Math.max(0, total - (Number(splitCashAmount) || 0)).toFixed(2)}
+              </Typography>
+            </Stack>
+          ) : (
+            <ToggleButtonGroup
+              exclusive
+              size="small"
+              value={paymentMethod}
+              onChange={(_e, value) => value && setPaymentMethod(value)}
+              sx={{ mt: 1, mb: 1 }}
+            >
+              <ToggleButton value="CASH">Dinheiro</ToggleButton>
+              <ToggleButton value="DEBIT_CARD">Débito (TEF)</ToggleButton>
+              <ToggleButton value="CREDIT_CARD">Crédito (TEF)</ToggleButton>
+            </ToggleButtonGroup>
+          )}
           <Button
             variant="contained"
             fullWidth

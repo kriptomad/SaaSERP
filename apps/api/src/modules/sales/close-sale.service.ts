@@ -68,8 +68,25 @@ export interface CloseSaleServerInput {
     // automaticamente no fechamento desta venda referencia a receita usada.
     opticalPrescriptionId?: string;
   }[];
-  paymentMethod: "CASH" | "DEBIT_CARD" | "CREDIT_CARD" | "PIX" | "BOLETO" | "STORE_CREDIT" | "HEALTH_INSURANCE";
+  // GAP DE AUDITORIA FECHADO (Rodada 6 — Pagamento Dividido/Split, Capítulo 9): o
+  // schema já tinha `Payment[]` 1-N em `Sale` desde a primeira versão, mas esta
+  // função SEMPRE criava exatamente 1 `Payment` — nunca existia forma real de
+  // dividir uma venda entre dois ou mais métodos (ex.: metade PIX, metade cartão de
+  // crédito), um pedido frequentíssimo de PDV físico real. Exatamente um dos dois
+  // grupos abaixo deve ser informado — nunca ambos, nunca nenhum (validado logo no
+  // início da transação): `paymentMethod`/`amountTendered` (venda de método único,
+  // comportamento 100% preservado) OU `payments` (split real, 2+ métodos).
+  // STORE_CREDIT/HEALTH_INSURANCE nunca podem aparecer dentro de um `payments[]` com
+  // mais de uma linha — cada um já alimenta um subsistema de cobrança consolidada
+  // próprio (crediário do cliente / fatura de convênio) desenhado para o valor CHEIO
+  // da venda, nunca uma fração dela.
+  paymentMethod?: "CASH" | "DEBIT_CARD" | "CREDIT_CARD" | "PIX" | "BOLETO" | "STORE_CREDIT" | "HEALTH_INSURANCE";
   amountTendered?: number;
+  payments?: {
+    method: "CASH" | "DEBIT_CARD" | "CREDIT_CARD" | "PIX" | "BOLETO" | "STORE_CREDIT" | "HEALTH_INSURANCE";
+    amount: number;
+    amountTendered?: number;
+  }[];
 }
 
 export class SerialNotReadyForSaleError extends Error {}
@@ -85,6 +102,11 @@ export class InsufficientVariantStockError extends Error {}
 // existia, era só um valor de enum aceito sem lógica alguma por trás.
 export class ClientRequiredForStoreCreditError extends Error {}
 export class CreditLimitExceededError extends Error {}
+// Pagamento Dividido/Split (Capítulo 9) — validação de forma/payload de `payments[]`:
+// soma não bate com o total da venda, nem `paymentMethod` nem `payments` informado
+// (ou os dois ao mesmo tempo), ou método de cobrança consolidada (STORE_CREDIT/
+// HEALTH_INSURANCE) usado junto de outro método na mesma venda.
+export class SplitPaymentValidationError extends Error {}
 // Capítulo 4.5 — Farmácia/Drogaria: trava regulatória SNGPC/SNCR. GAP DE AUDITORIA
 // ENCONTRADO: `Product.requiresPrescriptionRetention` e `PrescriptionRecord` existiam
 // no schema, mas nenhuma rota/serviço aplicava a exigência "venda não pode ser
@@ -456,10 +478,41 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
         });
       }
 
-      const changeDue =
-        input.paymentMethod === "CASH" && input.amountTendered
-          ? Prisma.Decimal.max(0, new Prisma.Decimal(input.amountTendered).minus(totalAmount))
-          : new Prisma.Decimal(0);
+      // Pagamento Dividido/Split (Capítulo 9) — resolve os dois formatos de entrada
+      // possíveis em exatamente UMA lista normalizada de "entradas de pagamento" daqui
+      // em diante; todo o restante da função (changeDue, validações de STORE_CREDIT/
+      // HEALTH_INSURANCE, criação de `Payment`) opera só sobre `paymentEntries`, nunca
+      // mais sobre `input.paymentMethod` diretamente.
+      if (input.paymentMethod && input.payments) {
+        throw new SplitPaymentValidationError("Informe apenas um dos dois: paymentMethod (método único) OU payments (dividido) — nunca ambos.");
+      }
+      if (!input.paymentMethod && (!input.payments || input.payments.length === 0)) {
+        throw new SplitPaymentValidationError("Informe paymentMethod (método único) ou payments (dividido, 2+ métodos).");
+      }
+      const paymentEntries: { method: "CASH" | "DEBIT_CARD" | "CREDIT_CARD" | "PIX" | "BOLETO" | "STORE_CREDIT" | "HEALTH_INSURANCE"; amount: Prisma.Decimal; amountTendered?: number }[] =
+        input.payments
+          ? input.payments.map((p) => ({ method: p.method, amount: new Prisma.Decimal(p.amount), amountTendered: p.amountTendered }))
+          : [{ method: input.paymentMethod!, amount: totalAmount, amountTendered: input.amountTendered }];
+
+      const paymentEntriesSum = paymentEntries.reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
+      if (!paymentEntriesSum.equals(totalAmount)) {
+        throw new SplitPaymentValidationError(
+          `A soma dos pagamentos (${paymentEntriesSum.toFixed(2)}) não bate com o total da venda (${totalAmount.toFixed(2)}).`,
+        );
+      }
+      const distinctMethods = new Set(paymentEntries.map((p) => p.method));
+      if (paymentEntries.length > 1 && (distinctMethods.has("STORE_CREDIT") || distinctMethods.has("HEALTH_INSURANCE"))) {
+        throw new SplitPaymentValidationError(
+          "STORE_CREDIT e HEALTH_INSURANCE não podem ser combinados com outro método na mesma venda — cada um exige o valor cheio da venda (crediário/fatura de convênio consolidada).",
+        );
+      }
+      // Rótulo agregado gravado em `Sale.paymentMethod`: o método único de fato usado,
+      // ou MIXED quando a venda tem 2+ métodos distintos reais.
+      const resolvedSalePaymentMethod = distinctMethods.size === 1 ? paymentEntries[0].method : "MIXED";
+
+      const changeDue = paymentEntries
+        .filter((p) => p.method === "CASH" && p.amountTendered)
+        .reduce((sum, p) => sum.plus(Prisma.Decimal.max(0, new Prisma.Decimal(p.amountTendered!).minus(p.amount))), new Prisma.Decimal(0));
 
       // Capítulo 4.6 — Varejo Geral (Crediário/Fiado): toda venda STORE_CREDIT exige
       // clientId (debita o saldo disponível DESSE cliente) e precisa caber dentro do
@@ -473,7 +526,10 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
       // simultâneas estourando o limite do mesmo cliente. O `updateMany` abaixo
       // re-confirma a condição no próprio WHERE como segunda camada de proteção
       // (mesmo padrão atômico de `loyalty.routes.ts` redeemLoyaltyPoints/adjustSchema).
-      if (input.paymentMethod === "STORE_CREDIT") {
+      // Split Payment: STORE_CREDIT nunca é combinado (validado acima), então
+      // `storeCreditEntry?.amount` é sempre o valor cheio da venda quando presente.
+      const storeCreditEntry = paymentEntries.find((p) => p.method === "STORE_CREDIT");
+      if (storeCreditEntry) {
         if (!input.clientId) {
           throw new ClientRequiredForStoreCreditError("Venda a prazo (STORE_CREDIT) exige a seleção do cliente.");
         }
@@ -481,14 +537,14 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
           where: { id: input.clientId, tenantId: input.tenantId },
           select: { creditLimit: true },
         });
-        const availableLimit = (client?.creditLimit ?? new Prisma.Decimal(0)).minus(totalAmount);
+        const availableLimit = (client?.creditLimit ?? new Prisma.Decimal(0)).minus(storeCreditEntry.amount);
         const claimedCredit = await tx.client.updateMany({
           where: {
             id: input.clientId,
             tenantId: input.tenantId,
             creditBalanceUsed: { lte: availableLimit },
           },
-          data: { creditBalanceUsed: { increment: totalAmount } },
+          data: { creditBalanceUsed: { increment: storeCreditEntry.amount } },
         });
         if (claimedCredit.count === 0) {
           throw new CreditLimitExceededError("Limite de crediário do cliente insuficiente para esta venda a prazo.");
@@ -501,7 +557,7 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
       // CONSOLIDADA por convênio/competência (ver health-insurance-billing.routes.ts),
       // nunca uma por venda individual.
       let healthInsurancePlanId: string | null = null;
-      if (input.paymentMethod === "HEALTH_INSURANCE") {
+      if (paymentEntries.some((p) => p.method === "HEALTH_INSURANCE")) {
         if (!input.clientId) {
           throw new HealthInsurancePlanRequiredError("Venda por convênio exige a seleção do cliente.");
         }
@@ -522,7 +578,7 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
           cashierId: input.cashierId,
           idempotencyKey: input.idempotencyKey,
           cashRegisterId: input.cashRegisterId,
-          paymentMethod: input.paymentMethod,
+          paymentMethod: resolvedSalePaymentMethod,
           status: "PAID",
           totalAmount,
           ...(healthInsurancePlanId ? { healthInsurancePlanId } : {}),
@@ -628,17 +684,29 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
         });
       }
 
-      await tx.payment.create({
-        data: {
-          tenantId: input.tenantId,
-          saleId: sale.id,
-          method: input.paymentMethod,
-          status: "CONFIRMED",
-          amount: totalAmount,
-          changeDue,
-          idempotencyKey: `${input.idempotencyKey}:payment`,
-        },
-      });
+      // Pagamento Dividido/Split: um `Payment` por entrada de `paymentEntries`, nunca
+      // mais um único row fixo — cada idempotencyKey ganha sufixo de índice para
+      // respeitar o `@@unique` da tabela mesmo quando o mesmo método se repete (ex.:
+      // duas entradas CASH, caso raro mas válido: cliente paga parte com uma nota e
+      // parte com outra forma de troco combinada no caixa).
+      for (let i = 0; i < paymentEntries.length; i++) {
+        const entry = paymentEntries[i];
+        const entryChangeDue =
+          entry.method === "CASH" && entry.amountTendered
+            ? Prisma.Decimal.max(0, new Prisma.Decimal(entry.amountTendered).minus(entry.amount))
+            : new Prisma.Decimal(0);
+        await tx.payment.create({
+          data: {
+            tenantId: input.tenantId,
+            saleId: sale.id,
+            method: entry.method,
+            status: "CONFIRMED",
+            amount: entry.amount,
+            changeDue: entryChangeDue,
+            idempotencyKey: `${input.idempotencyKey}:payment:${i}`,
+          },
+        });
+      }
 
       // 3. FiscalDocument nasce PENDING nesta mesma transação — nunca criado depois, de
       //    forma desacoplada, o que abriria uma janela em que a venda existe sem nenhum

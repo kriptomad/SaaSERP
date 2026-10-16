@@ -21,35 +21,56 @@ import { isTenantStorageKey } from "./storage-key";
 const PRESIGNED_UPLOAD_EXPIRES_SECONDS = 5 * 60; // 5 min — suficiente para o upload direto do navegador, curto o bastante para não deixar a URL viva por muito tempo.
 const PRESIGNED_DOWNLOAD_EXPIRES_SECONDS = 15 * 60; // 15 min — tempo de visualizar/baixar uma foto/XML no painel.
 
-/** Categorias de objeto permitidas (Capítulo 3) — grava a allowlist de extensão/mimetype por categoria para nunca aceitar upload arbitrário. */
+/** Categorias de objeto permitidas (Capítulo 3) — grava a allowlist de extensão/mimetype por categoria para nunca aceitar upload arbitrário.
+ * `publicReadable` controla se `presignObjectDownload` pode servir esta categoria via
+ * `R2_PUBLIC_BASE_URL` (Custom Domain, sem assinatura/expiração) quando configurado —
+ * GAP DE AUDITORIA FECHADO (Rodada 6): antes QUALQUER categoria virava uma URL pública
+ * eterna e sem assinatura assim que o admin de plataforma configurava
+ * `R2_PUBLIC_BASE_URL` (feito para servir o logo da vitrine virtual sem gastar uma
+ * assinatura por visita), vazando acesso permanente e anônimo a XMLs fiscais, laudos
+ * de O.S. com fotos de cliente, documentos do escritório contábil e ZIPs completos de
+ * exportação de dados para qualquer um que obtivesse a URL (ela nunca expira e é
+ * cacheável por CDN/motores de busca). Só `avatars` (fotos de perfil/logo de loja —
+ * já pensadas para exibição pública, baixa sensibilidade) pode pular a assinatura.
+ */
 export const STORAGE_CATEGORIES = {
-  "work-order-photos": { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"], maxBytes: 15 * 1024 * 1024 },
-  avatars: { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"], maxBytes: 5 * 1024 * 1024 },
-  "fiscal-xml": { allowedMimeTypes: ["text/xml", "application/xml"], maxBytes: 2 * 1024 * 1024 },
-  "client-record-photos": { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"], maxBytes: 15 * 1024 * 1024 },
-  "official-tax-documents": { allowedMimeTypes: ["text/plain", "application/xml"], maxBytes: 20 * 1024 * 1024 },
+  "work-order-photos": { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"], maxBytes: 15 * 1024 * 1024, publicReadable: false },
+  avatars: { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"], maxBytes: 5 * 1024 * 1024, publicReadable: true },
+  "fiscal-xml": { allowedMimeTypes: ["text/xml", "application/xml"], maxBytes: 2 * 1024 * 1024, publicReadable: false },
+  "client-record-photos": { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"], maxBytes: 15 * 1024 * 1024, publicReadable: false },
+  "official-tax-documents": { allowedMimeTypes: ["text/plain", "application/xml"], maxBytes: 20 * 1024 * 1024, publicReadable: false },
   // Capítulo 18.4 — ZIP final gerado por `data-export-generation.worker.ts`, upload
   // direto pelo backend (putObjectDirect), nunca pelo navegador.
-  "data-export": { allowedMimeTypes: ["application/zip"], maxBytes: 500 * 1024 * 1024 },
+  "data-export": { allowedMimeTypes: ["application/zip"], maxBytes: 500 * 1024 * 1024, publicReadable: false },
   // Capítulo 18.5 — arquivo original (CSV/XLSX) enviado pelo lojista no wizard de
   // importação assistida, via presignObjectUpload (upload direto do navegador).
   "data-import-source": {
     allowedMimeTypes: ["text/csv", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
     maxBytes: 20 * 1024 * 1024,
+    publicReadable: false,
   },
   // Capítulo 18.5 — relatório de erros por linha (CSV) gerado pela etapa de
   // validação, upload direto pelo backend.
-  "data-import-reports": { allowedMimeTypes: ["text/csv"], maxBytes: 10 * 1024 * 1024 },
+  "data-import-reports": { allowedMimeTypes: ["text/csv"], maxBytes: 10 * 1024 * 1024, publicReadable: false },
   // Capítulo 10.3 — dump completo do banco, já cifrado em AES-256-GCM antes do
   // upload (o arquivo em si é binário opaco — ".enc" não é um mimetype IANA real,
   // mas identifica inequivocamente "já cifrado" para quem navegar o bucket).
-  "database-backups": { allowedMimeTypes: ["application/octet-stream"], maxBytes: 5 * 1024 * 1024 * 1024 },
+  "database-backups": { allowedMimeTypes: ["application/octet-stream"], maxBytes: 5 * 1024 * 1024 * 1024, publicReadable: false },
   // Capítulo 15.3 — anexos (foto/print) de chamados de helpdesk, enviados pelo
   // lojista junto do relato do problema ou de uma resposta — mesmo padrão de upload
   // direto do navegador usado em work-order-photos/client-record-photos.
-  "support-ticket-attachments": { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp", "application/pdf"], maxBytes: 10 * 1024 * 1024 },
+  "support-ticket-attachments": { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp", "application/pdf"], maxBytes: 10 * 1024 * 1024, publicReadable: false },
 } as const;
 export type StorageCategory = keyof typeof STORAGE_CATEGORIES;
+
+/** Extrai a categoria do padrão `tenants/<tenantId>/<categoria>/<arquivo>` — nunca
+ * confia em nada enviado pelo chamador, sempre reconstrói a partir da própria chave
+ * persistida, que é a fonte de verdade de qual categoria aquele objeto pertence. */
+function categoryOfStorageKey(storageKey: string): StorageCategory | null {
+  const parts = storageKey.split("/");
+  const candidate = parts[2];
+  return candidate && candidate in STORAGE_CATEGORIES ? (candidate as StorageCategory) : null;
+}
 
 interface R2Config {
   accountId: string;
@@ -161,9 +182,12 @@ export async function presignObjectDownload(tenantId: string, storageKey: string
   }
   const { client, config } = await getR2Client();
 
-  if (config.publicBaseUrl) {
+  const category = categoryOfStorageKey(storageKey);
+  if (config.publicBaseUrl && category && STORAGE_CATEGORIES[category].publicReadable) {
     // Bucket com Custom Domain público (Capítulo 3) — nenhuma necessidade de assinar;
-    // a própria URL pública já é estável e cacheável por CDN.
+    // a própria URL pública já é estável e cacheável por CDN. Restrito a categorias
+    // marcadas `publicReadable: true` (hoje só `avatars`) — nunca XMLs fiscais, fotos
+    // de O.S./cliente, documentos contábeis ou exportações completas de dados.
     return { downloadUrl: `${config.publicBaseUrl.replace(/\/$/, "")}/${storageKey}`, expiresInSeconds: 0 };
   }
 

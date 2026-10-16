@@ -1519,6 +1519,14 @@ enum SalePaymentMethod {
   STORE_CREDIT // crediário/fiado — varejo geral
   MARKETPLACE // Capítulo 11.1/20 — pedido de marketplace (iFood) já pago ao consumidor final na própria plataforma; o lojista recebe em repasse consolidado do marketplace, nunca em espécie/maquineta própria
   HEALTH_INSURANCE // Capítulo 11.2 — Ótica: venda com convênio/plano de saúde; recebimento consolidado em lote (AccountReceivable por HealthInsurancePlan), nunca por venda individual
+  // GAP DE AUDITORIA FECHADO (Rodada 6 — Pagamento Dividido/Split, Capítulo 9): valor
+  // "achatado" de `Sale.paymentMethod` quando a venda tem 2+ `Payment` reais de métodos
+  // DIFERENTES (ex.: metade PIX, metade cartão de crédito) — nunca usado como método de
+  // uma linha `Payment` individual, apenas como rótulo agregado da própria `Sale`.
+  // STORE_CREDIT/HEALTH_INSURANCE/MARKETPLACE permanecem sempre de método único (cada
+  // um já alimenta um subsistema de cobrança consolidada próprio que assume o valor
+  // cheio da venda — crediário do cliente, fatura de convênio, repasse de marketplace).
+  MIXED
 }
 
 // Gap de auditoria: o Capítulo 12 (nicho Restaurante) já descrevia vendas nascendo em
