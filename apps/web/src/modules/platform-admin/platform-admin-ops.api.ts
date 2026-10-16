@@ -157,3 +157,180 @@ export function createFeatureFlag(input: Omit<FeatureFlag, "id">): Promise<Featu
 export function updateFeatureFlag(id: string, input: Partial<Omit<FeatureFlag, "id" | "key">>): Promise<FeatureFlag> {
   return platformAdminApi.patch(`/platform-admin/feature-flags/${id}`, input);
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// CENTRAL DE INTEGRAÇÕES (Capítulo 20.10) — GAP DE AUDITORIA FECHADO (mega-audit
+// rodada 8): endpoint já existia no backend desde a rodada anterior, mas sem
+// nenhuma tela consumindo-o.
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface IntegrationProviderSummary {
+  provider: string;
+  activeTenantCount: number;
+  totalCredentialCount: number;
+  last100SuccessRate: number | null;
+  sampledChecks: number;
+}
+
+export function fetchIntegrationsSummary(): Promise<IntegrationProviderSummary[]> {
+  return platformAdminApi.get("/platform-admin/integrations/summary");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SUPPORT TICKETS / HELPDESK (Capítulo 15.3) — GAP DE AUDITORIA FECHADO
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface SupportTicketMessage {
+  id: string;
+  ticketId: string;
+  authorType: "TENANT_USER" | "PLATFORM_ADMIN";
+  authorId: string;
+  body: string;
+  attachmentUrls: string[];
+  createdAt: string;
+}
+
+export interface SupportTicketSummary {
+  id: string;
+  tenantId: string;
+  openedByUserId: string;
+  assignedToPlatformAdminUserId: string | null;
+  subject: string;
+  category: string;
+  priority: "LOW" | "NORMAL" | "HIGH" | "URGENT";
+  status: "OPEN" | "IN_PROGRESS" | "WAITING_CUSTOMER" | "RESOLVED" | "CLOSED";
+  createdAt: string;
+  resolvedAt: string | null;
+  messages?: SupportTicketMessage[];
+}
+
+export function listSupportTickets(params?: { status?: string; assignedToMe?: boolean }): Promise<SupportTicketSummary[]> {
+  const query = new URLSearchParams();
+  if (params?.status) query.set("status", params.status);
+  if (params?.assignedToMe) query.set("assignedToMe", "true");
+  const qs = query.toString();
+  return platformAdminApi.get(`/platform-admin/support-tickets${qs ? `?${qs}` : ""}`);
+}
+
+export function getSupportTicket(id: string): Promise<SupportTicketSummary> {
+  return platformAdminApi.get(`/platform-admin/support-tickets/${id}`);
+}
+
+export function updateSupportTicket(
+  id: string,
+  input: Partial<{ assignedToPlatformAdminUserId: string | null; status: SupportTicketSummary["status"]; priority: SupportTicketSummary["priority"] }>,
+): Promise<SupportTicketSummary> {
+  return platformAdminApi.patch(`/platform-admin/support-tickets/${id}`, input);
+}
+
+export function addSupportTicketMessage(id: string, body: string): Promise<SupportTicketMessage> {
+  return platformAdminApi.post(`/platform-admin/support-tickets/${id}/messages`, { body, attachmentUrls: [] });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// OVERSIGHT DE API KEYS E WEBHOOKS DOS TENANTS (Capítulo 15.4) — GAP DE
+// AUDITORIA FECHADO
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface TenantApiKeySummary {
+  id: string;
+  tenantId: string;
+  label: string;
+  keyPrefix: string;
+  scopes: string[];
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+export function listTenantApiKeys(tenantId: string): Promise<TenantApiKeySummary[]> {
+  return platformAdminApi.get(`/platform-admin/tenants/${tenantId}/api-keys`);
+}
+
+export function revokeTenantApiKey(id: string): Promise<TenantApiKeySummary> {
+  return platformAdminApi.post(`/platform-admin/tenant-api-keys/${id}/revoke`);
+}
+
+export interface TenantWebhookEndpointSummary {
+  id: string;
+  tenantId: string;
+  url: string;
+  eventTypes: string[];
+  active: boolean;
+  createdAt: string;
+}
+
+export function listTenantWebhookEndpoints(tenantId: string): Promise<TenantWebhookEndpointSummary[]> {
+  return platformAdminApi.get(`/platform-admin/tenants/${tenantId}/webhook-endpoints`);
+}
+
+export interface WebhookDeliverySummary {
+  id: string;
+  endpointId: string;
+  eventType: string;
+  statusCode: number | null;
+  success: boolean;
+  attemptCount: number;
+  deliveredAt: string;
+}
+
+export function listWebhookDeliveries(endpointId: string): Promise<WebhookDeliverySummary[]> {
+  return platformAdminApi.get(`/platform-admin/webhook-endpoints/${endpointId}/deliveries`);
+}
+
+export function replayWebhookDelivery(id: string): Promise<{ id: string; replayQueued: true }> {
+  return platformAdminApi.post(`/platform-admin/webhook-deliveries/${id}/replay`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PLANOS E CATÁLOGO DE MÓDULOS DE BILLING (Capítulo 2.9/13.3) — GAP DE
+// AUDITORIA FECHADO: CRUD já existia no backend desde a rodada anterior
+// (substituindo o seed script como única forma de criar/editar planos e
+// módulos de billing), mas sem nenhuma tela consumindo-o.
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface PlanSummary {
+  id: string;
+  code: string;
+  label: string;
+  basePrice: number;
+  includedModules: string[];
+  active: boolean;
+  audience: "BUSINESS" | "PERSONAL" | "BOTH";
+  maxConnectedAccounts: number | null;
+  includedUserSeats: number | null;
+  extraUserSeatPrice: number | null;
+}
+
+export function listPlans(): Promise<PlanSummary[]> {
+  return platformAdminApi.get("/platform-admin/plans");
+}
+
+export function createPlan(input: Omit<PlanSummary, "id">): Promise<PlanSummary> {
+  return platformAdminApi.post("/platform-admin/plans", input);
+}
+
+export function updatePlan(id: string, input: Partial<Omit<PlanSummary, "id" | "code">>): Promise<PlanSummary> {
+  return platformAdminApi.patch(`/platform-admin/plans/${id}`, input);
+}
+
+export interface BillingModuleSummary {
+  id: string;
+  code: string;
+  label: string;
+  monthlyPrice: number;
+  description: string;
+  active: boolean;
+}
+
+export function listBillingModules(): Promise<BillingModuleSummary[]> {
+  return platformAdminApi.get("/platform-admin/modules");
+}
+
+export function createBillingModule(input: Omit<BillingModuleSummary, "id">): Promise<BillingModuleSummary> {
+  return platformAdminApi.post("/platform-admin/modules", input);
+}
+
+export function updateBillingModule(id: string, input: Partial<Omit<BillingModuleSummary, "id" | "code">>): Promise<BillingModuleSummary> {
+  return platformAdminApi.patch(`/platform-admin/modules/${id}`, input);
+}

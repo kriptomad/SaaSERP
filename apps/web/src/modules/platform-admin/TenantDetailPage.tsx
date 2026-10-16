@@ -27,7 +27,24 @@ import {
   Typography,
 } from "@mui/material";
 import { usePlatformAdminAuth } from "./PlatformAdminAuthContext";
-import { getTenant, TenantSummary, updateTenantStatus, startImpersonation, listImpersonationSessions, ImpersonationSessionRecord, listAuditLogs, AuditLogEntry } from "./platform-admin-ops.api";
+import {
+  getTenant,
+  TenantSummary,
+  updateTenantStatus,
+  startImpersonation,
+  listImpersonationSessions,
+  ImpersonationSessionRecord,
+  listAuditLogs,
+  AuditLogEntry,
+  listTenantApiKeys,
+  revokeTenantApiKey,
+  TenantApiKeySummary,
+  listTenantWebhookEndpoints,
+  listWebhookDeliveries,
+  replayWebhookDelivery,
+  TenantWebhookEndpointSummary,
+  WebhookDeliverySummary,
+} from "./platform-admin-ops.api";
 
 // Mesmo esquema de codificação consumido por `consumeSsoFromQuery` em
 // apps/web/src/api/client.ts (base64url de um JSON UTF-8).
@@ -121,6 +138,191 @@ function ImpersonateDialog({ tenant, onClose }: { tenant: TenantSummary; onClose
   );
 }
 
+// GAP DE AUDITORIA FECHADO (mega-audit rodada 8): oversight de API keys e
+// webhooks do tenant já existia no backend, sem nenhuma tela do painel de
+// plataforma o consumindo — o dono do SaaS dependia de acesso direto ao banco
+// para revogar a chave de um tenant comprometido ou investigar/reenviar uma
+// entrega de webhook falha.
+function TenantApiKeysSection({ tenantId }: { tenantId: string }) {
+  const { admin } = usePlatformAdminAuth();
+  const canEdit = admin?.role === "SUPER_ADMIN";
+  const [keys, setKeys] = useState<TenantApiKeySummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function reload() {
+    try {
+      setKeys(await listTenantApiKeys(tenantId));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    void reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId]);
+
+  async function handleRevoke(id: string) {
+    try {
+      await revokeTenantApiKey(id);
+      await reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  return (
+    <Box sx={{ mb: 4 }}>
+      <Typography variant="h6" sx={{ mb: 2 }}>Chaves de API deste tenant</Typography>
+      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      <TableContainer component={Paper}>
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell>Rótulo</TableCell>
+              <TableCell>Prefixo</TableCell>
+              <TableCell>Escopos</TableCell>
+              <TableCell>Último uso</TableCell>
+              <TableCell>Status</TableCell>
+              <TableCell />
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {(keys ?? []).map((k) => (
+              <TableRow key={k.id}>
+                <TableCell>{k.label}</TableCell>
+                <TableCell><code>{k.keyPrefix}…</code></TableCell>
+                <TableCell>{k.scopes.join(", ")}</TableCell>
+                <TableCell>{k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString("pt-BR") : "Nunca usada"}</TableCell>
+                <TableCell>
+                  <Chip size="small" color={k.revokedAt ? "default" : "success"} label={k.revokedAt ? "Revogada" : "Ativa"} />
+                </TableCell>
+                <TableCell>
+                  {canEdit && !k.revokedAt && (
+                    <Button size="small" color="error" onClick={() => handleRevoke(k.id)}>Revogar</Button>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+            {keys && keys.length === 0 && <TableRow><TableCell colSpan={6}>Nenhuma chave de API gerada por este tenant.</TableCell></TableRow>}
+          </TableBody>
+        </Table>
+      </TableContainer>
+    </Box>
+  );
+}
+
+function WebhookDeliveriesDialog({ endpoint, onClose }: { endpoint: TenantWebhookEndpointSummary; onClose: () => void }) {
+  const [deliveries, setDeliveries] = useState<WebhookDeliverySummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function reload() {
+    try {
+      setDeliveries(await listWebhookDeliveries(endpoint.id));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    void reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endpoint.id]);
+
+  async function handleReplay(id: string) {
+    try {
+      await replayWebhookDelivery(id);
+      await reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="md" fullWidth>
+      <DialogTitle>Entregas — {endpoint.url}</DialogTitle>
+      <DialogContent>
+        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell>Evento</TableCell>
+              <TableCell align="right">HTTP</TableCell>
+              <TableCell align="right">Tentativas</TableCell>
+              <TableCell>Status</TableCell>
+              <TableCell>Entregue em</TableCell>
+              <TableCell />
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {(deliveries ?? []).map((d) => (
+              <TableRow key={d.id}>
+                <TableCell>{d.eventType}</TableCell>
+                <TableCell align="right">{d.statusCode ?? "—"}</TableCell>
+                <TableCell align="right">{d.attemptCount}</TableCell>
+                <TableCell><Chip size="small" color={d.success ? "success" : "error"} label={d.success ? "Sucesso" : "Falha"} /></TableCell>
+                <TableCell>{new Date(d.deliveredAt).toLocaleString("pt-BR")}</TableCell>
+                <TableCell>
+                  {!d.success && <Button size="small" onClick={() => handleReplay(d.id)}>Reenviar</Button>}
+                </TableCell>
+              </TableRow>
+            ))}
+            {deliveries && deliveries.length === 0 && <TableRow><TableCell colSpan={6}>Nenhuma entrega registrada ainda.</TableCell></TableRow>}
+          </TableBody>
+        </Table>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Fechar</Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function TenantWebhooksSection({ tenantId }: { tenantId: string }) {
+  const [endpoints, setEndpoints] = useState<TenantWebhookEndpointSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedEndpoint, setSelectedEndpoint] = useState<TenantWebhookEndpointSummary | null>(null);
+
+  useEffect(() => {
+    listTenantWebhookEndpoints(tenantId).then(setEndpoints).catch((err) => setError((err as Error).message));
+  }, [tenantId]);
+
+  return (
+    <Box sx={{ mb: 4 }}>
+      <Typography variant="h6" sx={{ mb: 2 }}>Webhooks configurados pelo tenant</Typography>
+      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      <TableContainer component={Paper}>
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell>URL</TableCell>
+              <TableCell>Eventos</TableCell>
+              <TableCell>Status</TableCell>
+              <TableCell>Criado em</TableCell>
+              <TableCell />
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {(endpoints ?? []).map((e) => (
+              <TableRow key={e.id}>
+                <TableCell>{e.url}</TableCell>
+                <TableCell>{e.eventTypes.join(", ")}</TableCell>
+                <TableCell><Chip size="small" color={e.active ? "success" : "default"} label={e.active ? "Ativo" : "Inativo"} /></TableCell>
+                <TableCell>{new Date(e.createdAt).toLocaleString("pt-BR")}</TableCell>
+                <TableCell><Button size="small" onClick={() => setSelectedEndpoint(e)}>Ver entregas</Button></TableCell>
+              </TableRow>
+            ))}
+            {endpoints && endpoints.length === 0 && <TableRow><TableCell colSpan={5}>Nenhum webhook configurado por este tenant.</TableCell></TableRow>}
+          </TableBody>
+        </Table>
+      </TableContainer>
+      {selectedEndpoint && (
+        <WebhookDeliveriesDialog endpoint={selectedEndpoint} onClose={() => setSelectedEndpoint(null)} />
+      )}
+    </Box>
+  );
+}
+
 export function TenantDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { admin } = usePlatformAdminAuth();
@@ -196,6 +398,9 @@ export function TenantDetailPage() {
           </TableBody>
         </Table>
       </TableContainer>
+
+      <TenantApiKeysSection tenantId={tenant.id} />
+      <TenantWebhooksSection tenantId={tenant.id} />
 
       <Typography variant="h6" sx={{ mb: 2 }}>Audit log deste tenant</Typography>
       <TableContainer component={Paper}>

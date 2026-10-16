@@ -8,7 +8,11 @@ import { usePlatformAdminAuth } from "./PlatformAdminAuthContext";
 const TABS = [
   { path: "/platform-admin/tenants", label: "Tenants" },
   { path: "/platform-admin/receita", label: "Receita (MRR)" },
-  { path: "/platform-admin/modulos", label: "Módulos" },
+  { path: "/platform-admin/planos", label: "Planos & Módulos" },
+  { path: "/platform-admin/modulos", label: "Feature Flags" },
+  { path: "/platform-admin/integracoes", label: "Integrações" },
+  { path: "/platform-admin/suporte", label: "Suporte" },
+  { path: "/platform-admin/admins", label: "Admins" },
   { path: "/platform-admin/parametros", label: "Parâmetros" },
   { path: "/platform-admin/audit-log", label: "Audit Log" },
   { path: "/platform-admin/backups", label: "Backups" },

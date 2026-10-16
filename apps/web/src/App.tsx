@@ -87,6 +87,10 @@ import { ModuleCatalogPage } from "./modules/platform-admin/ModuleCatalogPage";
 import { AuditLogViewerPage } from "./modules/platform-admin/AuditLogViewerPage";
 import { SystemParametersPage } from "./modules/platform-admin/SystemParametersPage";
 import { DatabaseBackupsPage } from "./modules/platform-admin/DatabaseBackupsPage";
+import { IntegrationsSummaryPage } from "./modules/platform-admin/IntegrationsSummaryPage";
+import { SupportTicketsAdminPage } from "./modules/platform-admin/SupportTicketsAdminPage";
+import { BillingCatalogPage } from "./modules/platform-admin/BillingCatalogPage";
+import { AdminUsersPage } from "./modules/platform-admin/AdminUsersPage";
 import { PersonalDashboardPage } from "./modules/personal-finance/PersonalDashboardPage";
 import { PersonalAccountsPage } from "./modules/personal-finance/PersonalAccountsPage";
 import { PersonalTransactionsPage } from "./modules/personal-finance/PersonalTransactionsPage";
@@ -154,6 +158,10 @@ export function App() {
               <Route path="/platform-admin/audit-log" element={<AuditLogViewerPage />} />
               <Route path="/platform-admin/parametros" element={<SystemParametersPage />} />
               <Route path="/platform-admin/backups" element={<DatabaseBackupsPage />} />
+              <Route path="/platform-admin/integracoes" element={<IntegrationsSummaryPage />} />
+              <Route path="/platform-admin/suporte" element={<SupportTicketsAdminPage />} />
+              <Route path="/platform-admin/planos" element={<BillingCatalogPage />} />
+              <Route path="/platform-admin/admins" element={<AdminUsersPage />} />
             </Route>
             <Route
             element={
