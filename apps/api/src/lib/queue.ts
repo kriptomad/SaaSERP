@@ -97,6 +97,12 @@ export const QUEUE_NAMES = {
   // (Rodada 4): antes só havia CRUD manual de AccountingTask, nenhuma geração
   // automática existia (Capítulo 21.18.4 ficava expressamente PENDENTE).
   ACCOUNTING_RECURRING_TASKS: "accounting-recurring-tasks",
+  // Capítulo 21.19.4 — varredura diária de Distribuição DFe (NF-e de compra emitidas
+  // contra o CNPJ do tenant), consumida por `workers/fetch-incoming-nfe.worker.ts`.
+  // GAP DE AUDITORIA FECHADO: `FiscalDocumentType.NFE_ENTRADA` e
+  // `FiscalDocumentEventType.RECIPIENT_MANIFESTATION` existiam no schema desde o
+  // início mas nenhum código jamais os instanciava.
+  FETCH_INCOMING_NFE: "fetch-incoming-nfe",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -158,3 +164,5 @@ export const personalInvestmentQuotesQueue = new Queue(QUEUE_NAMES.PERSONAL_INVE
 export const accountingRecurringTasksQueue = new Queue(QUEUE_NAMES.ACCOUNTING_RECURRING_TASKS, {
   connection: queueRedisConnection,
 });
+
+export const fetchIncomingNfeQueue = new Queue(QUEUE_NAMES.FETCH_INCOMING_NFE, { connection: queueRedisConnection });

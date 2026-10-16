@@ -21,6 +21,7 @@ import { startEncryptedDatabaseBackupWorker, scheduleEncryptedDatabaseBackupJob 
 import { startScheduledReportGenerationWorker, syncScheduledReportJobSchedulers } from "./workers/scheduled-report-generation.worker";
 import { startPersonalInvestmentQuotesWorker, schedulePersonalInvestmentQuotesJob } from "./workers/personal-investment-quotes.worker";
 import { startAccountingRecurringTasksWorker, scheduleAccountingRecurringTasksJob } from "./workers/accounting-recurring-tasks.worker";
+import { startFetchIncomingNfeWorker, scheduleFetchIncomingNfeJob } from "./workers/fetch-incoming-nfe.worker";
 
 async function main() {
   const log = createModuleLogger("worker");
@@ -52,8 +53,10 @@ async function main() {
   await schedulePersonalInvestmentQuotesJob();
   const accountingRecurringTasksWorker = startAccountingRecurringTasksWorker();
   await scheduleAccountingRecurringTasksJob();
+  const fetchIncomingNfeWorker = startFetchIncomingNfeWorker();
+  await scheduleFetchIncomingNfeJob();
 
-  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker]) {
+  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker, fetchIncomingNfeWorker]) {
     worker.on("completed", (job) => {
       log.info({ queue: job.queueName, jobId: job.id, result: job.returnvalue }, "job concluído");
     });

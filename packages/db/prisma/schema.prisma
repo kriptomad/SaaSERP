@@ -175,6 +175,12 @@ model Tenant {
   // mercado puro) não precisam cadastrá-la — a ausência bloqueia só a emissão de
   // NFS-e especificamente, nunca o sistema inteiro.
   inscricaoMunicipal             String?
+  // Capítulo 21.19.4 — Manifestação do Destinatário: cursor incremental da consulta
+  // de Distribuição DFe (parâmetro `versao` da Focus NFe, `GET /v2/nfes_recebidas`).
+  // Nunca decrescido manualmente — cada varredura diária bem-sucedida avança para o
+  // maior `X-Max-Version` devolvido, garantindo que a próxima execução só traga notas
+  // novas, nunca reprocessando o histórico inteiro do CNPJ a cada dia.
+  incomingNfeLastVersion         String       @default("0")
   // Capítulo 11.2 — Ótica: dias de garantia CONTRATUAL adicional configurável pela
   // loja, somados (nunca substituindo) à garantia legal de 90 dias do CDC — aplicada
   // automaticamente em `close-sale.service.ts` para toda venda de produto com
@@ -968,11 +974,12 @@ model Supplier {
   // catálogo em consignação e parte à vista/faturado).
   isConsignmentSupplier Boolean  @default(false)
 
-  tenant              Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  products            Product[]
-  accountsPayable     AccountPayable[]
-  purchaseOrders      PurchaseOrder[] // Capítulo 17.8
-  preferredByProducts Product[]        @relation("PreferredSupplier") // Capítulo 17.8.3
+  tenant                  Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  products                Product[]
+  accountsPayable         AccountPayable[]
+  purchaseOrders          PurchaseOrder[] // Capítulo 17.8
+  preferredByProducts     Product[]        @relation("PreferredSupplier") // Capítulo 17.8.3
+  incomingFiscalDocuments FiscalDocument[] // Capítulo 21.19.4 — NF-e de compra recebidas deste fornecedor via Distribuição DFe
 
   @@unique([tenantId, document])
   @@map("suppliers")
@@ -1884,15 +1891,33 @@ model FiscalDocument {
   issAmount                    Decimal?              @db.Decimal(12, 2)
   issRetidoNaFonte             Boolean               @default(false) // snapshot: true quando o tomador (nunca o prestador) é o responsável legal pelo recolhimento
   focusNfeCodigoVerificacao    String? // "codigo_verificacao" devolvido pela Focus NFe na emissão de NFS-e — usado na validação pública da nota pelo tomador
+  // CORREÇÃO DE AUDITORIA (Capítulo 21.19.4) — Manifestação do Destinatário: até aqui
+  // `NFE_ENTRADA` era um valor de enum nunca instanciado por código nenhum (gap total
+  // confirmado em auditoria). Estes campos materializam a nota de COMPRA recebida via
+  // Distribuição DFe (consultada pela Focus NFe, `fetch-incoming-nfe.worker.ts`), em
+  // que o tenant é o DESTINATÁRIO, nunca o emitente — por isso nunca preenchidos em
+  // conjunto com `focusNfeReference`/`qrCodeUrl` (campos exclusivos de documento
+  // EMITIDO pelo tenant). `supplierId`/`purchaseOrderId` só são preenchidos quando o
+  // emitente casa com um Supplier.document (CNPJ) já cadastrado — uma NF-e recebida
+  // de um CNPJ desconhecido ainda é registrada (a manifestação é obrigação legal do
+  // destinatário mesmo sem cadastro prévio do fornecedor), apenas sem o vínculo.
+  supplierId                   String?
+  purchaseOrderId              String?
+  emitterCnpj                  String? // CNPJ do emitente da nota recebida (documento_emitente da Focus NFe) — nulo em documentos emitidos pelo próprio tenant
+  emitterName                  String?
+  totalAmount                  Decimal?              @db.Decimal(12, 2) // valor_total da NF-e recebida, exibido em /fiscal/notas-recebidas
   createdAt                    DateTime              @default(now())
   updatedAt                    DateTime              @updatedAt
 
-  tenant Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  sale   Sale?                 @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  events FiscalDocumentEvent[] // Capítulo 21.19 — cancelamento, CC-e e manifestação do destinatário
+  tenant        Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale          Sale?                 @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  supplier      Supplier?             @relation(fields: [supplierId], references: [id])
+  purchaseOrder PurchaseOrder?        @relation(fields: [purchaseOrderId], references: [id])
+  events        FiscalDocumentEvent[] // Capítulo 21.19 — cancelamento, CC-e e manifestação do destinatário
 
   @@index([tenantId, status])
   @@index([tenantId, saleId])
+  @@index([tenantId, type, supplierId])
   @@map("fiscal_documents")
 }
 
@@ -3431,14 +3456,22 @@ model PurchaseOrder {
   expectedAt  DateTime?
   notes       String?
   createdById String
+  // Capítulo 21.19.4 — Manifestação do Destinatário: chave de acesso da NF-e do
+  // fornecedor, informada manualmente no cadastro do pedido (ex.: lojista recebeu o
+  // DANFE físico antes da varredura diária de Distribuição DFe) para antecipar o
+  // vínculo com o `FiscalDocument` NFE_ENTRADA correspondente — opcional, nunca
+  // bloqueia o fluxo de recebimento quando ausente (o vínculo também ocorre
+  // automaticamente por CNPJ do fornecedor, ver fetch-incoming-nfe.worker.ts).
+  supplierAccessKeyHint String?
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
 
-  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  supplier        Supplier            @relation(fields: [supplierId], references: [id])
-  createdBy       User                @relation(fields: [createdById], references: [id])
-  items           PurchaseOrderItem[]
-  accountsPayable AccountPayable[] // gerado automaticamente no recebimento (17.8.2)
+  tenant                  Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  supplier                Supplier            @relation(fields: [supplierId], references: [id])
+  createdBy               User                @relation(fields: [createdById], references: [id])
+  items                   PurchaseOrderItem[]
+  accountsPayable         AccountPayable[] // gerado automaticamente no recebimento (17.8.2)
+  incomingFiscalDocuments FiscalDocument[] // Capítulo 21.19.4
 
   @@unique([tenantId, orderNumber])
   @@index([tenantId, status])

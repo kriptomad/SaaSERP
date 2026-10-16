@@ -16,6 +16,7 @@ import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { recalculateRecipeCostsForIngredient } from "../../services/production/recalculate-recipe-cost.service";
+import { manifestRecipientOperation, RecipientManifestationAlreadyFinalError } from "../fiscal/manifest-recipient.service";
 
 export const purchaseOrdersRouter = Router();
 
@@ -553,6 +554,27 @@ purchaseOrdersRouter.post("/purchase-orders/:id/receive", requireAuth, async (re
       },
       { isolationLevel: "Serializable" }, // mesmo nível do Capítulo 6.3 — concorrência de recebimento simultâneo do mesmo pedido
       );
+
+      // BIBLE_ENGINEERING_V2.md Capítulo 21.19.4 — ao confirmar o recebimento físico
+      // da mercadoria, o sistema dispara CONFIRMACAO_DA_OPERACAO automaticamente para
+      // toda NF-e de entrada vinculada a este pedido. Chamada de rede à SEFAZ feita
+      // DEPOIS da transação Serializable commitada (nunca dentro dela) — falha aqui
+      // nunca derruba o recebimento de mercadoria em si, só fica registrada no log.
+      const linkedIncomingNotes = await prisma.fiscalDocument.findMany({
+        where: { tenantId, type: "NFE_ENTRADA", purchaseOrderId: result.purchaseOrder.id },
+        select: { id: true },
+      });
+      for (const note of linkedIncomingNotes) {
+        try {
+          await manifestRecipientOperation(prisma, { tenantId, fiscalDocumentId: note.id, manifestationType: "CONFIRMACAO_DA_OPERACAO" });
+        } catch (manifestErr) {
+          if (!(manifestErr instanceof RecipientManifestationAlreadyFinalError)) {
+            // eslint-disable-next-line no-console
+            console.error(`[purchase-orders] falha ao manifestar CONFIRMACAO_DA_OPERACAO para FiscalDocument ${note.id}:`, manifestErr);
+          }
+        }
+      }
+
       return res.status(200).json({ success: true, data: result, error: null });
     } catch (err: any) {
       const isSerializationConflict = err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2034";
