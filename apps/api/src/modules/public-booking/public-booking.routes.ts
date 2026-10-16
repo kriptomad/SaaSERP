@@ -19,6 +19,17 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { isTenantLocked } from "../../middlewares/tenant-lockout.middleware";
+import { enforceRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
+
+// GAP DE AUDITORIA FECHADO: agenda online pública não tinha NENHUM rate limiting —
+// qualquer script podia lotar a agenda de um tenant com agendamentos falsos em
+// volume ilimitado, ou raspar `/slots` em loop. Mesmo padrão já usado em
+// lookup.routes.ts (IP + janela), aplicado aqui à criação de agendamento (escrita
+// real no banco) e à consulta de horários (superfície de scraping).
+const PUBLIC_BOOKING_WRITE_RATE_LIMIT_MAX = 10;
+const PUBLIC_BOOKING_WRITE_RATE_LIMIT_WINDOW_SECONDS = 60;
+const PUBLIC_BOOKING_READ_RATE_LIMIT_MAX = 60;
+const PUBLIC_BOOKING_READ_RATE_LIMIT_WINDOW_SECONDS = 60;
 
 export const publicBookingRouter = Router();
 
@@ -87,6 +98,14 @@ function parseHHMM(value: string): number {
 }
 
 publicBookingRouter.get("/public-booking/:tenantSlug/slots", async (req: Request, res: Response) => {
+  try {
+    await enforceRateLimit(`public-booking:slots:${req.ip}`, PUBLIC_BOOKING_READ_RATE_LIMIT_MAX, PUBLIC_BOOKING_READ_RATE_LIMIT_WINDOW_SECONDS);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
+  }
   const tenant = await resolveTenantBySlug(req.params.tenantSlug);
   if (!tenant) return notFoundTenant(res);
   const parsed = slotsQuerySchema.safeParse(req.query);
@@ -152,6 +171,14 @@ const createPublicAppointmentSchema = z.object({
 });
 
 publicBookingRouter.post("/public-booking/:tenantSlug/appointments", async (req: Request, res: Response) => {
+  try {
+    await enforceRateLimit(`public-booking:create:${req.ip}`, PUBLIC_BOOKING_WRITE_RATE_LIMIT_MAX, PUBLIC_BOOKING_WRITE_RATE_LIMIT_WINDOW_SECONDS);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
+  }
   const tenant = await resolveTenantBySlug(req.params.tenantSlug);
   if (!tenant) return notFoundTenant(res);
   const parsed = createPublicAppointmentSchema.safeParse(req.body);

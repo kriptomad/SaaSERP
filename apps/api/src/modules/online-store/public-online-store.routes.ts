@@ -10,6 +10,12 @@ import { z } from "zod";
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { presignObjectDownload } from "../../lib/object-storage";
 import { isTenantLocked } from "../../middlewares/tenant-lockout.middleware";
+import { enforceRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
+
+// GAP DE AUDITORIA FECHADO: criação de pedido na vitrine pública não tinha
+// nenhum rate limiting — mesmo padrão de lookup.routes.ts/public-booking.routes.ts.
+const PUBLIC_STORE_ORDER_RATE_LIMIT_MAX = 10;
+const PUBLIC_STORE_ORDER_RATE_LIMIT_WINDOW_SECONDS = 60;
 
 export const publicOnlineStoreRouter = Router();
 
@@ -88,6 +94,14 @@ const createPublicOrderSchema = z.object({
 });
 
 publicOnlineStoreRouter.post("/loja/:customSlug/orders", async (req: Request, res: Response) => {
+  try {
+    await enforceRateLimit(`public-store:order:${req.ip}`, PUBLIC_STORE_ORDER_RATE_LIMIT_MAX, PUBLIC_STORE_ORDER_RATE_LIMIT_WINDOW_SECONDS);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
+  }
   const store = await resolveActiveStoreBySlug(req.params.customSlug);
   if (!store) return notFoundStore(res);
 

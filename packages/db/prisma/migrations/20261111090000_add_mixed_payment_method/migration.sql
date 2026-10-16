@@ -3,4 +3,4 @@
 -- 2+ linhas Payment de métodos DIFERENTES (ex.: metade PIX, metade cartão de
 -- crédito). Nunca usado como Payment.method individual — cada linha de Payment
 -- continua gravando o método real e específico daquela parcela.
-ALTER TYPE "SalePaymentMethod" ADD VALUE 'MIXED';
+ALTER TYPE "SalePaymentMethod" ADD VALUE IF NOT EXISTS 'MIXED';

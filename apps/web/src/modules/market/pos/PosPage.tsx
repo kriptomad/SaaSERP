@@ -30,7 +30,7 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { useAuth } from "../../../auth/AuthContext";
 import { offlineDb } from "../../../shared/offline/db";
 import { syncProductCatalog } from "../../../shared/offline/sync-catalog";
-import { syncPendingSales } from "../../../shared/offline/sync-pending-sales";
+import { syncPendingSales, retryFailedSale, retryAllFailedSales } from "../../../shared/offline/sync-pending-sales";
 import { closeSaleOffline } from "./close-sale-offline";
 import { fetchCurrentCashRegister, openCashRegister } from "../../../api/client";
 import { decodeScaleBarcode } from "../../../shared/offline/scale-barcode";
@@ -126,9 +126,15 @@ export function PosPage() {
   );
 
   const pendingSalesCount = useLiveQuery(
-    () => offlineDb.pendingSales.where("syncStatus").anyOf("PENDING", "SYNCING", "FAILED").count(),
+    () => offlineDb.pendingSales.where("syncStatus").anyOf("PENDING", "SYNCING").count(),
     [],
   );
+  // Vendas com erro de negócio DEFINITIVO (ex.: validação de split payment, estoque
+  // esgotado no servidor) — já cobradas do cliente (cartão/dinheiro), mas nunca
+  // registradas no backend. Nunca reprocessadas automaticamente (ver
+  // sync-pending-sales.ts); precisam de ação explícita do operador aqui.
+  const failedSales = useLiveQuery(() => offlineDb.pendingSales.where("syncStatus").equals("FAILED").toArray(), []);
+  const [reconcileOpen, setReconcileOpen] = useState(false);
 
   useEffect(() => {
     syncProductCatalog().catch((error) => setCatalogError((error as Error).message));
@@ -371,7 +377,15 @@ export function PosPage() {
   async function handleCloseSale() {
     if (!user || cart.length === 0 || !cashRegisterId) return;
 
-    const splitCashValue = Number(splitCashAmount) || 0;
+    // GAP DE AUDITORIA FECHADO (Pagamento Dividido/Split): `splitCashAmount` vem de um
+    // <input type="number"> sem `step`, então o operador pode digitar mais de 2 casas
+    // decimais (ex.: "33.339"). Sem arredondar os DOIS lados para centavos ANTES de
+    // montar o payload, `splitCashValue + splitCardValue` podia divergir do total em
+    // frações de centavo — e o backend compara com `Prisma.Decimal.equals()` exato
+    // (sem tolerância), rejeitando a venda DEPOIS que o cartão já tinha sido cobrado
+    // via TEF (TEF roda antes do fechamento local). Arredondar aqui, nos dois valores,
+    // elimina a divergência na origem — nunca dependemos só do backend para isso.
+    const splitCashValue = Math.round((Number(splitCashAmount) || 0) * 100) / 100;
     const splitCardValue = Math.round((total - splitCashValue) * 100) / 100;
     if (splitEnabled && (splitCashValue <= 0 || splitCardValue <= 0)) {
       setHardwareMessage("Pagamento dividido exige valor positivo em dinheiro E no cartão — some exatamente o total da venda.");
@@ -481,6 +495,15 @@ export function PosPage() {
           />
           {Boolean(pendingSalesCount) && (
             <Chip size="small" label={`${pendingSalesCount} venda(s) pendente(s) de sync`} color="info" />
+          )}
+          {Boolean(failedSales?.length) && (
+            <Chip
+              size="small"
+              label={`${failedSales!.length} venda(s) com erro — requer ação`}
+              color="error"
+              onClick={() => setReconcileOpen(true)}
+              sx={{ cursor: "pointer" }}
+            />
           )}
         </Stack>
       </Stack>
@@ -625,6 +648,7 @@ export function PosPage() {
                 label="Valor em dinheiro (R$)"
                 value={splitCashAmount}
                 onChange={(e) => setSplitCashAmount(e.target.value)}
+                inputProps={{ step: "0.01", min: "0" }}
               />
               <ToggleButtonGroup
                 exclusive
@@ -716,6 +740,42 @@ export function PosPage() {
           >
             Confirmar e adicionar ao carrinho
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Reconciliação manual de vendas FAILED (Pagamento Dividido/Split — GAP DE
+          AUDITORIA FECHADO): já cobradas do cliente (TEF/dinheiro) mas nunca
+          registradas no backend por um erro de negócio definitivo — exige ação
+          explícita do operador, nunca reprocessada em silêncio. */}
+      <Dialog open={reconcileOpen} onClose={() => setReconcileOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Vendas com erro de sincronização</DialogTitle>
+        <DialogContent>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            Estas vendas já foram cobradas do cliente, mas falharam ao registrar no servidor. Revise o motivo e tente
+            novamente, ou acione o suporte se o erro persistir.
+          </Alert>
+          <Stack spacing={1}>
+            {(failedSales ?? []).map((sale) => (
+              <Paper key={sale.localId} variant="outlined" sx={{ p: 1.5 }}>
+                <Typography variant="body2">Venda {sale.localId.slice(0, 8)}…</Typography>
+                <Typography variant="caption" color="error">
+                  {sale.lastError ?? "Erro não especificado"}
+                </Typography>
+                <Stack direction="row" justifyContent="flex-end" sx={{ mt: 1 }}>
+                  <Button size="small" onClick={() => retryFailedSale(sale.localId)}>
+                    Tentar novamente
+                  </Button>
+                </Stack>
+              </Paper>
+            ))}
+            {!failedSales?.length && <Typography variant="body2">Nenhuma venda com erro no momento.</Typography>}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => retryAllFailedSales()} disabled={!failedSales?.length}>
+            Tentar todas novamente
+          </Button>
+          <Button onClick={() => setReconcileOpen(false)}>Fechar</Button>
         </DialogActions>
       </Dialog>
     </Box>

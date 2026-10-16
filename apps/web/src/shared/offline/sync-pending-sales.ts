@@ -3,6 +3,15 @@
 // Dexie contra POST /sales assim que há rede. Chamada tanto pelo evento "online" do
 // próprio app (fallback para navegadores sem Background Sync API, ex.: Safari/iOS)
 // quanto pelo service worker via postMessage quando o evento "sync" dispara.
+//
+// GAP DE AUDITORIA FECHADO: antes, `syncPendingSales` reprocessava toda venda em
+// `FAILED` (erro de negócio definitivo, ex.: estoque esgotado, validação de split
+// payment) em TODO disparo de sync subsequente ("online", background sync
+// periódico) — como o payload nunca muda, a venda falhava identicamente para
+// sempre, silenciosamente, sem o lojista nunca saber que uma venda já cobrada no
+// cartão do cliente nunca chegou a ser registrada no backend. Agora `FAILED` só é
+// reprocessada por ação EXPLÍCITA do operador via `retryFailedSale`/
+// `retryAllFailedSales` (ver tela de reconciliação no PDV), nunca automaticamente.
 import { getStoredToken, resolveApiBaseUrl } from "../../api/client";
 import { offlineDb, type PendingSale } from "./db";
 
@@ -20,7 +29,7 @@ export async function syncPendingSales(): Promise<SyncResult> {
   const result: SyncResult = { synced: [], failed: [], stillPending: [] };
   if (!token) return result;
 
-  const pending = await offlineDb.pendingSales.where("syncStatus").anyOf("PENDING", "FAILED").toArray();
+  const pending = await offlineDb.pendingSales.where("syncStatus").anyOf("PENDING", "SYNCING").toArray();
 
   for (const sale of pending) {
     await offlineDb.pendingSales.update(sale.localId, { syncStatus: "SYNCING" });
@@ -81,4 +90,22 @@ export async function registerBackgroundSync(): Promise<void> {
     // próprio app detectar o evento "online", sem depender do service worker.
     window.dispatchEvent(new Event("filitech:force-sync"));
   }
+}
+
+/**
+ * Reconciliação manual (tela de "vendas pendentes com erro" no PDV): o operador
+ * revisou o `lastError` de uma venda FAILED, decidiu que vale a pena tentar de novo
+ * (ex.: já repôs o item em falta de estoque) e aciona isso explicitamente — nunca
+ * automático, para nunca martelar o backend com um payload que vai falhar de novo
+ * sem intervenção humana.
+ */
+export async function retryFailedSale(localId: string): Promise<void> {
+  await offlineDb.pendingSales.update(localId, { syncStatus: "PENDING", lastError: undefined });
+  await syncPendingSales();
+}
+
+export async function retryAllFailedSales(): Promise<void> {
+  const failed = await offlineDb.pendingSales.where("syncStatus").equals("FAILED").toArray();
+  await offlineDb.pendingSales.bulkUpdate(failed.map((f) => ({ key: f.localId, changes: { syncStatus: "PENDING" as const, lastError: undefined } })));
+  await syncPendingSales();
 }

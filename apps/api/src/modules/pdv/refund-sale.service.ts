@@ -256,6 +256,26 @@ export async function refundSale(
       data: { status: "CANCELLED" },
     });
 
+    // GAP DE AUDITORIA FECHADO (Capítulo 4.6 — Crediário/Fiado): cancelar a
+    // AccountReceivable acima nunca devolvia o limite de crediário consumido em
+    // `Client.creditBalanceUsed` — sem isto, todo estorno de venda STORE_CREDIT
+    // reduzia PERMANENTEMENTE o limite disponível do cliente (a dívida já não existe
+    // mais, mas o limite continuava "ocupado" por ela para sempre, bloqueando compras
+    // futuras legítimas). Soma apenas pagamentos STORE_CREDIT desta venda — nunca o
+    // `totalAmount` cheio, que pode incluir outras formas numa venda MIXED.
+    const refundedStoreCredit = payments.filter((p) => p.method === "STORE_CREDIT").reduce((sum, p) => sum.add(p.amount), new Prisma.Decimal(0));
+    if (refundedStoreCredit.greaterThan(0) && sale.clientId) {
+      // `decrement` bruto poderia levar o saldo abaixo de zero se o cliente já teve o
+      // limite ajustado manualmente por um admin entre a venda e o estorno — nunca
+      // confiamos em aritmética não travada para um campo financeiro: lê o valor
+      // atual DENTRO da transação e grava o mínimo de 0 explicitamente.
+      const currentClient = await tx.client.findFirstOrThrow({ where: { id: sale.clientId, tenantId: params.tenantId } });
+      await tx.client.update({
+        where: { id: sale.clientId },
+        data: { creditBalanceUsed: Prisma.Decimal.max(0, currentClient.creditBalanceUsed.minus(refundedStoreCredit)) },
+      });
+    }
+
     return tx.sale.findUniqueOrThrow({ where: { id: sale.id } });
     });
   } catch (err) {

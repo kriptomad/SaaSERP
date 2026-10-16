@@ -491,11 +491,18 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
       }
       const paymentEntries: { method: "CASH" | "DEBIT_CARD" | "CREDIT_CARD" | "PIX" | "BOLETO" | "STORE_CREDIT" | "HEALTH_INSURANCE"; amount: Prisma.Decimal; amountTendered?: number }[] =
         input.payments
-          ? input.payments.map((p) => ({ method: p.method, amount: new Prisma.Decimal(p.amount), amountTendered: p.amountTendered }))
+          ? input.payments.map((p) => ({ method: p.method, amount: new Prisma.Decimal(p.amount).toDecimalPlaces(2), amountTendered: p.amountTendered }))
           : [{ method: input.paymentMethod!, amount: totalAmount, amountTendered: input.amountTendered }];
 
       const paymentEntriesSum = paymentEntries.reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
-      if (!paymentEntriesSum.equals(totalAmount)) {
+      // Tolerância de 1 centavo: o cliente (PDV web) já arredonda para 2 casas antes de
+      // enviar, mas comparar por igualdade EXATA de Decimal é frágil contra qualquer
+      // resíduo de ponto flutuante vindo de um chamador diferente (ex.: app desktop,
+      // integração via API pública) — comparar os valores já arredondados para
+      // centavos evita rejeitar uma venda legítima por uma fração de centavo
+      // inteiramente artificial, sem abrir margem para uma venda genuinamente
+      // incompleta (toFixed(2) ainda é fiel ao valor financeiro real em reais).
+      if (!paymentEntriesSum.toDecimalPlaces(2).equals(totalAmount.toDecimalPlaces(2))) {
         throw new SplitPaymentValidationError(
           `A soma dos pagamentos (${paymentEntriesSum.toFixed(2)}) não bate com o total da venda (${totalAmount.toFixed(2)}).`,
         );

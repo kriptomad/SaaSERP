@@ -8,6 +8,15 @@
 import { Request, Response, NextFunction } from "express";
 import { prismaUnscoped } from "@filitech/db";
 import { hashApiKey } from "../modules/platform-admin/platform-admin.routes";
+import { enforceRateLimit, RateLimitExceededError } from "../lib/rate-limit";
+
+// GAP DE AUDITORIA FECHADO: diferente de login/PIN/password-reset (todos com
+// enforceRateLimit), autenticação por API key não tinha nenhum throttling por IP.
+// A key em si tem entropia alta o bastante para tornar força-bruta impraticável,
+// mas um limite generoso por IP é defesa em profundidade de baixo custo contra
+// automação abusiva/credential-stuffing, sem impactar uso legítimo de integração.
+const API_KEY_RATE_LIMIT_MAX = 120;
+const API_KEY_RATE_LIMIT_WINDOW_SECONDS = 60;
 
 // Mesma convenção declarativa de `auth.middleware.ts` (req.session), reaproveitada
 // aqui para que `tenantContextMiddleware`/`tenantLockoutMiddleware` (Capítulo 7.1/2)
@@ -30,6 +39,14 @@ function unauthorized(res: Response, message: string) {
  * filtrar tenantId manualmente, a extensão do Prisma Client (Capítulo 7.2) cuida disso. */
 export function requireApiKey(requiredScope: string) {
   return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      await enforceRateLimit(`api-key-auth:${req.ip}`, API_KEY_RATE_LIMIT_MAX, API_KEY_RATE_LIMIT_WINDOW_SECONDS);
+    } catch (err) {
+      if (err instanceof RateLimitExceededError) {
+        return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+      }
+      throw err;
+    }
     const header = req.headers.authorization;
     if (!header?.startsWith("Bearer ") || !header.slice("Bearer ".length).startsWith("fltk_live_")) {
       return unauthorized(res, "Informe a API key no cabeçalho Authorization: Bearer fltk_live_...");

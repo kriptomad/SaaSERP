@@ -50,6 +50,17 @@ const signupSchema = z.object({
 });
 
 authRouter.post("/signup", async (req, res) => {
+  // GAP DE AUDITORIA FECHADO: signup criava tenant+usuário sem nenhum rate
+  // limiting, diferente de /login e /password-reset/request no mesmo arquivo —
+  // permitia criação automatizada ilimitada de tenants/contas a partir do mesmo IP.
+  try {
+    await enforceRateLimit(`signup:${req.ip}`, 5, 900);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
+  }
   const parsed = signupSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
