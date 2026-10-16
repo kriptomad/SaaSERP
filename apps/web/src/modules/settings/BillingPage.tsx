@@ -57,6 +57,7 @@ interface CheckoutResponse {
   subscriptionId: string;
   computedMrr: number;
   breakdown: CheckoutBreakdownItem[];
+  couponApplied: { code: string; discountAmount: number } | null;
   checkoutRedirectUrl: string;
 }
 
@@ -65,6 +66,7 @@ function PlanCheckoutPicker() {
   const [planCode, setPlanCode] = useState(pending?.planCode ?? PLAN_CATALOG[1].code);
   const [moduleCodes, setModuleCodes] = useState<string[]>(pending?.moduleCodes ?? []);
   const [paymentGateway, setPaymentGateway] = useState<"STRIPE" | "ASAAS">("ASAAS");
+  const [couponCode, setCouponCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -85,6 +87,9 @@ function PlanCheckoutPicker() {
         selectedModuleCodes: moduleCodes,
         billingCycle: "MONTHLY",
         paymentGateway,
+        // Cupom é opcional — só manda o campo se o lojista de fato digitou algo,
+        // evitando que uma string vazia caia na validação de "cupom inválido" no backend.
+        ...(couponCode.trim() ? { couponCode: couponCode.trim().toUpperCase() } : {}),
       });
       clearPendingCheckout();
       window.location.href = response.checkoutRedirectUrl;
@@ -139,6 +144,13 @@ function PlanCheckoutPicker() {
           <MenuItem value="ASAAS">Boleto/Pix/Cartão (Asaas)</MenuItem>
           <MenuItem value="STRIPE">Cartão internacional (Stripe)</MenuItem>
         </TextField>
+        <TextField
+          label="Cupom de desconto (opcional)"
+          value={couponCode}
+          onChange={(e) => setCouponCode(e.target.value)}
+          placeholder="Ex: BEMVINDO10"
+          fullWidth
+        />
         <Divider />
         <Stack direction="row" justifyContent="space-between" alignItems="baseline">
           <Typography variant="body1">Total estimado</Typography>

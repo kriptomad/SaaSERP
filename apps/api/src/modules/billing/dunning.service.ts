@@ -1,7 +1,7 @@
 // apps/api/src/modules/billing/dunning.service.ts
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 2.7.4 — Régua de Dunning unificada Stripe/Asaas.
 import { prismaUnscoped } from "@filitech/db";
-import { notifyTenantPaymentFailed } from "../notifications/notify.service";
+import { notifyTenantPaymentFailed, notifyTenant } from "../notifications/notify.service";
 
 const RETRY_SCHEDULE_DAYS = [1, 3, 5, 7]; // mesma cadência do Stripe Smart Retries
 
@@ -35,6 +35,32 @@ export async function handlePaymentFailure(tenantId: string, subscriptionId: str
       await tx.subscription.update({ where: { id: subscriptionId }, data: { status: "SUSPENDED" } });
       await tx.tenant.update({ where: { id: tenantId }, data: { status: "SUSPENDED" } });
     }
+  });
+}
+
+// GAP DE AUDITORIA FECHADO: eventos de cancelamento definitivo da assinatura no
+// provedor (ex.: Stripe `customer.subscription.deleted`, ou `updated` com status
+// "canceled"/"unpaid"/"incomplete_expired") só eram refletidos no Filitech pela
+// varredura diária de `suspend-overdue-tenants.worker.ts` (até 24h de atraso) ou
+// nunca, se o tenant nunca chegasse a `PAST_DUE` internamente (ex.: cancelamento
+// voluntário direto no portal do Stripe, sem nenhuma fatura ter falhado antes).
+// Diferente de `handlePaymentFailure` (que ainda dá o grace period padrão), aqui
+// o provedor já decidiu definitivamente que a assinatura acabou — suspende
+// imediatamente, sem esperar o grace period nem a varredura diária.
+export async function handleSubscriptionCanceled(tenantId: string, subscriptionId: string) {
+  await prismaUnscoped.$transaction([
+    prismaUnscoped.subscription.update({ where: { id: subscriptionId }, data: { status: "SUSPENDED" } }),
+    prismaUnscoped.tenant.update({ where: { id: tenantId }, data: { status: "SUSPENDED", gracePeriodEndsAt: null } }),
+  ]);
+  await notifyTenant({
+    tenantId,
+    category: "BILLING_DUNNING",
+    severity: "CRITICAL",
+    title: "Assinatura cancelada",
+    body: "Sua assinatura foi cancelada junto ao provedor de pagamento e o acesso ao sistema foi suspenso. Reative o plano para continuar usando o Filitech ERP.",
+    linkRoute: "/configuracoes/cobranca",
+    sourceType: "SUBSCRIPTION",
+    sourceId: tenantId,
   });
 }
 

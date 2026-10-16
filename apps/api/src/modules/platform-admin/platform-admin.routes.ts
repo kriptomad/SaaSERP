@@ -16,16 +16,18 @@
 //   - `SupportTicket`: listar/detalhe/atribuir/mudar status/responder.
 //   - Oversight de `TenantApiKey` (revogar) e `TenantWebhookEndpoint`
 //     (listar entregas + replay manual).
-// PENDENTE (flagado explicitamente): dashboard de saúde do sistema em tempo
-// real (Capítulo 15.1 — exigiria métricas live de Postgres/Redis/filas, não
-// implementado), motor de impersonation (`ImpersonationSession`, Capítulo
-// 13.1), retry automático com backoff exponencial de `WebhookDelivery`
+// ATUALIZAÇÃO (rodadas posteriores de auditoria): dashboard de saúde do sistema
+// em tempo real foi implementado em `system-status.routes.ts` (SSE + snapshot
+// Postgres/Redis/filas); impersonation (`ImpersonationSession`) implementada
+// abaixo; CRUD de `Plan`/`Module` implementado (antes só existia via seed).
+// PENDENTE: retry automático com backoff exponencial de `WebhookDelivery`
 // (Capítulo 15.4 — aqui só o replay manual está implementado).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import crypto from "node:crypto";
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { requirePlatformAdminAuth, requireSuperAdmin } from "./platform-admin-auth.middleware";
+import { invalidateTenantModuleCache } from "../../middlewares/gatekeeper.middleware";
 import { signSessionToken } from "../auth/jwt.service";
 import { webhookDeliveryQueue } from "../../lib/queue";
 import type { WebhookDeliveryJobData } from "../../lib/webhook-dispatch";
@@ -470,6 +472,114 @@ platformAdminRouter.post("/platform-admin/webhook-deliveries/:id/replay", requir
   );
   await writeAuditLog(req, "WEBHOOK_REPLAY_REQUESTED", "WebhookDelivery", delivery.id, { endpointId: delivery.endpointId, eventType: delivery.eventType });
   return res.status(202).json({ success: true, data: { id: delivery.id, replayQueued: true }, error: null });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// PLANOS E CATÁLOGO DE MÓDULOS (Capítulo 2.9/13.3) — GAP DE AUDITORIA FECHADO:
+// `Plan`/`Module` só podiam ser criados/editados via seed script (prisma/seed.ts),
+// nunca por tela de admin — o dono do SaaS dependia de acesso direto ao banco
+// para lançar um novo plano ou ajustar preço de módulo à la carte. Agora CRUD
+// completo, restrito a SUPER_ADMIN para mutação, com invalidação do cache Redis
+// de módulos ativos quando um módulo é desativado (nenhum tenant deve continuar
+// usando um módulo removido do catálogo global por engano de cache).
+// ─────────────────────────────────────────────────────────────────────────
+
+platformAdminRouter.get("/platform-admin/plans", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
+  const plans = await prisma.plan.findMany({ orderBy: { basePrice: "asc" } });
+  return res.json({ success: true, data: plans, error: null });
+});
+
+const planSchema = z.object({
+  code: z.string().min(1),
+  label: z.string().min(1),
+  basePrice: z.number().min(0),
+  includedModules: z.array(z.string()).default([]),
+  active: z.boolean().default(true),
+  audience: z.enum(["BUSINESS", "PERSONAL", "BOTH"]).default("BUSINESS"),
+  maxConnectedAccounts: z.number().int().min(0).nullable().optional(),
+  includedUserSeats: z.number().int().min(0).nullable().optional(),
+  extraUserSeatPrice: z.number().min(0).nullable().optional(),
+});
+
+platformAdminRouter.post("/platform-admin/plans", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
+  const parsed = planSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+  const existing = await prisma.plan.findUnique({ where: { code: parsed.data.code } });
+  if (existing) {
+    return res.status(409).json({ success: false, data: null, error: { code: "DUPLICATE_CODE", message: "Já existe um plano com este código." } });
+  }
+  const plan = await prisma.plan.create({ data: parsed.data });
+  await writeAuditLog(req, "PLAN_CREATED", "Plan", plan.id, { code: plan.code, basePrice: plan.basePrice.toString() });
+  return res.status(201).json({ success: true, data: plan, error: null });
+});
+
+const patchPlanSchema = planSchema.partial().omit({ code: true });
+
+platformAdminRouter.patch("/platform-admin/plans/:id", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
+  const parsed = patchPlanSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+  const existing = await prisma.plan.findUnique({ where: { id: req.params.id } });
+  if (!existing) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Plano não encontrado." } });
+  }
+  const updated = await prisma.plan.update({ where: { id: existing.id }, data: parsed.data });
+  await writeAuditLog(req, "PLAN_UPDATED", "Plan", existing.id, { changes: parsed.data });
+  return res.json({ success: true, data: updated, error: null });
+});
+
+platformAdminRouter.get("/platform-admin/modules", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
+  const modules = await prisma.module.findMany({ orderBy: { monthlyPrice: "asc" } });
+  return res.json({ success: true, data: modules, error: null });
+});
+
+const moduleSchema = z.object({
+  code: z.string().min(1),
+  label: z.string().min(1),
+  monthlyPrice: z.number().min(0),
+  description: z.string().min(1),
+  active: z.boolean().default(true),
+});
+
+platformAdminRouter.post("/platform-admin/modules", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
+  const parsed = moduleSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+  const existing = await prisma.module.findUnique({ where: { code: parsed.data.code } });
+  if (existing) {
+    return res.status(409).json({ success: false, data: null, error: { code: "DUPLICATE_CODE", message: "Já existe um módulo com este código." } });
+  }
+  const created = await prisma.module.create({ data: parsed.data });
+  await writeAuditLog(req, "MODULE_CREATED", "Module", created.id, { code: created.code, monthlyPrice: created.monthlyPrice.toString() });
+  return res.status(201).json({ success: true, data: created, error: null });
+});
+
+const patchModuleSchema = moduleSchema.partial().omit({ code: true });
+
+platformAdminRouter.patch("/platform-admin/modules/:id", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
+  const parsed = patchModuleSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+  const existing = await prisma.module.findUnique({ where: { id: req.params.id } });
+  if (!existing) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Módulo não encontrado." } });
+  }
+  const updated = await prisma.module.update({ where: { id: existing.id }, data: parsed.data });
+  // Se o módulo foi desativado no catálogo global, nenhum tenant que já tinha o
+  // cache Redis populado (TTL de 60s, ver gatekeeper.middleware.ts) deve continuar
+  // com acesso liberado até o cache expirar sozinho — invalidamos proativamente
+  // para TODOS os tenants que o contratam (consistência imediata > esperar TTL).
+  if (parsed.data.active === false && existing.active === true) {
+    const tenantModules = await prisma.tenantModule.findMany({ where: { moduleCode: existing.code, active: true }, select: { tenantId: true } });
+    await Promise.all(tenantModules.map((tm) => invalidateTenantModuleCache(tm.tenantId)));
+  }
+  await writeAuditLog(req, "MODULE_CATALOG_UPDATED", "Module", existing.id, { changes: parsed.data });
+  return res.json({ success: true, data: updated, error: null });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

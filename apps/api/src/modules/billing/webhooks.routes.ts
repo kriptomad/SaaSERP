@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import { prismaUnscoped } from "@filitech/db";
 import { getStripeClient } from "./stripe.client";
 import { getPlatformSecret } from "../../lib/platform-secrets";
-import { handlePaymentFailure, handlePaymentRecovered } from "./dunning.service";
+import { handlePaymentFailure, handlePaymentRecovered, handleSubscriptionCanceled } from "./dunning.service";
 import { invalidateTenantModuleCache } from "../../middlewares/gatekeeper.middleware";
 import { createModuleLogger } from "../../lib/logger";
 
@@ -190,11 +190,20 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
       case "invoice.paid":
         await handlePaymentRecovered(subscription.tenantId, subscription.id);
         break;
-      case "customer.subscription.updated":
+      case "customer.subscription.updated": {
+        const status = (event.data.object as { status?: string }).status;
         // Só recupera se o Stripe reporta a assinatura saudável — um update com status past_due/unpaid não pode reativar o tenant.
-        if ((event.data.object as { status?: string }).status === "active") {
+        if (status === "active") {
           await handlePaymentRecovered(subscription.tenantId, subscription.id);
+        } else if (status === "canceled" || status === "unpaid" || status === "incomplete_expired") {
+          // GAP DE AUDITORIA FECHADO: cancelamento/status terminal reportado pelo
+          // Stripe suspende IMEDIATAMENTE, sem esperar grace period/varredura diária.
+          await handleSubscriptionCanceled(subscription.tenantId, subscription.id);
         }
+        break;
+      }
+      case "customer.subscription.deleted":
+        await handleSubscriptionCanceled(subscription.tenantId, subscription.id);
         break;
       default:
         break; // evento reconhecido mas sem ação de billing mapeada
@@ -241,7 +250,13 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
               where: { id: charge.accountReceivableId, status: { notIn: ["PAID", "CANCELLED"] } },
               data: { status: "PAID", paidAt: new Date() },
             })
-            .catch(() => undefined);
+            .catch((err) => {
+              // GAP DE AUDITORIA FECHADO: falha aqui era engolida silenciosamente,
+              // deixando o PaymentCharge marcado como PAID mas o AccountReceivable
+              // correspondente desatualizado, sem NENHUM rastro para investigação
+              // manual. Agora loga com os IDs necessários para reconciliação.
+              log.error({ err, paymentChargeId: charge.id, accountReceivableId: charge.accountReceivableId }, "falha ao sincronizar AccountReceivable após pagamento confirmado via webhook Asaas");
+            });
         }
       }
     }

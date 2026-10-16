@@ -37,7 +37,10 @@ const checkoutSchema = z.object({
   selectedModuleCodes: z.array(z.string().min(1)).default([]),
   billingCycle: z.literal("MONTHLY").default("MONTHLY"),
   paymentGateway: z.enum(["STRIPE", "ASAAS"]),
+  couponCode: z.string().min(1).optional(),
 });
+
+class InvalidCouponError extends Error {}
 
 async function resolveAppBaseUrl(): Promise<string> {
   return (await getPlatformSecret("APP_BASE_URL")) ?? "https://app.filitecherp.com.br";
@@ -105,6 +108,46 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
   ];
   const computedMrr = breakdown.reduce((sum, item) => sum + item.price, 0);
 
+  // GAP DE AUDITORIA FECHADO: cupons eram cadastrados pelo painel admin
+  // (marketing.routes.ts) mas NUNCA aplicados em nenhum fluxo de checkout —
+  // o lojista nunca conseguia de fato usar um cupom, e `redemptionCount` nunca
+  // era incrementado em lugar nenhum do código. Validação completa aqui:
+  // existe/ativo, dentro da janela validFrom/validUntil, escopo bate com o
+  // plano ou algum módulo selecionado (ou é GLOBAL), e ainda há saldo de
+  // `maxRedemptions`. O desconto é aplicado SEMPRE sobre a linha base do plano
+  // (nunca deixa o total ficar negativo) para funcionar identicamente nos dois
+  // gateways sem depender de objetos de cupom específicos do Stripe/Asaas.
+  let appliedCoupon: { id: string; code: string; discountAmount: number } | null = null;
+  if (input.couponCode) {
+    const coupon = await prisma.discountCoupon.findUnique({ where: { code: input.couponCode } });
+    const now = new Date();
+    const scopeMatches =
+      coupon &&
+      (coupon.scopeType === "GLOBAL" ||
+        (coupon.scopeType === "PLAN" && coupon.scopeReferenceId === plan.id) ||
+        (coupon.scopeType === "MODULE" && coupon.scopeReferenceId != null && billableModules.some((m) => m.id === coupon.scopeReferenceId)));
+    if (
+      !coupon ||
+      !coupon.active ||
+      !scopeMatches ||
+      coupon.validFrom > now ||
+      coupon.validUntil < now ||
+      (coupon.maxRedemptions != null && coupon.redemptionCount >= coupon.maxRedemptions)
+    ) {
+      return err(res, 400, "INVALID_COUPON", "Cupom inválido, expirado, fora de escopo ou esgotado.");
+    }
+    const rawDiscount =
+      coupon.discountType === "PERCENTAGE" ? (computedMrr * Number(coupon.discountValue)) / 100 : Number(coupon.discountValue);
+    const discountAmount = Math.min(Math.round(rawDiscount * 100) / 100, computedMrr);
+    appliedCoupon = { id: coupon.id, code: coupon.code, discountAmount };
+  }
+  const discountedBreakdown = appliedCoupon
+    ? breakdown.map((item, index) =>
+        index === 0 ? { ...item, price: Math.round((item.price - appliedCoupon!.discountAmount) * 100) / 100 } : item,
+      )
+    : breakdown;
+  const finalMrr = Math.round((computedMrr - (appliedCoupon?.discountAmount ?? 0)) * 100) / 100;
+
   // GAP DE AUDITORIA FECHADO (Rodada 6) — a checagem de "já tem assinatura ativa" +
   // o descarte de tentativa anterior + a criação da nova linha PENDING_CHECKOUT
   // rodavam como 3 operações soltas: duas requisições concorrentes do mesmo tenant
@@ -122,6 +165,29 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
         });
         if (existingActive) {
           throw new AlreadySubscribedError();
+        }
+
+        // Reclama o saldo do cupom DENTRO da mesma transação serializable — nunca
+        // duas contratações concorrentes com o mesmo cupom no limite (ex.: 1 uso
+        // restante) podem ambas passar: a condição `redemptionCount < maxRedemptions`
+        // (ou cupom ilimitado) é reavaliada atomicamente aqui, e `updateMany`
+        // retorna `count: 0` se outra transação já consumiu o último uso.
+        // Revalida o cupom DENTRO da transação serializable (leitura fresca) antes
+        // de incrementar `redemptionCount` — se duas contratações concorrentes
+        // disputarem o último uso de um cupom, o isolamento SERIALIZABLE do
+        // Postgres detecta o conflito de escrita e aborta uma delas com P2034
+        // (já tratado no catch abaixo como "CONCURRENT_CHECKOUT_CONFLICT"), nunca
+        // deixando o cupom ser usado além do limite configurado.
+        if (appliedCoupon) {
+          const freshCoupon = await tx.discountCoupon.findUnique({ where: { id: appliedCoupon.id } });
+          if (
+            !freshCoupon ||
+            !freshCoupon.active ||
+            (freshCoupon.maxRedemptions != null && freshCoupon.redemptionCount >= freshCoupon.maxRedemptions)
+          ) {
+            throw new InvalidCouponError();
+          }
+          await tx.discountCoupon.update({ where: { id: appliedCoupon.id }, data: { redemptionCount: { increment: 1 } } });
         }
 
         // Descarta qualquer tentativa anterior não concluída deste tenant — nunca
@@ -144,6 +210,9 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
   } catch (caughtErr) {
+    if (caughtErr instanceof InvalidCouponError) {
+      return err(res, 409, "COUPON_REDEMPTION_CONFLICT", "Este cupom acabou de atingir o limite de usos. Tente sem cupom ou contate o suporte.");
+    }
     if (caughtErr instanceof AlreadySubscribedError) {
       return err(
         res,
@@ -172,7 +241,7 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
       }
 
       const items: StripeCheckoutLineItem[] = [
-        { moduleCode: null, label: `${plan.label} (base)`, monthlyPriceBrl: Number(plan.basePrice) },
+        { moduleCode: null, label: `${plan.label} (base)`, monthlyPriceBrl: discountedBreakdown[0].price },
         ...billableModules.map((m) => ({ moduleCode: m.code, label: m.label, monthlyPriceBrl: Number(m.monthlyPrice) })),
       ];
 
@@ -181,7 +250,7 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
         items,
         successUrl,
         cancelUrl,
-        metadata: { pendingSubscriptionId: pendingSubscription.id, tenantId, planCode: plan.code },
+        metadata: { pendingSubscriptionId: pendingSubscription.id, tenantId, planCode: plan.code, couponCode: appliedCoupon?.code ?? "" },
       });
       if (!session.url) throw new Error("Stripe não retornou uma URL de checkout.");
       checkoutRedirectUrl = session.url;
@@ -201,8 +270,8 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
       const nextDueDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10); // D+1 — Asaas exige nextDueDate futura
       const checkout = await createAsaasCheckout({
         customer: customerId,
-        items: breakdown.map((item) => ({ name: item.label, value: item.price })),
-        totalValue: computedMrr,
+        items: discountedBreakdown.map((item) => ({ name: item.label, value: item.price })),
+        totalValue: finalMrr,
         nextDueDate,
         successUrl,
         cancelUrl,
@@ -214,13 +283,23 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
 
     return res.status(201).json({
       success: true,
-      data: { subscriptionId: pendingSubscription.id, computedMrr, breakdown, checkoutRedirectUrl },
+      data: {
+        subscriptionId: pendingSubscription.id,
+        computedMrr: finalMrr,
+        breakdown: discountedBreakdown,
+        couponApplied: appliedCoupon ? { code: appliedCoupon.code, discountAmount: appliedCoupon.discountAmount } : null,
+        checkoutRedirectUrl,
+      },
       error: null,
     });
   } catch (caughtErr) {
     // Falha ao criar a sessão no provedor: nunca deixa uma linha PENDING_CHECKOUT órfã
-    // sem nenhum checkout de fato associado a ela.
+    // sem nenhum checkout de fato associado a ela, e nunca consome o saldo do cupom
+    // por uma tentativa que nem chegou a gerar um checkout de verdade no provedor.
     await prisma.subscription.delete({ where: { id: pendingSubscription.id } }).catch(() => undefined);
+    if (appliedCoupon) {
+      await prisma.discountCoupon.update({ where: { id: appliedCoupon.id }, data: { redemptionCount: { decrement: 1 } } }).catch(() => undefined);
+    }
     log.error({ tenantId, paymentGateway: input.paymentGateway, err: caughtErr }, "falha ao criar checkout de assinatura");
     return err(res, 502, "CHECKOUT_PROVIDER_ERROR", "Não foi possível iniciar o checkout com o provedor de pagamento. Tente novamente em instantes.");
   }
