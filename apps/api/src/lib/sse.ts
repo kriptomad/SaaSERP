@@ -160,3 +160,24 @@ export function getSseConnectionCount(): number {
   return total;
 }
 
+/**
+ * Fecha ativamente todas as conexões SSE locais — chamado pelo graceful shutdown
+ * (server.ts) ANTES de aguardar `httpServer.close()`. Sem isso, uma conexão SSE
+ * (que é deliberadamente de longa duração / keep-alive) nunca fecharia sozinha,
+ * fazendo `httpServer.close()` esperar até o timeout de segurança em TODO deploy
+ * em vez de encerrar graciosamente assim que as requisições normais terminarem.
+ */
+export function closeAllSseConnections(): void {
+  for (const set of clientsByTenant.values()) {
+    for (const client of set) {
+      clearInterval(client.heartbeat);
+      try {
+        client.res.end();
+      } catch {
+        // melhor esforço — conexão já pode estar fechada.
+      }
+    }
+  }
+  clientsByTenant.clear();
+}
+

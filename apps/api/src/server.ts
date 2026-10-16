@@ -91,6 +91,7 @@ import { lookupRouter } from "./modules/lookup/lookup.routes";
 import { systemStatusRouter } from "./modules/platform-admin/system-status.routes";
 import { prismaUnscoped } from "@filitech/db";
 import { redis } from "./lib/redis";
+import { closeAllSseConnections } from "./lib/sse";
 import { getPlatformSecret } from "./lib/platform-secrets";
 
 const app = express();
@@ -358,6 +359,10 @@ if (process.env.NODE_ENV !== "test") {
       process.exit(1);
     }, GRACEFUL_SHUTDOWN_TIMEOUT_MS);
     forceExitTimer.unref();
+
+    // Fecha conexões SSE de longa duração ANTES de esperar httpServer.close(),
+    // senão o close() nunca resolveria sozinho e todo deploy bateria no timeout.
+    closeAllSseConnections();
 
     httpServer.close(async (err) => {
       if (err) {
