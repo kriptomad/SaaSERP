@@ -10,11 +10,11 @@
 // Pesquisa (Capítulo 4.6 prosa + Sebrae): giro de estoque "ideal" no varejo geral
 // brasileiro varia muito por categoria (alta rotatividade: 8-12x/ano; bens
 // duráveis/semiduráveis: 2-4x/ano) e é sempre lido junto da Curva ABC (20% dos SKUs
-// = ~80% do valor movimentado). Decisão de escopo dado o tempo disponível: este
-// relatório traz o giro por variante no período E ordena por quantidade vendida
-// (proxy simples de Curva ABC pronta para leitura gerencial), mas NÃO implementa uma
-// tela de classificação ABC completa (classes A/B/C persistidas) — documentado como
-// pendência explícita no fechamento da tarefa.
+// = ~80% do valor movimentado). CORREÇÃO DE AUDITORIA (mocks/stubs round 2): a
+// classificação ABC clássica por corte de percentual acumulado de faturamento
+// (Pareto: A até 80%, B até 95%, C o restante) está implementada e calculada em
+// tempo real a cada chamada — não há mais pendência de "classes A/B/C não
+// implementadas". Variantes sem venda no período são sempre classe C.
 //
 // Fatos do schema REAL que moldam a query:
 //   - `StockMovement` NÃO tem campo de variante (ver nota em product-variants.routes.ts)
@@ -70,17 +70,20 @@ variantTurnoverRouter.get("/product-variants/turnover-report", requireAuth, requ
       productVariantId: { not: null },
       sale: { status: "PAID", createdAt: { gte: since } },
     },
-    select: { productVariantId: true, quantity: true },
+    select: { productVariantId: true, quantity: true, totalPrice: true },
   });
 
   const soldByVariant = new Map<string, number>();
+  const revenueByVariant = new Map<string, number>();
   for (const item of soldItems) {
     if (!item.productVariantId) continue;
     soldByVariant.set(item.productVariantId, (soldByVariant.get(item.productVariantId) ?? 0) + Number(item.quantity));
+    revenueByVariant.set(item.productVariantId, (revenueByVariant.get(item.productVariantId) ?? 0) + Number(item.totalPrice));
   }
 
   const report = variants.map((variant) => {
     const quantitySold = soldByVariant.get(variant.id) ?? 0;
+    const revenueSold = revenueByVariant.get(variant.id) ?? 0;
     const currentStock = Number(variant.stockQuantity);
     // Giro = vendido / estoque médio no período; sem histórico de saldo diário,
     // usa-se o saldo atual como proxy do estoque médio (mesma limitação documentada
@@ -97,18 +100,38 @@ variantTurnoverRouter.get("/product-variants/turnover-report", requireAuth, requ
       axisValue: variant.axisValue,
       barcode: variant.barcode,
       quantitySold,
+      revenueSold,
       currentStock: variant.stockQuantity,
       turnoverRatio,
     };
   });
 
-  // Ordenado por quantidade vendida (proxy simples de Curva ABC pronta para leitura
-  // gerencial — ver nota de escopo no topo do arquivo).
-  report.sort((a, b) => b.quantitySold - a.quantitySold);
+  // Ordenado por faturamento no período (desc) — base padrão da Curva ABC clássica
+  // (Pareto: valor movimentado, não quantidade — dois itens podem vender a mesma
+  // quantidade com tickets muito diferentes).
+  report.sort((a, b) => b.revenueSold - a.revenueSold);
+
+  // CORREÇÃO DE AUDITORIA (mocks/stubs round): a Curva ABC era apenas citada em texto
+  // ("classes A/B/C ainda não implementadas") sem nenhuma classificação persistida ou
+  // calculada. Implementa a classificação clássica por corte de percentual acumulado de
+  // faturamento (Pareto): A = até 80% acumulado, B = até 95% acumulado, C = restante.
+  // Variantes sem nenhuma venda no período (revenueSold = 0) são sempre classe C —
+  // não participam do corte de Pareto, que só faz sentido sobre o que de fato vendeu.
+  const totalRevenue = report.reduce((sum, row) => sum + row.revenueSold, 0);
+  let cumulativeRevenue = 0;
+  const classified = report.map((row) => {
+    if (row.revenueSold <= 0 || totalRevenue <= 0) {
+      return { ...row, abcClass: "C" as const, cumulativeRevenuePct: null as number | null };
+    }
+    cumulativeRevenue += row.revenueSold;
+    const cumulativePct = cumulativeRevenue / totalRevenue;
+    const abcClass: "A" | "B" | "C" = cumulativePct <= 0.8 ? "A" : cumulativePct <= 0.95 ? "B" : "C";
+    return { ...row, abcClass, cumulativeRevenuePct: cumulativePct };
+  });
 
   return res.json({
     success: true,
-    data: { periodDays, since: since.toISOString(), variants: report },
+    data: { periodDays, since: since.toISOString(), variants: classified },
     error: null,
   });
 });

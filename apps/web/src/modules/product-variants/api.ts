@@ -93,8 +93,11 @@ export interface VariantTurnoverItem {
   axisValue: string;
   barcode: string | null;
   quantitySold: number;
+  revenueSold: number;
   currentStock: string;
   turnoverRatio: number | null;
+  abcClass: "A" | "B" | "C";
+  cumulativeRevenuePct: number | null;
 }
 
 export interface VariantTurnoverReport {
