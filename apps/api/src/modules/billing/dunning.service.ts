@@ -11,11 +11,27 @@ function addDays(date: Date, days: number): Date {
   return result;
 }
 
-export async function handlePaymentFailure(tenantId: string, subscriptionId: string) {
+export async function handlePaymentFailure(tenantId: string, subscriptionId: string, externalPaymentId?: string) {
   return prismaUnscoped.$transaction(async (tx) => {
+    const current = await tx.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: { lastFailedPaymentExternalId: true },
+    });
+    // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): se o chamador souber o ID do
+    // pagamento externo que falhou (Asaas payment.id / Stripe invoice id) e for
+    // EXATAMENTE o mesmo da última falha já contabilizada, isto é um evento
+    // semanticamente duplicado do provedor (ex.: Asaas PAYMENT_OVERDUE seguido de
+    // PAYMENT_FAILED para o mesmo pagamento) — não incrementa de novo.
+    if (externalPaymentId && current?.lastFailedPaymentExternalId === externalPaymentId) {
+      return;
+    }
+
     const subscription = await tx.subscription.update({
       where: { id: subscriptionId },
-      data: { failedPaymentAttempts: { increment: 1 } },
+      data: {
+        failedPaymentAttempts: { increment: 1 },
+        lastFailedPaymentExternalId: externalPaymentId ?? undefined,
+      },
     });
 
     const attempt = subscription.failedPaymentAttempts;

@@ -142,7 +142,12 @@ export async function closeSale(prisma: TenantScopedPrismaClient, input: CloseSa
     where: { tenantId_idempotencyKey: { tenantId: input.tenantId, idempotencyKey: input.idempotencyKey } },
   });
   if (existingSale) {
-    return { sale: existingSale, fiscalDocument: null, isReplay: true as const };
+    // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): antes retornava `fiscalDocument:
+    // null` aqui, fazendo `closeSaleAndEmitFiscalDocument` nunca saber que havia um
+    // documento fiscal PENDING para retentar o enqueue num replay — precisa buscar o
+    // documento real para o chamador poder decidir se vale reenfileirar a emissão.
+    const existingFiscalDocument = await prisma.fiscalDocument.findFirst({ where: { saleId: existingSale.id } });
+    return { sale: existingSale, fiscalDocument: existingFiscalDocument, isReplay: true as const };
   }
 
   try {
@@ -154,7 +159,10 @@ export async function closeSale(prisma: TenantScopedPrismaClient, input: CloseSa
       const winner = await prisma.sale.findUnique({
         where: { tenantId_idempotencyKey: { tenantId: input.tenantId, idempotencyKey: input.idempotencyKey } },
       });
-      if (winner) return { sale: winner, fiscalDocument: null, isReplay: true as const };
+      if (winner) {
+        const winnerFiscalDocument = await prisma.fiscalDocument.findFirst({ where: { saleId: winner.id } });
+        return { sale: winner, fiscalDocument: winnerFiscalDocument, isReplay: true as const };
+      }
     }
     throw err;
   }
@@ -751,8 +759,33 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
 //    segurar o lock de estoque esperando resposta de rede externa.
 export async function closeSaleAndEmitFiscalDocument(prisma: TenantScopedPrismaClient, input: CloseSaleServerInput) {
   const result = await closeSale(prisma, input);
-  if (!result.isReplay && result.fiscalDocument && result.fiscalDocument.status !== "NOT_CONTRACTED") {
-    await enqueueFiscalEmission({ fiscalDocumentId: result.fiscalDocument.id, tenantId: input.tenantId });
+  if (result.fiscalDocument && result.fiscalDocument.status !== "NOT_CONTRACTED") {
+    // CORREÇÃO DE AUDITORIA (mega-audit round 7): quando este `enqueue` lançava (ex.:
+    // Redis momentaneamente fora do ar), a exceção subia ANTES do dispatch do webhook
+    // mas DEPOIS do commit da venda — a requisição HTTP retornava erro para o PDV
+    // mesmo com a venda já registrada. Pior ainda: como o fluxo só reenfileirava a
+    // emissão fiscal em `!result.isReplay`, um retry do PDV com a MESMA chave de
+    // idempotência (replay) nunca tentava de novo — o `FiscalDocument` ficava PENDING
+    // para sempre, sem nenhum job jamais ter entrado na fila. Agora: (1) nunca deixa o
+    // enqueue derrubar a resposta HTTP da venda (try/catch, como já era feito no
+    // dispatch do webhook logo abaixo); (2) tenta reenfileirar mesmo em replay, desde
+    // que o documento ainda esteja PENDING — reenfileirar é seguro mesmo se já exista
+    // um job anterior em processamento, pois `emitFiscalDocument` é idempotente
+    // (retorna imediatamente se o status já avançou para AUTHORIZED/CANCELLED). Uma
+    // verredura periódica (`workers/reconcile-stuck-fiscal-documents.worker.ts`) cobre
+    // o caso residual de nenhum retry de replay jamais acontecer.
+    if (!result.isReplay || result.fiscalDocument.status === "PENDING") {
+      try {
+        await enqueueFiscalEmission({ fiscalDocumentId: result.fiscalDocument.id, tenantId: input.tenantId });
+      } catch (error) {
+        createModuleLogger("close-sale").error(
+          { saleId: result.sale.id, fiscalDocumentId: result.fiscalDocument.id, err: error },
+          "falha ao enfileirar emissão fiscal — venda já está confirmada; a varredura periódica de documentos PENDING reconciliará depois",
+        );
+      }
+    }
+  }
+  if (!result.isReplay) {
     // Capítulo 15.4 — webhook de saída "sale.completed" (ver schema.prisma,
     // TenantWebhookEndpoint.eventTypes). Não bloqueia o fechamento da venda caso o
     // próprio enfileiramento do dispatch falhe (ex.: Redis fora do ar) — o fluxo

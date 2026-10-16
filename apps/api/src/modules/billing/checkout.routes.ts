@@ -23,6 +23,33 @@ import { createAsaasCustomer, createAsaasCheckout } from "./asaas.client";
 import { getPlatformSecret } from "../../lib/platform-secrets";
 import { createModuleLogger } from "../../lib/logger";
 
+// CORREÇÃO DE AUDITORIA (mega-audit round 7): distingue uma rejeição DEFINITIVA do
+// provedor (ex.: cartão/parâmetro inválido, erro de autenticação — o provedor
+// respondeu e disse "não") de um erro de REDE AMBÍGUO (timeout/conexão caída antes
+// de qualquer resposta — o provedor pode ou não ter processado a requisição do
+// nosso lado). Antes, QUALQUER erro aqui apagava a `Subscription` PENDING_CHECKOUT
+// local e decrementava o cupom — no caso ambíguo, isso pode descartar prematuramente
+// um registro local cujo checkout no provedor na verdade foi criado (mesmo que o
+// cliente nunca tenha recebido a URL, por não ter havido resposta a tempo). Erros
+// ambíguos NUNCA disparam a limpeza automática aqui — ficam para o job de varredura
+// de `PENDING_CHECKOUT` expirado decidir com segurança (após confirmar, via
+// reconsulta ao provedor quando aplicável, que nenhum pagamento foi de fato
+// concluído).
+function isDefiniteProviderRejection(gateway: "STRIPE" | "ASAAS", error: unknown): boolean {
+  if (gateway === "STRIPE") {
+    const stripeError = error as { type?: string; statusCode?: number } | undefined;
+    // `StripeConnectionError`/ausência de `statusCode` = nunca chegou resposta do
+    // Stripe (ambíguo). Qualquer outro `type` do SDK (StripeInvalidRequestError,
+    // StripeCardError, StripeAPIError com statusCode, StripeAuthenticationError...)
+    // significa que o Stripe respondeu de fato — rejeição definitiva.
+    return typeof stripeError?.type === "string" && stripeError.type !== "StripeConnectionError" && typeof stripeError.statusCode === "number";
+  }
+  // Asaas: `asaasRequest()` só lança `Asaas API error (status): ...` quando a
+  // resposta HTTP chegou com `!response.ok` — qualquer outro erro (fetch falhou,
+  // timeout, DNS, etc.) nunca teve resposta e é tratado como ambíguo.
+  return error instanceof Error && error.message.startsWith("Asaas API error (");
+}
+
 export const checkoutRouter = Router();
 
 const log = createModuleLogger("billing-checkout");
@@ -194,6 +221,21 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
         // acumula linhas órfãs em PENDING_CHECKOUT (o lojista pode mudar de ideia de
         // plano/módulos e tentar de novo quantas vezes quiser antes de efetivamente
         // pagar).
+        // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): o `deleteMany` abaixo apagava
+        // tentativas anteriores SEM NUNCA devolver o saldo de um cupom que havia sido
+        // resgatado por elas (`pendingCouponId`) — um lojista que aplicasse um cupom,
+        // abandonasse o checkout e tentasse de novo consumia PERMANENTEMENTE um uso do
+        // cupom por uma tentativa que nunca virou pagamento de verdade. Agora devolve
+        // o saldo de cada cupom pendente órfão antes de apagar as linhas.
+        const stalePending = await tx.subscription.findMany({
+          where: { tenantId, status: "PENDING_CHECKOUT" },
+          select: { id: true, pendingCouponId: true },
+        });
+        for (const stale of stalePending) {
+          if (stale.pendingCouponId) {
+            await tx.discountCoupon.update({ where: { id: stale.pendingCouponId }, data: { redemptionCount: { decrement: 1 } } }).catch(() => undefined);
+          }
+        }
         await tx.subscription.deleteMany({ where: { tenantId, status: "PENDING_CHECKOUT" } });
 
         return tx.subscription.create({
@@ -204,6 +246,7 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
             externalSubscriptionId: `pending:${randomUUID()}`,
             status: "PENDING_CHECKOUT",
             pendingModuleCodes: billableModules.map((m) => m.code),
+            pendingCouponId: appliedCoupon?.id ?? null,
           },
         });
       },
@@ -251,6 +294,7 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
         successUrl,
         cancelUrl,
         metadata: { pendingSubscriptionId: pendingSubscription.id, tenantId, planCode: plan.code, couponCode: appliedCoupon?.code ?? "" },
+        idempotencyKey: `checkout-session:${pendingSubscription.id}`,
       });
       if (!session.url) throw new Error("Stripe não retornou uma URL de checkout.");
       checkoutRedirectUrl = session.url;
@@ -293,14 +337,27 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
       error: null,
     });
   } catch (caughtErr) {
-    // Falha ao criar a sessão no provedor: nunca deixa uma linha PENDING_CHECKOUT órfã
-    // sem nenhum checkout de fato associado a ela, e nunca consome o saldo do cupom
-    // por uma tentativa que nem chegou a gerar um checkout de verdade no provedor.
-    await prisma.subscription.delete({ where: { id: pendingSubscription.id } }).catch(() => undefined);
-    if (appliedCoupon) {
-      await prisma.discountCoupon.update({ where: { id: appliedCoupon.id }, data: { redemptionCount: { decrement: 1 } } }).catch(() => undefined);
+    const definiteRejection = isDefiniteProviderRejection(input.paymentGateway, caughtErr);
+    if (definiteRejection) {
+      // Rejeição definitiva (o provedor respondeu recusando): seguro apagar a linha
+      // PENDING_CHECKOUT órfã e devolver o saldo do cupom, pois temos certeza de que
+      // nenhum checkout de fato foi criado do lado do provedor.
+      await prisma.subscription.delete({ where: { id: pendingSubscription.id } }).catch(() => undefined);
+      if (appliedCoupon) {
+        await prisma.discountCoupon.update({ where: { id: appliedCoupon.id }, data: { redemptionCount: { decrement: 1 } } }).catch(() => undefined);
+      }
+    } else {
+      // Erro ambíguo (timeout/conexão caída antes de qualquer resposta do provedor):
+      // NÃO apaga a Subscription nem devolve o cupom — o provedor pode ter processado
+      // a requisição mesmo sem confirmar para nós. A linha PENDING_CHECKOUT permanece
+      // e é resolvida com segurança depois por `expire-stale-pending-checkouts`
+      // (expira automaticamente após 24h sem webhook de confirmação).
+      log.warn(
+        { tenantId, paymentGateway: input.paymentGateway, pendingSubscriptionId: pendingSubscription.id },
+        "erro ambíguo ao criar checkout — mantendo PENDING_CHECKOUT para reconciliação posterior em vez de limpar imediatamente",
+      );
     }
-    log.error({ tenantId, paymentGateway: input.paymentGateway, err: caughtErr }, "falha ao criar checkout de assinatura");
+    log.error({ tenantId, paymentGateway: input.paymentGateway, definiteRejection, err: caughtErr }, "falha ao criar checkout de assinatura");
     return err(res, 502, "CHECKOUT_PROVIDER_ERROR", "Não foi possível iniciar o checkout com o provedor de pagamento. Tente novamente em instantes.");
   }
 });

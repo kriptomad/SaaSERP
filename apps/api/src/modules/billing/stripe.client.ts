@@ -138,6 +138,7 @@ export async function createStripeCheckoutSession(input: {
   successUrl: string;
   cancelUrl: string;
   metadata: Record<string, string>;
+  idempotencyKey?: string;
 }) {
   const stripe = await getStripeClient();
   const line_items = await Promise.all(
@@ -159,15 +160,23 @@ export async function createStripeCheckoutSession(input: {
     }),
   );
 
-  return stripe.checkout.sessions.create({
-    mode: "subscription",
-    customer: input.customerId,
-    line_items,
-    success_url: input.successUrl,
-    cancel_url: input.cancelUrl,
-    metadata: input.metadata,
-    subscription_data: { metadata: input.metadata },
-  });
+  return stripe.checkout.sessions.create(
+    {
+      mode: "subscription",
+      customer: input.customerId,
+      line_items,
+      success_url: input.successUrl,
+      cancel_url: input.cancelUrl,
+      metadata: input.metadata,
+      subscription_data: { metadata: input.metadata },
+    },
+    // Chave de idempotência (Capítulo 9.3, mega-audit rodada 7): se o cliente
+    // retransmitir a MESMA requisição de checkout (ex.: o backend timeout na
+    // primeira tentativa mas o Stripe já havia processado), o Stripe retorna a
+    // sessão JÁ criada em vez de criar uma segunda — evita sessões duplicadas por
+    // retry, sem precisar de lógica própria de deduplicação aqui.
+    input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : undefined,
+  );
 }
 
 // Passo 2 — assinatura recorrente com cobrança automática (Capítulo 2.7.3).

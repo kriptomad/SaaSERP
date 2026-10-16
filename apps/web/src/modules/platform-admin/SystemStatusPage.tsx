@@ -51,6 +51,10 @@ export function SystemStatusPage() {
     description: "",
   });
 
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [isSubmittingIncident, setIsSubmittingIncident] = useState(false);
+  const [resolvingIncidentId, setResolvingIncidentId] = useState<string | null>(null);
+
   const refreshIncidents = useCallback(() => {
     listIncidents().then(setIncidents).catch(() => undefined);
   }, []);
@@ -62,16 +66,37 @@ export function SystemStatusPage() {
     refreshIncidents();
   }, [refreshIncidents]);
 
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): os handlers de criar/resolver
+  // incidente não tinham try/catch — se a chamada falhasse (ex.: sessão de admin
+  // de plataforma expirada, rede instável), o erro ficava só no console do
+  // navegador, sem NENHUM feedback visual para o operador, que achava que a ação
+  // tinha funcionado silenciosamente.
   async function handleCreateIncident() {
     if (!newIncident.description.trim()) return;
-    await createIncident(newIncident);
-    setNewIncident({ component: "DATABASE", severity: "WARNING", description: "" });
-    refreshIncidents();
+    setActionError(null);
+    setIsSubmittingIncident(true);
+    try {
+      await createIncident(newIncident);
+      setNewIncident({ component: "DATABASE", severity: "WARNING", description: "" });
+      refreshIncidents();
+    } catch (err) {
+      setActionError(`Falha ao registrar incidente: ${(err as Error).message}`);
+    } finally {
+      setIsSubmittingIncident(false);
+    }
   }
 
   async function handleResolveIncident(id: string) {
-    await updateIncident(id, { resolvedAt: new Date().toISOString() });
-    refreshIncidents();
+    setActionError(null);
+    setResolvingIncidentId(id);
+    try {
+      await updateIncident(id, { resolvedAt: new Date().toISOString() });
+      refreshIncidents();
+    } catch (err) {
+      setActionError(`Falha ao marcar incidente como resolvido: ${(err as Error).message}`);
+    } finally {
+      setResolvingIncidentId(null);
+    }
   }
 
   const handleSseEvent = useCallback((event: { type: string; data: unknown }) => {
@@ -150,6 +175,7 @@ export function SystemStatusPage() {
             Incidentes (histórico + registro manual — refletido na página pública /status)
           </Typography>
           <Paper sx={{ p: 2, mb: 2 }}>
+            {actionError && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setActionError(null)}>{actionError}</Alert>}
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap alignItems="center">
               <TextField
                 select
@@ -181,8 +207,8 @@ export function SystemStatusPage() {
                 onChange={(e) => setNewIncident((prev) => ({ ...prev, description: e.target.value }))}
                 sx={{ flex: 1, minWidth: 260 }}
               />
-              <Button variant="contained" onClick={handleCreateIncident} disabled={!newIncident.description.trim()}>
-                Registrar incidente
+              <Button variant="contained" onClick={handleCreateIncident} disabled={!newIncident.description.trim() || isSubmittingIncident}>
+                {isSubmittingIncident ? "Registrando..." : "Registrar incidente"}
               </Button>
             </Stack>
           </Paper>
@@ -210,8 +236,8 @@ export function SystemStatusPage() {
                     </TableCell>
                     <TableCell align="right">
                       {!incident.resolvedAt && (
-                        <Button size="small" onClick={() => handleResolveIncident(incident.id)}>
-                          Marcar resolvido
+                        <Button size="small" onClick={() => handleResolveIncident(incident.id)} disabled={resolvingIncidentId === incident.id}>
+                          {resolvingIncidentId === incident.id ? "Resolvendo..." : "Marcar resolvido"}
                         </Button>
                       )}
                     </TableCell>

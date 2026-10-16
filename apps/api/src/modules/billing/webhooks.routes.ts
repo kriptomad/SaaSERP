@@ -185,7 +185,7 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
   try {
     switch (event.type) {
       case "invoice.payment_failed":
-        await handlePaymentFailure(subscription.tenantId, subscription.id);
+        await handlePaymentFailure(subscription.tenantId, subscription.id, object.id);
         break;
       case "invoice.paid":
         await handlePaymentRecovered(subscription.tenantId, subscription.id);
@@ -240,24 +240,27 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
     if (payment?.id && (eventType === "PAYMENT_RECEIVED" || eventType === "PAYMENT_CONFIRMED")) {
       const charge = await prismaUnscoped.paymentCharge.findFirst({ where: { externalProviderId: payment.id } });
       if (charge && charge.status !== "PAID") {
-        const claimed = await prismaUnscoped.paymentCharge.updateMany({
-          where: { id: charge.id, status: { notIn: ["PAID", "CANCELLED"] } },
-          data: { status: "PAID", paidAt: new Date() },
-        });
-        if (claimed.count > 0) {
-          await prismaUnscoped.accountReceivable
-            .updateMany({
+        // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): antes, o `PaymentCharge` e o
+        // `AccountReceivable` eram atualizados em duas chamadas independentes — se a
+        // segunda falhasse, o erro era só logado e a rota MESMO ASSIM respondia 200
+        // para o Asaas, o que faz o Asaas NUNCA reenviar o evento (webhooks só são
+        // retransmitidos pelo Asaas em resposta não-2xx). O `PaymentCharge` ficava
+        // PAID para sempre com o `AccountReceivable` correspondente desatualizado,
+        // sem nenhuma chance de autocorreção. Agora ambas as atualizações acontecem
+        // na MESMA transação (tudo ou nada) e, se falhar, a rota responde 500 —
+        // deixando o próprio mecanismo de retry do Asaas reentregar o webhook depois.
+        await prismaUnscoped.$transaction(async (tx) => {
+          const claimed = await tx.paymentCharge.updateMany({
+            where: { id: charge.id, status: { notIn: ["PAID", "CANCELLED"] } },
+            data: { status: "PAID", paidAt: new Date() },
+          });
+          if (claimed.count > 0) {
+            await tx.accountReceivable.updateMany({
               where: { id: charge.accountReceivableId, status: { notIn: ["PAID", "CANCELLED"] } },
               data: { status: "PAID", paidAt: new Date() },
-            })
-            .catch((err) => {
-              // GAP DE AUDITORIA FECHADO: falha aqui era engolida silenciosamente,
-              // deixando o PaymentCharge marcado como PAID mas o AccountReceivable
-              // correspondente desatualizado, sem NENHUM rastro para investigação
-              // manual. Agora loga com os IDs necessários para reconciliação.
-              log.error({ err, paymentChargeId: charge.id, accountReceivableId: charge.accountReceivableId }, "falha ao sincronizar AccountReceivable após pagamento confirmado via webhook Asaas");
             });
-        }
+          }
+        });
       }
     }
     return res.json({ received: true, ignored: "no-subscription-reference" });
@@ -306,7 +309,7 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
     switch (eventType) {
       case "PAYMENT_OVERDUE":
       case "PAYMENT_FAILED":
-        await handlePaymentFailure(subscription.tenantId, subscription.id);
+        await handlePaymentFailure(subscription.tenantId, subscription.id, payment.id);
         break;
       case "PAYMENT_RECEIVED":
       case "PAYMENT_CONFIRMED":

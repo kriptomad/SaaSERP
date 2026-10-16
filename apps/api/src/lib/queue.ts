@@ -103,6 +103,20 @@ export const QUEUE_NAMES = {
   // `FiscalDocumentEventType.RECIPIENT_MANIFESTATION` existiam no schema desde o
   // início mas nenhum código jamais os instanciava.
   FETCH_INCOMING_NFE: "fetch-incoming-nfe",
+  // Capítulo 6.6/20.3 — varredura periódica (10 em 10 min) de `FiscalDocument` que
+  // ficou PENDING sem nunca ter um job de emissão enfileirado com sucesso (ex.:
+  // Redis fora do ar no instante exato do fechamento da venda), consumida por
+  // `workers/reconcile-stuck-fiscal-documents.worker.ts`. GAP DE AUDITORIA FECHADO
+  // (Rodada 7): antes, uma falha transitória nesse ponto podia deixar a nota fiscal
+  // de uma venda já paga/baixada travada para sempre, sem nenhuma rede de segurança.
+  RECONCILE_STUCK_FISCAL_DOCUMENTS: "reconcile-stuck-fiscal-documents",
+  // Capítulo 9.3 — varredura diária de `Subscription.status = PENDING_CHECKOUT`
+  // abandonado há mais de 24h, consumida por
+  // `workers/expire-stale-pending-checkouts.worker.ts`. GAP DE AUDITORIA FECHADO
+  // (Rodada 7): antes, um erro ambíguo (timeout) na criação do checkout no
+  // provedor podia deixar a linha PENDING_CHECKOUT (e o cupom nela aplicado)
+  // órfã para sempre, sem nenhuma rede de segurança.
+  EXPIRE_STALE_PENDING_CHECKOUTS: "expire-stale-pending-checkouts",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -166,3 +180,11 @@ export const accountingRecurringTasksQueue = new Queue(QUEUE_NAMES.ACCOUNTING_RE
 });
 
 export const fetchIncomingNfeQueue = new Queue(QUEUE_NAMES.FETCH_INCOMING_NFE, { connection: queueRedisConnection });
+
+export const reconcileStuckFiscalDocumentsQueue = new Queue(QUEUE_NAMES.RECONCILE_STUCK_FISCAL_DOCUMENTS, {
+  connection: queueRedisConnection,
+});
+
+export const expireStalePendingCheckoutsQueue = new Queue(QUEUE_NAMES.EXPIRE_STALE_PENDING_CHECKOUTS, {
+  connection: queueRedisConnection,
+});

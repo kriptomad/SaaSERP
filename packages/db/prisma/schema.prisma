@@ -447,6 +447,15 @@ model Subscription {
   stripeSeatSubscriptionItemId String?
   failedPaymentAttempts        Int                @default(0) // alimenta a régua de dunning (2.7.4)
   nextRetryAt                  DateTime? // próxima tentativa agendada pela régua de dunning
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): o Asaas emite PAYMENT_OVERDUE
+  // (vencimento passou) e PAYMENT_FAILED (tentativa de cobrança rejeitada) para o
+  // MESMO `payment.id` em alguns fluxos — como o dedup de BillingEvent é por
+  // (provider, eventType, externalId), os dois eventos tinham chaves diferentes e
+  // cada um incrementava `failedPaymentAttempts` separadamente, acelerando a
+  // suspensão do tenant por uma única falha real de cobrança. Guarda aqui o ID do
+  // pagamento externo da última falha já contabilizada para `handlePaymentFailure`
+  // poder ignorar um segundo evento sobre o MESMO pagamento.
+  lastFailedPaymentExternalId  String?
   // Cancelamento e reembolso (Capítulo 2.7.6):
   firstChargedAt               DateTime? // data da PRIMEIRA cobrança bem-sucedida desta conta — usada para a janela de arrependimento do Art. 49 CDC (7 dias corridos)
   cancelRequestedAt            DateTime? // quando o lojista clicou em "Cancelar assinatura"
@@ -462,6 +471,14 @@ model Subscription {
   // acontece (nunca uma fonte de verdade duradoura — `TenantModule.active` é quem vale
   // depois da confirmação).
   pendingModuleCodes           String[]           @default([])
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7, Capítulo 9.3): cupom aplicado neste
+  // checkout ainda pendente — persistido para que o job de varredura de
+  // `PENDING_CHECKOUT` expirado (workers/expire-stale-pending-checkouts.worker.ts)
+  // saiba qual cupom devolver (`redemptionCount -1`) sem precisar reconstruir o
+  // contexto do checkout original a partir do zero. Null quando nenhum cupom foi
+  // usado. Nunca uma fonte de verdade duradoura — esvaziado junto com a Subscription
+  // quando o checkout é confirmado ou expira.
+  pendingCouponId              String?
   createdAt                    DateTime           @default(now())
   updatedAt                    DateTime           @updatedAt
 

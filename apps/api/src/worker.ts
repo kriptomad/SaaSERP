@@ -22,6 +22,8 @@ import { startScheduledReportGenerationWorker, syncScheduledReportJobSchedulers 
 import { startPersonalInvestmentQuotesWorker, schedulePersonalInvestmentQuotesJob } from "./workers/personal-investment-quotes.worker";
 import { startAccountingRecurringTasksWorker, scheduleAccountingRecurringTasksJob } from "./workers/accounting-recurring-tasks.worker";
 import { startFetchIncomingNfeWorker, scheduleFetchIncomingNfeJob } from "./workers/fetch-incoming-nfe.worker";
+import { startReconcileStuckFiscalDocumentsWorker, scheduleReconcileStuckFiscalDocumentsJob } from "./workers/reconcile-stuck-fiscal-documents.worker";
+import { startExpireStalePendingCheckoutsWorker, scheduleExpireStalePendingCheckoutsJob } from "./workers/expire-stale-pending-checkouts.worker";
 
 async function main() {
   const log = createModuleLogger("worker");
@@ -55,6 +57,10 @@ async function main() {
   await scheduleAccountingRecurringTasksJob();
   const fetchIncomingNfeWorker = startFetchIncomingNfeWorker();
   await scheduleFetchIncomingNfeJob();
+  const reconcileStuckFiscalDocumentsWorker = startReconcileStuckFiscalDocumentsWorker();
+  await scheduleReconcileStuckFiscalDocumentsJob();
+  const expireStalePendingCheckoutsWorker = startExpireStalePendingCheckoutsWorker();
+  await scheduleExpireStalePendingCheckoutsJob();
 
   for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker, fetchIncomingNfeWorker]) {
     worker.on("completed", (job) => {
@@ -68,7 +74,7 @@ async function main() {
 
   log.info("processo de filas BullMQ iniciado");
 
-  const allWorkers = [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker, fetchIncomingNfeWorker];
+  const allWorkers = [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker, fetchIncomingNfeWorker, reconcileStuckFiscalDocumentsWorker, expireStalePendingCheckoutsWorker];
 
   // GAP DE AUDITORIA FECHADO: sem handler de SIGTERM, um rolling deploy do
   // processo de workers mataria o processo com jobs BullMQ em andamento (ex.:

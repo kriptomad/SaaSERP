@@ -48,7 +48,34 @@ function CouponForm({ onCreated }: { onCreated: (coupon: DiscountCoupon) => void
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): espelha no cliente as mesmas
+  // regras de negócio do zod/couponRules em marketing.routes.ts — sem isso, o
+  // operador só descobria um erro óbvio (ex.: desconto de 150%, data de término
+  // antes da de início, código com espaço) depois de uma viagem de rede inteira
+  // ao backend, com uma mensagem genérica. Não substitui a validação do backend
+  // (que continua sendo a fonte da verdade), só dá feedback imediato.
+  function validateClientSide(): string | null {
+    const code = form.code.trim();
+    if (code.length < 3 || code.length > 40) return "Código deve ter entre 3 e 40 caracteres.";
+    if (!/^[A-Za-z0-9_-]+$/.test(code)) return "Código deve conter apenas letras, números, - e _.";
+    if (!(form.discountValue > 0)) return "Valor do desconto deve ser maior que zero.";
+    if (form.discountType === "PERCENTAGE" && form.discountValue > 100) return "Desconto percentual não pode passar de 100.";
+    if (form.maxRedemptions != null && (!Number.isInteger(form.maxRedemptions) || form.maxRedemptions <= 0)) {
+      return "Máx. resgates deve ser um número inteiro maior que zero (ou em branco para ilimitado).";
+    }
+    if (new Date(form.validUntil) <= new Date(form.validFrom)) return "A data de término deve ser posterior à data de início.";
+    if (form.scopeType !== "GLOBAL" && !form.scopeReferenceId?.trim()) {
+      return "Informe o code do plano/módulo para escopos PLAN ou MODULE.";
+    }
+    return null;
+  }
+
   async function handleSubmit() {
+    const validationError = validateClientSide();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
