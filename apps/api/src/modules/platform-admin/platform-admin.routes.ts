@@ -282,14 +282,50 @@ platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdmi
 // AUDIT LOG (somente leitura — tabela append-only, Capítulo 13.4)
 // ─────────────────────────────────────────────────────────────────────────
 
+// CORREÇÃO DE AUDITORIA (mega-audit round de 100%, criticidade MEDIA): a tela só
+// filtrava por `targetType` — apontado no round de auditoria do painel admin como
+// faltando filtro por admin responsável, ação e janela de tempo (campos que o
+// modelo `AuditLog` já tinha desde sempre, só nunca expostos como filtro de
+// consulta). `requestId`/`level` NÃO existem no modelo `AuditLog` (esse log é
+// append-only de ações administrativas sensíveis, não um log estruturado de
+// aplicação com nível de severidade) — não adicionados por não existir dado real
+// para filtrar, nunca um filtro decorativo sem efeito.
 platformAdminRouter.get("/platform-admin/audit-logs", requirePlatformAdminAuth, async (req: Request, res: Response) => {
-  const { targetType, targetId } = req.query as { targetType?: string; targetId?: string };
+  const { targetType, targetId, action, platformAdminUserId, from, to } = req.query as {
+    targetType?: string;
+    targetId?: string;
+    action?: string;
+    platformAdminUserId?: string;
+    from?: string;
+    to?: string;
+  };
+  const fromDate = from ? new Date(from) : undefined;
+  const toDate = to ? new Date(to) : undefined;
   const logs = await prisma.auditLog.findMany({
-    where: { ...(targetType ? { targetType } : {}), ...(targetId ? { targetId } : {}) },
+    where: {
+      ...(targetType ? { targetType } : {}),
+      ...(targetId ? { targetId } : {}),
+      ...(action ? { action: { contains: action, mode: "insensitive" } } : {}),
+      ...(platformAdminUserId ? { platformAdminUserId } : {}),
+      ...(fromDate || toDate
+        ? { createdAt: { ...(fromDate && !Number.isNaN(fromDate.getTime()) ? { gte: fromDate } : {}), ...(toDate && !Number.isNaN(toDate.getTime()) ? { lte: toDate } : {}) } }
+        : {}),
+    },
     orderBy: { createdAt: "desc" },
     take: 200,
+    include: { platformAdminUser: { select: { id: true, name: true, email: true } } },
   });
   return res.json({ success: true, data: logs, error: null });
+});
+
+// Lista enxuta de admins da plataforma, usada só para popular o filtro "admin
+// responsável" do audit log — nunca expõe hash de senha/segredo TOTP.
+platformAdminRouter.get("/platform-admin/admin-users", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
+  const admins = await prisma.platformAdminUser.findMany({
+    select: { id: true, name: true, email: true, role: true, active: true },
+    orderBy: { name: "asc" },
+  });
+  return res.json({ success: true, data: admins, error: null });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

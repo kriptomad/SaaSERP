@@ -88,14 +88,38 @@ export interface AuditLogEntry {
   targetId: string | null;
   metadata: Record<string, unknown>;
   createdAt: string;
+  platformAdminUser?: { id: string; name: string; email: string };
 }
 
-export function listAuditLogs(params?: { targetType?: string; targetId?: string }): Promise<AuditLogEntry[]> {
+export function listAuditLogs(params?: {
+  targetType?: string;
+  targetId?: string;
+  action?: string;
+  platformAdminUserId?: string;
+  from?: string;
+  to?: string;
+}): Promise<AuditLogEntry[]> {
   const query = new URLSearchParams();
   if (params?.targetType) query.set("targetType", params.targetType);
   if (params?.targetId) query.set("targetId", params.targetId);
+  if (params?.action) query.set("action", params.action);
+  if (params?.platformAdminUserId) query.set("platformAdminUserId", params.platformAdminUserId);
+  if (params?.from) query.set("from", params.from);
+  if (params?.to) query.set("to", params.to);
   const qs = query.toString();
   return platformAdminApi.get(`/platform-admin/audit-logs${qs ? `?${qs}` : ""}`);
+}
+
+export interface PlatformAdminUserSummary {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  active: boolean;
+}
+
+export function listPlatformAdminUsers(): Promise<PlatformAdminUserSummary[]> {
+  return platformAdminApi.get("/platform-admin/admin-users");
 }
 
 export interface SystemParameter {
