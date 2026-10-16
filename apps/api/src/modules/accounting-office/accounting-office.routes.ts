@@ -34,6 +34,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import {
   grantAccountingEngagement,
   acceptAccountingEngagement,
@@ -132,7 +133,7 @@ async function requirePartnerManage(req: Request, res: Response): Promise<boolea
 // PERFIL DO ESCRITÓRIO (Capítulo 21.18.1/21.18.6)
 // ─────────────────────────────────────────────────────────────────────────
 
-accountingOfficeRouter.get("/accounting-firm-profile", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.get("/accounting-firm-profile", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
   const profile = await prisma.accountingFirmProfile.findUnique({ where: { tenantId } });
   return res.json({ success: true, data: profile, error: null });
@@ -168,7 +169,7 @@ accountingOfficeRouter.put("/accounting-firm-profile", requireAuth, async (req: 
 // VÍNCULO (PROCURAÇÃO ELETRÔNICA INTERNA) — Capítulo 21.18.2/21.18.3
 // ─────────────────────────────────────────────────────────────────────────
 
-accountingOfficeRouter.get("/accounting-engagements", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.get("/accounting-engagements", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireManage(req, res))) return;
   const { tenantId } = req.session!;
   const engagements = await prisma.accountingEngagement.findMany({
@@ -185,7 +186,7 @@ const grantEngagementSchema = z.object({
 });
 
 // Concedida pelo tenant-cliente (lojista/residência): "contratar/autorizar meu contador".
-accountingOfficeRouter.post("/accounting-engagements", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.post("/accounting-engagements", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireManage(req, res))) return;
   const parsed = grantEngagementSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -208,7 +209,7 @@ accountingOfficeRouter.post("/accounting-engagements", requireAuth, async (req: 
 });
 
 // Aceita pelo tenant-escritório, dentro da janela de 30 dias.
-accountingOfficeRouter.post("/accounting-engagements/:id/accept", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.post("/accounting-engagements/:id/accept", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireManage(req, res))) return;
   const { tenantId, userId } = req.session!;
   const engagement = await prisma.accountingEngagement.findUnique({ where: { id: req.params.id } });
@@ -235,7 +236,7 @@ accountingOfficeRouter.post("/accounting-engagements/:id/accept", requireAuth, a
 const revokeEngagementSchema = z.object({ reason: z.string().optional() });
 
 // Revogada por qualquer um dos dois lados (Capítulo 21.18.3 — simetria com o e-CAC real).
-accountingOfficeRouter.post("/accounting-engagements/:id/revoke", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.post("/accounting-engagements/:id/revoke", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireManage(req, res))) return;
   const { tenantId, userId } = req.session!;
   const engagement = await prisma.accountingEngagement.findUnique({ where: { id: req.params.id } });
@@ -263,7 +264,7 @@ accountingOfficeRouter.post("/accounting-engagements/:id/revoke", requireAuth, a
 // consolidada, em vez de depender da mesma tela genérica do lado cliente.
 // ─────────────────────────────────────────────────────────────────────────
 
-accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireTaskRead(req, res))) return;
   const { tenantId } = req.session!;
 
@@ -331,7 +332,7 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, async (req
 // e o ajuste manual de status pelo contador)
 // ─────────────────────────────────────────────────────────────────────────
 
-accountingOfficeRouter.get("/accounting-tasks", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.get("/accounting-tasks", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireTaskRead(req, res))) return;
   const { tenantId } = req.session!;
   const { competencia, status } = req.query as { competencia?: string; status?: string };
@@ -351,7 +352,7 @@ const updateTaskSchema = z.object({
   assignedUserId: z.string().uuid().nullable().optional(),
 });
 
-accountingOfficeRouter.patch("/accounting-tasks/:id", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.patch("/accounting-tasks/:id", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireTaskWrite(req, res))) return;
   const parsed = updateTaskSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -383,7 +384,7 @@ accountingOfficeRouter.patch("/accounting-tasks/:id", requireAuth, async (req: R
 // honesta e completa do que fica fora de escopo e por quê).
 // ─────────────────────────────────────────────────────────────────────────
 
-accountingOfficeRouter.get("/official-tax-documents", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.get("/official-tax-documents", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireDocumentRead(req, res))) return;
   const { tenantId } = req.session!;
   const { documentType } = req.query as { documentType?: string };
@@ -431,7 +432,7 @@ const generateDocumentSchema = z.object({
  * vínculo ATIVO com o tenant-cliente; Caminho B (lojista autogerando) não
  * exige vínculo nenhum.
  */
-accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireDocumentWrite(req, res))) return;
   const { tenantId } = req.session!;
 
@@ -558,7 +559,7 @@ accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, asy
 });
 
 /** URL assinada de download do arquivo gerado (reaproveita o mesmo presign de leitura do R2 usado em `storage.routes.ts`). */
-accountingOfficeRouter.get("/official-tax-documents/:id/download", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.get("/official-tax-documents/:id/download", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireDocumentRead(req, res))) return;
   const { tenantId } = req.session!;
   const document = await prisma.officialTaxDocument.findUnique({ where: { id: req.params.id } });
@@ -591,7 +592,7 @@ accountingOfficeRouter.get("/official-tax-documents/:id/download", requireAuth, 
 // do Sócio (ver `ecf-reinf-dctfweb.service.ts`).
 // ─────────────────────────────────────────────────────────────────────────
 
-accountingOfficeRouter.get("/company-partners", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.get("/company-partners", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requirePartnerRead(req, res))) return;
   const { tenantId } = req.session!;
   const partners = await prisma.companyPartner.findMany({ where: { tenantId }, orderBy: { name: "asc" } });
@@ -604,7 +605,7 @@ const upsertPartnerSchema = z.object({
   participationPercentage: z.number().min(0).max(100),
 });
 
-accountingOfficeRouter.post("/company-partners", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.post("/company-partners", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requirePartnerManage(req, res))) return;
   const { tenantId } = req.session!;
   const parsed = upsertPartnerSchema.safeParse(req.body);
@@ -624,7 +625,7 @@ accountingOfficeRouter.post("/company-partners", requireAuth, async (req: Reques
   }
 });
 
-accountingOfficeRouter.patch("/company-partners/:id", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.patch("/company-partners/:id", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requirePartnerManage(req, res))) return;
   const { tenantId } = req.session!;
   const parsed = upsertPartnerSchema.partial().safeParse(req.body);
@@ -646,7 +647,7 @@ accountingOfficeRouter.patch("/company-partners/:id", requireAuth, async (req: R
   return res.json({ success: true, data: partner, error: null });
 });
 
-accountingOfficeRouter.delete("/company-partners/:id", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.delete("/company-partners/:id", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requirePartnerManage(req, res))) return;
   const { tenantId } = req.session!;
   const existing = await prisma.companyPartner.findFirst({ where: { id: req.params.id, tenantId } });
@@ -666,7 +667,7 @@ accountingOfficeRouter.delete("/company-partners/:id", requireAuth, async (req: 
   return res.json({ success: true, data: { deleted: true }, error: null });
 });
 
-accountingOfficeRouter.get("/company-partners/:id/payouts", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.get("/company-partners/:id/payouts", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requirePartnerRead(req, res))) return;
   const { tenantId } = req.session!;
   const partner = await prisma.companyPartner.findFirst({ where: { id: req.params.id, tenantId } });
@@ -693,7 +694,7 @@ const createPayoutSchema = z
     message: "A soma de inssWithheld + irrfWithheld não pode exceder grossAmount.",
   });
 
-accountingOfficeRouter.post("/company-partners/:id/payouts", requireAuth, async (req: Request, res: Response) => {
+accountingOfficeRouter.post("/company-partners/:id/payouts", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requirePartnerManage(req, res))) return;
   const { tenantId } = req.session!;
   const partner = await prisma.companyPartner.findFirst({ where: { id: req.params.id, tenantId } });

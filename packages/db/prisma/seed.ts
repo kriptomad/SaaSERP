@@ -134,6 +134,19 @@ const MODULE_CATALOG = [
     monthlyPrice: "29.90",
     description: "Catálogo público com pedidos online (retirada/entrega), sem risco de overselling — o lojista confirma cada pedido antes de virar venda real no PDV (Capítulo 8.5).",
   },
+  // GAP DE AUDITORIA FECHADO (Rodada 6, ALTO) — `accounting-office.routes.ts`
+  // (Capítulo 21.18, vínculo com escritório de contabilidade virtual) nunca teve
+  // NENHUM módulo/gatekeeper: qualquer tenant autenticado com a permissão RBAC
+  // certa acessava o módulo mesmo sem contratá-lo, já que a rota só usava
+  // `requireAuth`. Agora existe como módulo à la carte real, consistente com os
+  // demais módulos pagos desta lista.
+  {
+    code: "ACCOUNTING_OFFICE",
+    label: "Escritório de Contabilidade Virtual",
+    monthlyPrice: "39.90",
+    description:
+      "Vínculo digital com escritório de contabilidade (procuração eletrônica interna), tarefas recorrentes e geração de ECD/DEFIS/EFD-Reinf/DCTFWeb a partir dos dados do Filitech (Capítulo 21.18).",
+  },
 ] as const;
 
 // Capítulo 2.3/2.4/2.5 — planos base + Filitech Pessoal (B2C).

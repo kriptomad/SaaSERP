@@ -23,6 +23,15 @@ const CATEGORIES = [
   "STOCK_LOW",
   "FISCAL_DOCUMENT_REJECTED",
   "SYSTEM_ANNOUNCEMENT",
+  // GAP DE AUDITORIA FECHADO (Rodada 6, MÉDIO) — VACCINE_REMINDER e
+  // TEF_CONFIRMATION_FAILED já existiam em `NotifyTenantInput["category"]` (ver
+  // notify.service.ts) mas nunca apareciam aqui nem em `PREFERENCE_CATEGORIES`;
+  // resultado real: `dispatchUserChannels()` pulava SILENCIOSAMENTE todo o fan-out
+  // multicanal (WhatsApp/SMS/e-mail/push) para essas duas categorias — só o
+  // registro in-app era criado, e o usuário não tinha nem como configurar canal
+  // nenhum para elas na tela de preferências.
+  "VACCINE_REMINDER",
+  "TEF_CONFIRMATION_FAILED",
 ] as const;
 type Category = (typeof CATEGORIES)[number];
 

@@ -16,6 +16,7 @@ export const NOTIFICATION_CATEGORIES = [
   "FISCAL_DOCUMENT_REJECTED",
   "SYSTEM_ANNOUNCEMENT",
   "TEF_CONFIRMATION_FAILED",
+  "VACCINE_REMINDER",
 ] as const;
 export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
 
@@ -29,6 +30,7 @@ export const NOTIFICATION_CATEGORY_LABEL: Record<NotificationCategory, string> =
   FISCAL_DOCUMENT_REJECTED: "Documento fiscal rejeitado",
   SYSTEM_ANNOUNCEMENT: "Comunicado do sistema",
   TEF_CONFIRMATION_FAILED: "Falha ao confirmar TEF/maquininha",
+  VACCINE_REMINDER: "Lembrete de vacina do pet",
 };
 
 export interface NotificationPreferenceChannels {

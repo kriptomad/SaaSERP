@@ -23,7 +23,7 @@
 //   POST /liquor-ledger/entries continua disponível para correções/ajustes.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
@@ -46,6 +46,8 @@ function notFound(res: Response, message: string) {
 function validationError(res: Response, details: unknown) {
   return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details } });
 }
+
+class InsufficientBorrowedBalanceError extends Error {}
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -247,8 +249,42 @@ liquorLedgerRouter.post("/liquor-ledger/entries", requireAuth, requireModule("LI
     if (!sale) return notFound(res, "Venda informada não encontrada.");
   }
 
-  const entry = await prisma.returnableContainerLedger.create({
-    data: { tenantId, clientId, productId, direction, quantity, saleId: saleId ?? null },
-  });
-  return res.status(201).json({ success: true, data: entry, error: null });
+  try {
+    // GAP DE AUDITORIA FECHADO (Rodada 6, ALTO) — o saldo de cascos emprestados era
+    // calculado apenas em tempo de LEITURA (GET /liquor-ledger/overdue), nunca
+    // validado/travado na ESCRITA: dois lançamentos RETURNED concorrentes para o
+    // mesmo (tenantId, clientId, productId) podiam ambos "ter sucesso" e levar o
+    // saldo de cascos emprestados abaixo de zero (devolução fantasma). O `SELECT ...
+    // FOR UPDATE` abaixo bloqueia fisicamente TODAS as linhas existentes dessa chave
+    // até o commit — a segunda transação concorrente só enxerga o saldo já
+    // atualizado da primeira, nunca um saldo obsoleto.
+    const entry = await prisma.$transaction(
+      async (tx) => {
+        if (direction === "RETURNED") {
+          const rows = await tx.$queryRaw<{ direction: string; quantity: number }[]>`
+            SELECT direction, quantity
+            FROM returnable_container_ledger
+            WHERE "tenantId" = ${tenantId} AND "clientId" = ${clientId} AND "productId" = ${productId}
+            FOR UPDATE
+          `;
+          const outstanding = rows.reduce((sum, r) => (r.direction === "BORROWED" ? sum + r.quantity : sum - r.quantity), 0);
+          if (quantity > outstanding) {
+            throw new InsufficientBorrowedBalanceError(
+              `Saldo emprestado insuficiente: cliente tem ${outstanding} casco(s) em aberto, não pode devolver ${quantity}.`,
+            );
+          }
+        }
+        return tx.returnableContainerLedger.create({
+          data: { tenantId, clientId, productId, direction, quantity, saleId: saleId ?? null },
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    return res.status(201).json({ success: true, data: entry, error: null });
+  } catch (err) {
+    if (err instanceof InsufficientBorrowedBalanceError) {
+      return res.status(409).json({ success: false, data: null, error: { code: "INSUFFICIENT_BORROWED_BALANCE", message: err.message } });
+    }
+    throw err;
+  }
 });

@@ -121,6 +121,13 @@ export const MODULE_CATALOG: ModuleCatalogItem[] = [
     monthlyPrice: 59.9,
     description: "Consignação de seminovos, publicação em portais de anúncio e repasse ao consignante.",
   },
+  {
+    code: "ACCOUNTING_OFFICE",
+    label: "Escritório de Contabilidade Virtual",
+    monthlyPrice: 39.9,
+    description:
+      "Vínculo digital com escritório de contabilidade (procuração eletrônica interna), tarefas recorrentes e geração de ECD/DEFIS/EFD-Reinf/DCTFWeb.",
+  },
 ];
 
 export interface NicheDefinition {

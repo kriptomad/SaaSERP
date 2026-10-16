@@ -45,10 +45,11 @@ export interface NotifyTenantInput {
 // de NotificationPreference (upsert nunca aconteceu para aquele usuário/categoria).
 const DEFAULT_CHANNELS = { inApp: true, email: true, push: false, whatsapp: false, sms: false };
 
-// Categoria de NotificationPreference não inclui VACCINE_REMINDER (catálogo mais
-// restrito, só as categorias expostas em /notification-preferences); quando
-// `notifyTenant` recebe essa categoria o fan-out multicanal é pulado silenciosamente
-// (o in-app continua gravado normalmente) — nunca falha por categoria desconhecida.
+// Categoria de NotificationPreference: GAP DE AUDITORIA FECHADO (Rodada 6, MÉDIO) —
+// VACCINE_REMINDER e TEF_CONFIRMATION_FAILED agora fazem parte do catálogo completo
+// (idêntico a `notification-settings.routes.ts`/CATEGORIES); antes, `notifyTenant`
+// com essas categorias pulava TODO o fan-out multicanal (WhatsApp/SMS/e-mail/push)
+// silenciosamente — só o registro in-app era gravado.
 const PREFERENCE_CATEGORIES = new Set([
   "WORK_ORDER_STATUS",
   "SUPPORT_TICKET_UPDATE",
@@ -58,6 +59,7 @@ const PREFERENCE_CATEGORIES = new Set([
   "STOCK_LOW",
   "FISCAL_DOCUMENT_REJECTED",
   "SYSTEM_ANNOUNCEMENT",
+  "VACCINE_REMINDER",
   "TEF_CONFIRMATION_FAILED",
 ]);
 

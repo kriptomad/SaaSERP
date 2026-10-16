@@ -158,14 +158,14 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "contabilidade",
     label: "Contabilidade",
-    items: [{ id: "contabilidade", label: "Escritório contábil", path: "/contabilidade", icon: <AccountBalanceIcon /> }],
+    items: [{ id: "contabilidade", label: "Escritório contábil", path: "/contabilidade", icon: <AccountBalanceIcon />, moduleCode: "ACCOUNTING_OFFICE" }],
   },
   {
     id: "contabilidade-escritorio",
     label: "Minha Carteira",
     tenantTypes: ["ACCOUNTING_OFFICE"],
     items: [
-      { id: "carteira-clientes", label: "Carteira de Clientes", path: "/contabilidade/carteira", icon: <AccountBalanceIcon /> },
+      { id: "carteira-clientes", label: "Carteira de Clientes", path: "/contabilidade/carteira", icon: <AccountBalanceIcon />, moduleCode: "ACCOUNTING_OFFICE" },
     ],
   },
   {
