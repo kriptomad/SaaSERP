@@ -72,6 +72,29 @@ subscriptionRouter.post("/billing/subscription/cancel", requireAuth, async (req:
     return res.json({ success: true, data: subscription, error: null });
   }
 
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 9, CRÍTICO): o check acima
+  // (`findFirst` seguido de chamadas de rede ao provedor + reembolso) não era
+  // atômico — duas requisições concorrentes (ex.: duplo-clique no botão
+  // "Cancelar assinatura") passavam AMBAS pela checagem antes de qualquer uma
+  // persistir `cancelRequestedAt`, podendo disparar DOIS reembolsos para a MESMA
+  // cobrança (dinheiro real saindo em duplicidade da conta da Filitech). Agora a
+  // "reivindicação" de `cancelRequestedAt` é uma operação condicional atômica no
+  // banco (`updateMany` com `WHERE cancelRequestedAt IS NULL`), executada ANTES de
+  // qualquer chamada ao Stripe/Asaas — só a requisição que vence a corrida (count
+  // === 1) prossegue para reembolsar; a perdedora recebe a assinatura já
+  // atualizada pela vencedora, sem reembolsar nada.
+  const claim = await prisma.subscription.updateMany({
+    where: { id: subscription.id, cancelRequestedAt: null, status: { not: "CANCELLED" } },
+    data: { cancelRequestedAt: new Date() },
+  });
+  if (claim.count === 0) {
+    // Perdeu a corrida: outra requisição já reivindicou o cancelamento. Devolve o
+    // estado atual (já atualizado pela vencedora ou prestes a ser) em vez de
+    // tentar reembolsar de novo.
+    const current = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
+    return res.json({ success: true, data: current, error: null });
+  }
+
   const immediate = withinRegretWindow(subscription.firstChargedAt);
 
   if (immediate) {
@@ -93,7 +116,7 @@ subscriptionRouter.post("/billing/subscription/cancel", requireAuth, async (req:
     const updated = await prisma.$transaction([
       prisma.subscription.update({
         where: { id: subscription.id },
-        data: { status: "CANCELLED", cancelRequestedAt: new Date(), cancelAtPeriodEnd: true },
+        data: { status: "CANCELLED", cancelAtPeriodEnd: true },
       }),
       prisma.tenant.update({ where: { id: tenantId }, data: { status: "CANCELLED" } }),
     ]);
@@ -111,7 +134,7 @@ subscriptionRouter.post("/billing/subscription/cancel", requireAuth, async (req:
 
   const updated = await prisma.subscription.update({
     where: { id: subscription.id },
-    data: { cancelRequestedAt: new Date(), cancelAtPeriodEnd: true },
+    data: { cancelAtPeriodEnd: true },
   });
 
   return res.json({ success: true, data: updated, error: null });

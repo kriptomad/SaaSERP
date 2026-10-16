@@ -447,7 +447,16 @@ personalPlanningRouter.post("/personal/bills/:id/pay", requireAuth, async (req: 
 personalPlanningRouter.get("/personal/net-worth-snapshots", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const snapshots = await prisma.netWorthSnapshot.findMany({ where: { tenantId }, orderBy: { snapshotDate: "asc" } });
+  // GAP DE AUDITORIA FECHADO (mega-audit rodada 9): snapshots acumulam um
+  // registro por dia indefinidamente — sem teto, a consulta cresceria sem limite
+  // ao longo dos anos. Cap defensivo nos últimos 1000 dias (~2.7 anos).
+  const MAX_SNAPSHOTS = 1000;
+  const recentSnapshots = await prisma.netWorthSnapshot.findMany({
+    where: { tenantId },
+    orderBy: { snapshotDate: "desc" },
+    take: MAX_SNAPSHOTS,
+  });
+  const snapshots = recentSnapshots.slice().reverse();
   return res.json({ success: true, data: snapshots, error: null });
 });
 

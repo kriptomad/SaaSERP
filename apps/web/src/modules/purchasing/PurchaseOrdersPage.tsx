@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Button, Chip, MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import UploadFileIcon from "@mui/icons-material/UploadFileOutlined";
+import ReceiptLongIcon from "@mui/icons-material/ReceiptLongOutlined";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link as RouterLink } from "react-router-dom";
 import { orderTotal, purchaseOrdersApi, PO_STATUS, type PurchaseOrder, type PurchaseOrderStatus } from "./api";
@@ -41,6 +42,9 @@ export function PurchaseOrdersPage() {
           <Stack direction="row" spacing={1}>
             <Button component={RouterLink} to="/compras/importar-xml" variant="outlined" startIcon={<UploadFileIcon />}>
               Importar XML de NF-e
+            </Button>
+            <Button component={RouterLink} to="/compras/notas-recebidas" variant="outlined" startIcon={<ReceiptLongIcon />}>
+              Notas recebidas
             </Button>
             <Button component={RouterLink} to="/compras/nova" variant="contained" startIcon={<AddIcon />}>
               Nova ordem de compra

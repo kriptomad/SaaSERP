@@ -17,6 +17,9 @@ import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { recalculateRecipeCostsForIngredient } from "../../services/production/recalculate-recipe-cost.service";
 import { manifestRecipientOperation, RecipientManifestationAlreadyFinalError } from "../fiscal/manifest-recipient.service";
+import { createModuleLogger } from "../../lib/logger";
+
+const log = createModuleLogger("purchase-orders.routes");
 
 export const purchaseOrdersRouter = Router();
 
@@ -569,8 +572,14 @@ purchaseOrdersRouter.post("/purchase-orders/:id/receive", requireAuth, async (re
           await manifestRecipientOperation(prisma, { tenantId, fiscalDocumentId: note.id, manifestationType: "CONFIRMACAO_DA_OPERACAO" });
         } catch (manifestErr) {
           if (!(manifestErr instanceof RecipientManifestationAlreadyFinalError)) {
-            // eslint-disable-next-line no-console
-            console.error(`[purchase-orders] falha ao manifestar CONFIRMACAO_DA_OPERACAO para FiscalDocument ${note.id}:`, manifestErr);
+            // GAP DE AUDITORIA FECHADO (mega-audit rodada 9): apenas logar em
+            // console.error escondia a falha — o evento de manifestação fica
+            // persistido em status PENDING (nunca AUTHORIZED/terminal), então a
+            // nota permanece elegível para nova tentativa manual via
+            // `/fiscal/notas-recebidas/:id/manifestar` (ManifestacaoRecipienteDialog
+            // no painel fiscal). Logger estruturado garante que a falha apareça nos
+            // dashboards de observabilidade em produção, não só no stdout local.
+            log.error({ err: manifestErr, fiscalDocumentId: note.id, tenantId }, "falha ao manifestar CONFIRMACAO_DA_OPERACAO após recebimento de pedido de compra");
           }
         }
       }

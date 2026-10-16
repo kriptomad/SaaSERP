@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import { prismaUnscoped } from "@filitech/db";
 import { getStripeClient } from "./stripe.client";
 import { getPlatformSecret } from "../../lib/platform-secrets";
-import { handlePaymentFailure, handlePaymentRecovered, handleSubscriptionCanceled } from "./dunning.service";
+import { handlePaymentFailure, handlePaymentRecovered, handleSubscriptionCanceled, handlePaymentReversed } from "./dunning.service";
 import { invalidateTenantModuleCache } from "../../middlewares/gatekeeper.middleware";
 import { createModuleLogger } from "../../lib/logger";
 
@@ -158,6 +158,46 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
       return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
     }
 
+    return res.json({ received: true });
+  }
+
+  // GAP DE AUDITORIA FECHADO (mega-audit rodada 9): `charge.refunded` e
+  // `charge.dispute.created` não têm `subscription`/`id`-de-assinatura diretamente no
+  // payload (o objeto é um Charge/Dispute, não uma Invoice/Subscription) — é preciso
+  // resolver a invoice associada para achar a assinatura. Tratado ANTES do lookup
+  // genérico abaixo, que nunca encontraria nada para esses dois tipos de evento.
+  if (event.type === "charge.refunded" || event.type === "charge.dispute.created") {
+    const chargeOrDisputeObject = event.data.object as { invoice?: string | null; charge?: string | null };
+    let invoiceId = chargeOrDisputeObject.invoice ?? null;
+    if (!invoiceId && chargeOrDisputeObject.charge) {
+      const charge = await stripe.charges.retrieve(chargeOrDisputeObject.charge);
+      invoiceId = typeof charge.invoice === "string" ? charge.invoice : charge.invoice?.id ?? null;
+    }
+    if (!invoiceId) {
+      return res.json({ received: true, ignored: "no-invoice-reference" });
+    }
+    const invoice = await stripe.invoices.retrieve(invoiceId);
+    const invoiceSubscriptionId = typeof invoice.subscription === "string" ? invoice.subscription : invoice.subscription?.id;
+    if (!invoiceSubscriptionId) {
+      return res.json({ received: true, ignored: "invoice-not-subscription-billing" });
+    }
+    const reversedSubscription = await prismaUnscoped.subscription.findUnique({
+      where: { externalSubscriptionId: invoiceSubscriptionId },
+      select: { id: true, tenantId: true },
+    });
+    if (!reversedSubscription) {
+      return res.json({ received: true, ignored: "unknown-subscription" });
+    }
+    const isNewReversal = await recordBillingEventOnce("stripe", event.id, reversedSubscription.id, event.type, event.data.object);
+    if (!isNewReversal) {
+      return res.json({ received: true, duplicate: true });
+    }
+    try {
+      await handlePaymentReversed(reversedSubscription.tenantId, reversedSubscription.id, event.type === "charge.dispute.created" ? "CHARGEBACK" : "REFUNDED");
+    } catch (err) {
+      await releaseBillingEvent("stripe", event.id);
+      return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
+    }
     return res.json({ received: true });
   }
 
@@ -314,6 +354,16 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
       case "PAYMENT_RECEIVED":
       case "PAYMENT_CONFIRMED":
         await handlePaymentRecovered(subscription.tenantId, subscription.id);
+        break;
+      // GAP DE AUDITORIA FECHADO (mega-audit rodada 9): reembolso/chargeback do
+      // Asaas não tinha tratamento algum — o tenant continuava ACTIVE mesmo com o
+      // dinheiro já devolvido ao cliente.
+      case "PAYMENT_REFUNDED":
+        await handlePaymentReversed(subscription.tenantId, subscription.id, "REFUNDED");
+        break;
+      case "PAYMENT_CHARGEBACK_REQUESTED":
+      case "PAYMENT_CHARGEBACK_DISPUTE":
+        await handlePaymentReversed(subscription.tenantId, subscription.id, "CHARGEBACK");
         break;
       default:
         break;

@@ -80,6 +80,41 @@ export async function handleSubscriptionCanceled(tenantId: string, subscriptionI
   });
 }
 
+// GAP DE AUDITORIA FECHADO (mega-audit rodada 9, ALTO): não existia tratamento
+// algum para reembolso/estorno/chargeback reportado pelo provedor DEPOIS que o
+// pagamento já havia sido confirmado (ex.: Stripe `charge.refunded` ou
+// `charge.dispute.created`; Asaas `PAYMENT_REFUNDED`/`PAYMENT_CHARGEBACK_REQUESTED`).
+// Sem isto, o dinheiro podia voltar para o cliente enquanto o tenant permanecia
+// ACTIVE e com todos os módulos liberados — a Filitech ficaria prestando serviço
+// de graça (ou pior, financiando o próprio calote) indefinidamente, pois nenhuma
+// rotina de varredura cobre esse caso (ele não é "atraso de pagamento", é
+// reversão de um pagamento já dado como recebido). Suspende imediatamente, assim
+// como cancelamento definitivo — o lojista precisa regularizar com um novo
+// pagamento para reativar.
+export async function handlePaymentReversed(
+  tenantId: string,
+  subscriptionId: string,
+  reason: "REFUNDED" | "CHARGEBACK",
+) {
+  await prismaUnscoped.$transaction([
+    prismaUnscoped.subscription.update({ where: { id: subscriptionId }, data: { status: "SUSPENDED" } }),
+    prismaUnscoped.tenant.update({ where: { id: tenantId }, data: { status: "SUSPENDED", gracePeriodEndsAt: null } }),
+  ]);
+  await notifyTenant({
+    tenantId,
+    category: "BILLING_DUNNING",
+    severity: "CRITICAL",
+    title: reason === "CHARGEBACK" ? "Cobrança contestada (chargeback)" : "Pagamento estornado",
+    body:
+      reason === "CHARGEBACK"
+        ? "O pagamento da sua assinatura foi contestado junto à operadora do cartão e o acesso ao sistema foi suspenso. Entre em contato com o suporte para regularizar."
+        : "O pagamento da sua assinatura foi estornado e o acesso ao sistema foi suspenso. Realize um novo pagamento para reativar.",
+    linkRoute: "/configuracoes/cobranca",
+    sourceType: "SUBSCRIPTION",
+    sourceId: tenantId,
+  });
+}
+
 export async function handlePaymentRecovered(tenantId: string, subscriptionId: string) {
   const current = await prismaUnscoped.subscription.findUnique({ where: { id: subscriptionId }, select: { firstChargedAt: true } });
   await prismaUnscoped.$transaction([

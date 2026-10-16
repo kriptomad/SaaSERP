@@ -115,7 +115,17 @@ personalInvestmentsRouter.get("/personal/investments/:id/price-history", require
   if (!investment) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Investimento não encontrado." } });
   }
-  const history = await prisma.personalInvestmentPriceHistory.findMany({ where: { investmentId: investment.id }, orderBy: { priceDate: "asc" } });
+  // GAP DE AUDITORIA FECHADO (mega-audit rodada 9): findMany sem limite podia
+  // retornar anos de histórico diário em uma única resposta. Cap defensivo nas
+  // últimas 1000 cotações (≈ 4 anos de pregões), suficiente para qualquer gráfico/
+  // relatório do produto e evitando payloads/consultas sem teto.
+  const MAX_PRICE_HISTORY_POINTS = 1000;
+  const recentHistory = await prisma.personalInvestmentPriceHistory.findMany({
+    where: { investmentId: investment.id },
+    orderBy: { priceDate: "desc" },
+    take: MAX_PRICE_HISTORY_POINTS,
+  });
+  const history = recentHistory.slice().reverse();
   return res.json({ success: true, data: history, error: null });
 });
 

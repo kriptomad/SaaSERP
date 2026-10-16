@@ -101,6 +101,40 @@ export const purchaseOrdersApi = {
   confirmNfeImport: (input: ConfirmNfeImportInput) => api.post<PurchaseOrder>("/purchase-orders/import-nfe/confirm", input),
 };
 
+// GAP DE AUDITORIA FECHADO (mega-audit rodada 9): `/fiscal/notas-recebidas` e
+// `/fiscal/notas-recebidas/:id/manifestar` existiam no backend (Capítulo 21.19.4)
+// desde a auditoria de contabilidade, mas nenhuma tela os consumia — o lojista não
+// tinha como ver o status da Manifestação do Destinatário nem se manifestar
+// manualmente (OPERACAO_NAO_REALIZADA/DESCONHECIMENTO_DA_OPERACAO) quando uma
+// CONFIRMACAO_DA_OPERACAO automática falhava (ver purchase-orders.routes.ts).
+export type RecipientManifestationType =
+  | "CIENCIA_DA_OPERACAO"
+  | "CONFIRMACAO_DA_OPERACAO"
+  | "OPERACAO_NAO_REALIZADA"
+  | "DESCONHECIMENTO_DA_OPERACAO";
+
+export interface IncomingFiscalNote {
+  id: string;
+  accessKey: string;
+  emitterCnpj: string;
+  emitterName: string;
+  totalAmount: string;
+  authorizedAt: string;
+  supplier: { id: string; name: string } | null;
+  purchaseOrder: { id: string; orderNumber: number } | null;
+  lastManifestation: { type: RecipientManifestationType; status: "PENDING" | "AUTHORIZED" | "REJECTED"; createdAt: string } | null;
+}
+
+export interface ManualManifestInput {
+  manifestationType: "OPERACAO_NAO_REALIZADA" | "DESCONHECIMENTO_DA_OPERACAO";
+  justification?: string;
+}
+
+export const incomingFiscalNotesApi = {
+  list: () => api.get<IncomingFiscalNote[]>("/fiscal/notas-recebidas"),
+  manifest: (id: string, input: ManualManifestInput) => api.post<unknown>(`/fiscal/notas-recebidas/${id}/manifestar`, input),
+};
+
 export function orderTotal(order: Pick<PurchaseOrder, "items">): number {
   return order.items.reduce((sum, i) => sum + Number(i.quantityOrdered) * Number(i.unitCost), 0);
 }

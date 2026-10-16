@@ -24,6 +24,7 @@ import { PurchaseOrdersPage } from "./modules/purchasing/PurchaseOrdersPage";
 import { PurchaseOrderFormPage } from "./modules/purchasing/PurchaseOrderFormPage";
 import { PurchaseOrderDetailPage } from "./modules/purchasing/PurchaseOrderDetailPage";
 import { NfeXmlImportPage } from "./modules/purchasing/NfeXmlImportPage";
+import { IncomingFiscalNotesPage } from "./modules/purchasing/IncomingFiscalNotesPage";
 import { CashRegisterPage } from "./modules/cash-register/CashRegisterPage";
 import { PayablesPage, ReceivablesPage } from "./modules/financial/AccountsPage";
 import { FinancialDashboardPage } from "./modules/financial/FinancialDashboardPage";
@@ -185,6 +186,7 @@ export function App() {
             <Route path="/compras" element={<PurchaseOrdersPage />} />
             <Route path="/compras/nova" element={<PurchaseOrderFormPage />} />
             <Route path="/compras/importar-xml" element={<NfeXmlImportPage />} />
+            <Route path="/compras/notas-recebidas" element={<IncomingFiscalNotesPage />} />
             <Route path="/compras/:id" element={<PurchaseOrderDetailPage />} />
             <Route path="/caixa" element={<CashRegisterPage />} />
             <Route path="/financeiro" element={<FinancialDashboardPage />} />
