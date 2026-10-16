@@ -15,6 +15,8 @@ const ACCEPTANCE_WINDOW_DAYS = 30;
 export class EngagementNotAcceptableError extends Error {}
 export class EngagementAcceptanceExpiredError extends Error {}
 export class NoActiveEngagementError extends Error {}
+export class DuplicateActiveEngagementError extends Error {}
+export class EngagementNotRevocableError extends Error {}
 
 export async function grantAccountingEngagement(input: {
   clientTenantId: string;
@@ -22,6 +24,27 @@ export async function grantAccountingEngagement(input: {
   scopes: string[];
   grantedByUserId: string;
 }) {
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 8): antes, nada impedia o mesmo
+  // tenant-cliente de conceder DUAS procurações concorrentes (PENDING ou ACTIVE)
+  // ao MESMO escritório — ex.: clique duplo no botão "Autorizar contador" criava
+  // dois registros. `assertAccountingAccess()` usa `findFirst` (ordem não
+  // determinística) e a trilha de auditoria ficaria fragmentada entre dois
+  // vínculos para o mesmo relacionamento real. Trava em nível de aplicação +
+  // índice único parcial no banco (ver migration) como defesa em profundidade
+  // contra corrida entre duas requisições concorrentes.
+  const existing = await prismaUnscoped.accountingEngagement.findFirst({
+    where: {
+      clientTenantId: input.clientTenantId,
+      accountingFirmTenantId: input.accountingFirmTenantId,
+      status: { in: ["PENDING_ACCOUNTANT_ACCEPTANCE", "ACTIVE"] },
+    },
+  });
+  if (existing) {
+    throw new DuplicateActiveEngagementError(
+      `Já existe um vínculo ${existing.status === "ACTIVE" ? "ativo" : "pendente de aceite"} com este escritório.`,
+    );
+  }
+
   const grantedAt = new Date();
   const acceptanceDeadlineAt = new Date(grantedAt.getTime() + ACCEPTANCE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 
@@ -81,6 +104,16 @@ export async function revokeAccountingEngagement(
   side: "CLIENT" | "ACCOUNTANT",
   reason?: string,
 ) {
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 8): a validação de estado revogável
+  // existia SOMENTE na rota HTTP — qualquer outro chamador futuro deste serviço
+  // (ex.: um worker, um script administrativo) poderia revogar um vínculo já
+  // EXPIRED/REVOKED_* sem nenhuma trava, gerando eventos de auditoria
+  // inconsistentes (ex.: "REVOKED_BY_CLIENT" sobre um vínculo que já estava
+  // EXPIRED há meses). Movida para dentro do serviço, a fonte única da regra.
+  const current = await prismaUnscoped.accountingEngagement.findUniqueOrThrow({ where: { id: engagementId } });
+  if (current.status !== "ACTIVE" && current.status !== "PENDING_ACCOUNTANT_ACCEPTANCE") {
+    throw new EngagementNotRevocableError(`Vínculo em status "${current.status}" não pode ser revogado.`);
+  }
   const status = side === "CLIENT" ? "REVOKED_BY_CLIENT" : "REVOKED_BY_ACCOUNTANT";
   const updated = await prismaUnscoped.accountingEngagement.update({
     where: { id: engagementId },

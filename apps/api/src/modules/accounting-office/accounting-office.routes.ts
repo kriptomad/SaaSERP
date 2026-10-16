@@ -43,6 +43,8 @@ import {
   EngagementNotAcceptableError,
   EngagementAcceptanceExpiredError,
   NoActiveEngagementError,
+  DuplicateActiveEngagementError,
+  EngagementNotRevocableError,
 } from "../../services/accounting-office/engagement.service";
 import { generateSpedEcd, generateDefis, NoActiveLayoutVersionError } from "../../services/accounting-office/sped-ecd.service";
 import {
@@ -204,7 +206,18 @@ accountingOfficeRouter.post("/accounting-engagements", requireAuth, requireModul
     accountingFirmTenantId: parsed.data.accountingFirmTenantId,
     scopes: parsed.data.scopes,
     grantedByUserId: userId,
+  }).catch((err) => {
+    // P2002 cobre a corrida residual entre a checagem em memória de
+    // grantAccountingEngagement() e o índice único parcial do banco (ver migration
+    // 20261112103000) — duas requisições simultâneas podem ambas passar pela
+    // checagem antes de qualquer uma commitar; o índice garante que só uma vence.
+    if (err instanceof DuplicateActiveEngagementError) return null;
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") return null;
+    throw err;
   });
+  if (!engagement) {
+    return res.status(409).json({ success: false, data: null, error: { code: "DUPLICATE_ENGAGEMENT", message: "Já existe um vínculo ativo ou pendente de aceite com este escritório." } });
+  }
   return res.status(201).json({ success: true, data: engagement, error: null });
 });
 
@@ -253,8 +266,18 @@ accountingOfficeRouter.post("/accounting-engagements/:id/revoke", requireAuth, r
     return res.status(409).json({ success: false, data: null, error: { code: "ENGAGEMENT_NOT_REVOCABLE", message: `Vínculo em status "${engagement.status}" não pode ser revogado.` } });
   }
   const parsed = revokeEngagementSchema.safeParse(req.body ?? {});
-  const updated = await revokeAccountingEngagement(engagement.id, userId, side, parsed.success ? parsed.data.reason : undefined);
-  return res.json({ success: true, data: updated, error: null });
+  try {
+    const updated = await revokeAccountingEngagement(engagement.id, userId, side, parsed.success ? parsed.data.reason : undefined);
+    return res.json({ success: true, data: updated, error: null });
+  } catch (err) {
+    // Defesa em profundidade: a mesma regra já é checada acima (early-return mais
+    // rápido, sem round-trip extra no caso comum), mas o serviço revalida contra o
+    // estado mais recente do banco — cobre a corrida de duas revogações concorrentes.
+    if (err instanceof EngagementNotRevocableError) {
+      return res.status(409).json({ success: false, data: null, error: { code: "ENGAGEMENT_NOT_REVOCABLE", message: err.message } });
+    }
+    throw err;
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────
