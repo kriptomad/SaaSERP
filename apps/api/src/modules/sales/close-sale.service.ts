@@ -196,6 +196,12 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
       // (ver liquor-ledger.routes.ts) — coletado durante o loop (ainda sem `sale.id`)
       // e materializado depois, mesmo padrão de `opticalLabOrders` acima.
       const returnableContainerEntries: { productId: string; quantity: number }[] = [];
+      // GAP DE AUDITORIA FECHADO (Rodada 6): `ProductSerial` não tinha nenhum vínculo
+      // com a venda que o consumiu — o estorno (refund-sale.service.ts) não tinha
+      // como saber QUAL serial/IMEI devolver para IN_STOCK, só o agregado
+      // `Product.stockQuantity`. Coletado durante o loop (ainda sem `sale.id`) e
+      // vinculado depois, mesmo padrão de `opticalLabOrders`/`returnableContainerEntries`.
+      const soldSerialIds: string[] = [];
 
       for (const item of input.items) {
         const product = await tx.product.findFirstOrThrow({ where: { id: item.productId, tenantId: input.tenantId } });
@@ -330,6 +336,7 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
           }
           await tx.productSerial.update({ where: { id: serial.id }, data: { status: "SOLD" } });
           await tx.product.update({ where: { id: product.id }, data: { stockQuantity: { decrement: 1 } } });
+          soldSerialIds.push(serial.id);
         } else {
           // NONE: baixa direta, sem necessidade de lock por lote/série.
           if (product.trackingType === "VARIANT") {
@@ -521,6 +528,14 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
           ...(healthInsurancePlanId ? { healthInsurancePlanId } : {}),
         },
       });
+
+      // GAP DE AUDITORIA FECHADO (Rodada 6): vincula cada serial/IMEI vendido nesta
+      // venda ao `sale.id` recém-criado — sem isto, `refund-sale.service.ts` não tinha
+      // nenhuma forma de identificar qual unidade serializada devolver a IN_STOCK no
+      // estorno.
+      if (soldSerialIds.length > 0) {
+        await tx.productSerial.updateMany({ where: { id: { in: soldSerialIds } }, data: { saleId: sale.id } });
+      }
 
       // Itens criados individualmente (não createMany) propositalmente: precisamos do
       // `id` real de cada SaleItem assim que criado para gravar, ainda dentro desta

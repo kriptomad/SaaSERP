@@ -1178,14 +1178,22 @@ model ProductSerial {
   imei         String?
   status       String   @default("IN_STOCK")
   workOrderId  String?
+  // GAP DE AUDITORIA FECHADO (Rodada 6): sem este vínculo, o estorno de venda
+  // (refund-sale.service.ts) não tinha como saber QUAL unidade serializada
+  // devolver para IN_STOCK — só conseguia reverter o agregado
+  // `Product.stockQuantity`, deixando o serial individual permanentemente
+  // travado como SOLD mesmo após estornado.
+  saleId       String?
   createdAt    DateTime @default(now())
 
   tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   product   Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
   workOrder WorkOrder? @relation(fields: [workOrderId], references: [id])
+  sale      Sale?      @relation(fields: [saleId], references: [id])
 
   @@unique([tenantId, serialNumber])
   @@index([tenantId, imei])
+  @@index([tenantId, saleId])
   @@map("product_serials")
 }
 
@@ -1575,6 +1583,7 @@ model Sale {
   workOrders                WorkOrder[] // Capítulo 11.2 — Ótica: O.S. de laboratório óptico aberta a partir desta venda
   billedWorkOrder           WorkOrder?               @relation("WorkOrderBillingSale") // Capítulo 4.2 — lado inverso de WorkOrder.billingSaleId: a O.S. faturada por esta venda
   materialDeliveries        MaterialDelivery[] // Capítulo 11.8 — entrega de material vinculada a esta venda
+  soldSerials               ProductSerial[] // Capítulo 6.8 — serial/IMEI vendido nesta venda, usado para restaurar IN_STOCK no estorno
 
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId, status, createdAt])

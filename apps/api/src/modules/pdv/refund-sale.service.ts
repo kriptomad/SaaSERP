@@ -121,18 +121,101 @@ export async function refundSale(
     // passou a ser opcional para suportar itens de serviço (`serviceId`) vindos de
     // uma Comanda fechada. Itens de serviço não têm estoque físico e nunca geram
     // StockMovement/estorno de estoque.
+    //
+    // GAP DE AUDITORIA FECHADO (Rodada 6, CRÍTICO): antes desta correção, o estorno
+    // só incrementava o agregado `Product.stockQuantity` — nunca restaurava o lote
+    // (`ProductBatch.quantity`) de produtos FEFO/validade, nunca reabria o serial/IMEI
+    // vendido (`ProductSerial.status`) e nunca devolvia `ProductVariant.stockQuantity`
+    // de produtos em grade. Resultado real: após um estorno, o estoque agregado batia,
+    // mas o saldo por lote/série/variante ficava permanentemente divergente — exatamente
+    // o tipo de inconsistência que o FEFO/controle de série/grade existe para evitar.
     for (const item of sale.items) {
       if (!item.productId) continue;
-      await tx.stockMovement.create({
-        data: {
-          tenantId: params.tenantId,
-          productId: item.productId,
-          type: "RETURN",
-          quantity: item.quantity,
-          referenceId: sale.id,
-        },
-      });
-      await tx.product.update({ where: { id: item.productId }, data: { stockQuantity: { increment: item.quantity } } });
+      const product = await tx.product.findFirstOrThrow({ where: { id: item.productId, tenantId: params.tenantId } });
+
+      if (product.isKitComposition) {
+        // Kit/ficha técnica: a venda nunca decrementou o `stockQuantity` do próprio
+        // kit, e sim de cada insumo da Recipe — o estorno precisa devolver os MESMOS
+        // insumos, nunca o produto-kit em si (que ficaria com estoque fantasma).
+        const recipe = await tx.recipe.findFirst({ where: { productId: product.id, tenantId: params.tenantId }, include: { items: true } });
+        if (recipe) {
+          for (const recipeItem of recipe.items) {
+            const componentQuantity = new Prisma.Decimal(recipeItem.quantityPerYield)
+              .times(item.quantity)
+              .dividedBy(new Prisma.Decimal(recipe.yieldQuantity));
+            await tx.product.update({ where: { id: recipeItem.ingredientId }, data: { stockQuantity: { increment: componentQuantity } } });
+            await tx.stockMovement.create({
+              data: {
+                tenantId: params.tenantId,
+                productId: recipeItem.ingredientId,
+                type: "RETURN",
+                quantity: componentQuantity,
+                referenceId: sale.id,
+              },
+            });
+          }
+        }
+        continue;
+      }
+
+      if (product.trackingType === "BATCH") {
+        // Reconstrói exatamente de quais lotes esta venda consumiu (gravado por
+        // `deductStockFefoWithinTx` com `referenceId = Sale.idempotencyKey`) e devolve
+        // a MESMA quantidade a CADA lote original — nunca cria um lote novo, e nunca
+        // devolve a um lote diferente do que realmente saiu.
+        const originalMovements = await tx.stockMovement.findMany({
+          where: {
+            tenantId: params.tenantId,
+            productId: item.productId,
+            type: "SALE_OUT",
+            referenceId: sale.idempotencyKey,
+            productBatchId: { not: null },
+          },
+        });
+        for (const movement of originalMovements) {
+          const quantityToRestore = movement.quantity.negated();
+          await tx.productBatch.update({
+            where: { id: movement.productBatchId! },
+            data: { quantity: { increment: quantityToRestore } },
+          });
+          await tx.stockMovement.create({
+            data: {
+              tenantId: params.tenantId,
+              productId: item.productId,
+              productBatchId: movement.productBatchId,
+              type: "RETURN",
+              quantity: quantityToRestore,
+              referenceId: sale.id,
+            },
+          });
+        }
+        await tx.product.update({ where: { id: item.productId }, data: { stockQuantity: { increment: item.quantity } } });
+      } else if (product.trackingType === "SERIAL") {
+        // Reabre especificamente o serial/IMEI vendido nesta venda (vínculo gravado
+        // em `ProductSerial.saleId` por `close-sale.service.ts`) — nunca um serial
+        // qualquer do mesmo produto, que poderia já ter sido revendido a outro cliente.
+        const serial = await tx.productSerial.findFirst({ where: { tenantId: params.tenantId, productId: item.productId, saleId: sale.id } });
+        if (serial) {
+          await tx.productSerial.update({ where: { id: serial.id }, data: { status: "IN_STOCK", saleId: null } });
+        } else {
+          logger.warn(
+            { saleId: sale.id, productId: item.productId },
+            "Estorno: produto rastreado por serial sem ProductSerial vinculado a esta venda (dado anterior a esta correção) — apenas o agregado foi restaurado",
+          );
+        }
+        await tx.stockMovement.create({
+          data: { tenantId: params.tenantId, productId: item.productId, type: "RETURN", quantity: item.quantity, referenceId: sale.id },
+        });
+        await tx.product.update({ where: { id: item.productId }, data: { stockQuantity: { increment: item.quantity } } });
+      } else {
+        if (product.trackingType === "VARIANT" && item.productVariantId) {
+          await tx.productVariant.update({ where: { id: item.productVariantId }, data: { stockQuantity: { increment: item.quantity } } });
+        }
+        await tx.stockMovement.create({
+          data: { tenantId: params.tenantId, productId: item.productId, type: "RETURN", quantity: item.quantity, referenceId: sale.id },
+        });
+        await tx.product.update({ where: { id: item.productId }, data: { stockQuantity: { increment: item.quantity } } });
+      }
     }
 
     // GAP DE AUDITORIA FECHADO (Capítulo 6.8, Rodada 15): até aqui o estorno mudava

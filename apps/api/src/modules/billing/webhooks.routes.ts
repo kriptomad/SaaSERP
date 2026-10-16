@@ -27,10 +27,24 @@ async function activatePendingSubscription(
   currentPeriodEnd: Date | null,
   moduleItemIds: Record<string, string>,
 ): Promise<{ tenantId: string } | null> {
-  const pending = await prismaUnscoped.subscription.findUnique({ where: { id: pendingSubscriptionId } });
+  const pending = await prismaUnscoped.subscription.findUnique({
+    where: { id: pendingSubscriptionId },
+    include: { plan: { select: { includedModules: true } } },
+  });
   if (!pending || pending.status !== "PENDING_CHECKOUT") {
     return null; // já processado (reentrega do webhook) ou nunca existiu
   }
+
+  // GAP DE AUDITORIA FECHADO (Rodada 6) — `Plan.includedModules` (ex.: LIQUOR_LEDGER
+  // dentro de COMBO_ADEGA_PRO) nunca virava uma linha `TenantModule` ativa: só os
+  // códigos escolhidos à la carte (`pendingModuleCodes`) eram sincronizados. Resultado
+  // real: todo tenant de um plano/combo que "inclui" um módulo de nicho recebia 402
+  // "módulo não contratado" do gatekeeper ao tentar usá-lo, mesmo pagando por ele. Agora
+  // o conjunto desejado é a UNIÃO (inclusos do plano + à la carte do checkout), e
+  // qualquer módulo ativo que não esteja mais nesse conjunto (downgrade de plano/troca
+  // de seleção) é desativado — reflete o "substitui tudo" já documentado acima para
+  // `pendingModuleCodes`.
+  const desiredModuleCodes = new Set<string>([...pending.plan.includedModules, ...pending.pendingModuleCodes]);
 
   await prismaUnscoped.$transaction(async (tx) => {
     await tx.subscription.update({
@@ -43,17 +57,31 @@ async function activatePendingSubscription(
         pendingModuleCodes: [],
       },
     });
-    for (const moduleCode of pending.pendingModuleCodes) {
+    for (const moduleCode of desiredModuleCodes) {
       await tx.tenantModule.upsert({
         where: { tenantId_moduleCode: { tenantId: pending.tenantId, moduleCode } },
         update: { active: true, deactivatedAt: null, stripeSubscriptionItemId: moduleItemIds[moduleCode] ?? null },
         create: { tenantId: pending.tenantId, moduleCode, active: true, stripeSubscriptionItemId: moduleItemIds[moduleCode] ?? null },
       });
     }
+    const currentlyActive = await tx.tenantModule.findMany({
+      where: { tenantId: pending.tenantId, active: true },
+      select: { moduleCode: true },
+    });
+    const toDeactivate = currentlyActive.map((m) => m.moduleCode).filter((code) => !desiredModuleCodes.has(code));
+    if (toDeactivate.length > 0) {
+      await tx.tenantModule.updateMany({
+        where: { tenantId: pending.tenantId, moduleCode: { in: toDeactivate } },
+        data: { active: false, deactivatedAt: new Date() },
+      });
+    }
   });
 
   await invalidateTenantModuleCache(pending.tenantId);
-  log.info({ tenantId: pending.tenantId, subscriptionId: pendingSubscriptionId, moduleCodes: pending.pendingModuleCodes }, "assinatura ativada via checkout");
+  log.info(
+    { tenantId: pending.tenantId, subscriptionId: pendingSubscriptionId, moduleCodes: [...desiredModuleCodes] },
+    "assinatura ativada via checkout",
+  );
   return { tenantId: pending.tenantId };
 }
 
