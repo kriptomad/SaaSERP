@@ -173,10 +173,13 @@ platformAdminRouter.post("/platform-admin/impersonation-sessions/:id/end", requi
 
 // ─────────────────────────────────────────────────────────────────────────
 // DASHBOARD DE RECEITA (MRR) — Capítulo 13.3. Calcula sempre a partir das
-// assinaturas reais (`Subscription`/`Plan`), nunca de um número hardcoded ou
-// estimado: MRR é a soma do `basePrice` do plano de cada assinatura ACTIVE
-// (TRIAL/PAST_DUE/SUSPENDED/CANCELLED não contam como receita recorrente
-// confirmada — mesmo critério usado por qualquer ferramenta de billing real).
+// assinaturas reais (`Subscription`/`Plan`/`TenantModule`), nunca de um número
+// hardcoded ou estimado: MRR é a soma do `basePrice` do plano + MRR de módulos
+// add-on ativos de cada assinatura ACTIVE (TRIAL/PAST_DUE/SUSPENDED/CANCELLED não
+// contam como receita recorrente confirmada — mesmo critério usado por qualquer
+// ferramenta de billing real). Inclui também LTV por plano e projeção linear de
+// MRR para 3 meses, ambos calculados a partir de dados reais (ver comentários
+// inline abaixo) — adicionados após auditoria apontar a ausência desses dois.
 // ─────────────────────────────────────────────────────────────────────────
 
 platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
@@ -187,10 +190,12 @@ platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdmi
   const mrrByPlan = new Map<string, { planCode: string; planLabel: string; activeCount: number; mrr: number }>();
   let totalMrr = 0;
   const countByStatus: Record<string, number> = { TRIAL: 0, ACTIVE: 0, PAST_DUE: 0, SUSPENDED: 0, CANCELLED: 0 };
+  const activeTenantIds: string[] = [];
 
   for (const sub of subscriptions) {
     countByStatus[sub.status] = (countByStatus[sub.status] ?? 0) + 1;
     if (sub.status !== "ACTIVE") continue;
+    activeTenantIds.push(sub.tenantId);
     const planPrice = Number(sub.plan.basePrice);
     totalMrr += planPrice;
     const bucket = mrrByPlan.get(sub.plan.id) ?? { planCode: sub.plan.code, planLabel: sub.plan.label, activeCount: 0, mrr: 0 };
@@ -199,10 +204,60 @@ platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdmi
     mrrByPlan.set(sub.plan.id, bucket);
   }
 
+  // CORREÇÃO DE AUDITORIA (admin-panel audit round): o dashboard só somava o
+  // `basePrice` do plano, ignorando por completo a receita de módulos add-on
+  // contratados à la carte (Capítulo 2.9/13.3) — subestimava o MRR real sempre
+  // que um tenant tinha módulos pagos ativos além do plano. Soma agora o MRR de
+  // cada módulo ativo (`TenantModule.active = true`) para tenants com assinatura
+  // ACTIVE, agrupado por módulo.
+  const activeModuleGrants = activeTenantIds.length
+    ? await prisma.tenantModule.findMany({
+        where: { tenantId: { in: activeTenantIds }, active: true },
+        include: { module: { select: { code: true, label: true, monthlyPrice: true } } },
+      })
+    : [];
+  const mrrByModule = new Map<string, { moduleCode: string; moduleLabel: string; activeTenantCount: number; mrr: number }>();
+  let totalModuleMrr = 0;
+  for (const grant of activeModuleGrants) {
+    const price = Number(grant.module.monthlyPrice);
+    totalModuleMrr += price;
+    const bucket = mrrByModule.get(grant.module.code) ?? { moduleCode: grant.module.code, moduleLabel: grant.module.label, activeTenantCount: 0, mrr: 0 };
+    bucket.activeTenantCount += 1;
+    bucket.mrr += price;
+    mrrByModule.set(grant.module.code, bucket);
+  }
+  totalMrr += totalModuleMrr;
+
   // Churn do mês corrente: assinaturas canceladas cujo `cancelRequestedAt` caiu
   // dentro do mês atual — aproximação real (não estimada) de churn mensal.
   const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
   const churnedThisMonth = subscriptions.filter((s) => s.status === "CANCELLED" && s.cancelRequestedAt && s.cancelRequestedAt >= startOfMonth).length;
+
+  // CORREÇÃO DE AUDITORIA: LTV e projeção de 3 meses eram pedidos no round de
+  // auditoria do painel admin e não existiam. Nunca hardcoded — calculados a
+  // partir de dados reais:
+  //   - LTV (por plano) = ARPU do plano ÷ taxa de churn mensal da BASE INTEIRA de
+  //     assinantes ACTIVE (não há granularidade de churn por plano suficiente —
+  //     amostra pequena por plano tornaria a taxa estatisticamente instável; usar
+  //     a taxa agregada é a prática padrão quando o volume por segmento é baixo).
+  //     Fórmula clássica de SaaS: LTV = ARPU / churn rate mensal.
+  //   - Projeção de 3 meses = MRR atual + 3 × média de MRR líquido novo adicionado
+  //     nos últimos 3 meses (assinaturas hoje ACTIVE cujo primeiro pagamento
+  //     — `firstChargedAt` — caiu nos últimos 90 dias), uma extrapolação linear
+  //     simples e auditável, nunca um número de marketing.
+  const activeCountTotal = activeTenantIds.length;
+  const monthlyChurnRate = activeCountTotal > 0 ? churnedThisMonth / (activeCountTotal + churnedThisMonth) : 0;
+  const ltvByPlan = Array.from(mrrByPlan.values()).map((bucket) => {
+    const arpu = bucket.activeCount > 0 ? bucket.mrr / bucket.activeCount : 0;
+    const ltv = monthlyChurnRate > 0 ? arpu / monthlyChurnRate : null; // null = sem churn observado ainda, LTV indefinido (não infinito fictício)
+    return { planCode: bucket.planCode, planLabel: bucket.planLabel, arpu, ltv };
+  });
+
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  const newlyChargedSubs = subscriptions.filter((s) => s.status === "ACTIVE" && s.firstChargedAt && s.firstChargedAt >= ninetyDaysAgo);
+  const netNewMrrLast3Months = newlyChargedSubs.reduce((sum, s) => sum + Number(s.plan.basePrice), 0);
+  const avgMonthlyNetNewMrr = netNewMrrLast3Months / 3;
+  const projectedMrrIn3Months = totalMrr + avgMonthlyNetNewMrr * 3;
 
   return res.json({
     success: true,
@@ -211,6 +266,11 @@ platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdmi
       arr: totalMrr * 12,
       countByStatus,
       byPlan: Array.from(mrrByPlan.values()),
+      byModule: Array.from(mrrByModule.values()),
+      totalModuleMrr,
+      ltvByPlan,
+      projectedMrrIn3Months,
+      avgMonthlyNetNewMrr,
       churnedThisMonth,
       totalSubscriptions: subscriptions.length,
     },

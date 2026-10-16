@@ -67,6 +67,11 @@ export interface RevenueDashboard {
   arr: number;
   countByStatus: Record<string, number>;
   byPlan: Array<{ planCode: string; planLabel: string; activeCount: number; mrr: number }>;
+  byModule: Array<{ moduleCode: string; moduleLabel: string; activeTenantCount: number; mrr: number }>;
+  totalModuleMrr: number;
+  ltvByPlan: Array<{ planCode: string; planLabel: string; arpu: number; ltv: number | null }>;
+  projectedMrrIn3Months: number;
+  avgMonthlyNetNewMrr: number;
   churnedThisMonth: number;
   totalSubscriptions: number;
 }

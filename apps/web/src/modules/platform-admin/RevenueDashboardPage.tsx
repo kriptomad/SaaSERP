@@ -39,6 +39,7 @@ export function RevenueDashboardPage() {
           <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap sx={{ mb: 4 }}>
             <MetricCard label="MRR" value={formatBRL(data.totalMrr)} />
             <MetricCard label="ARR (projetado)" value={formatBRL(data.arr)} />
+            <MetricCard label="MRR projetado (+3 meses)" value={formatBRL(data.projectedMrrIn3Months)} />
             <MetricCard label="Assinaturas totais" value={String(data.totalSubscriptions)} />
             <MetricCard label="Churn este mês" value={String(data.churnedThisMonth)} />
           </Stack>
@@ -50,25 +51,57 @@ export function RevenueDashboardPage() {
             ))}
           </Stack>
 
-          <Typography variant="h6" sx={{ mb: 2 }}>MRR por plano</Typography>
-          <TableContainer component={Paper}>
+          <Typography variant="h6" sx={{ mb: 2 }}>MRR por plano (base) e LTV estimado</Typography>
+          <TableContainer component={Paper} sx={{ mb: 4 }}>
             <Table size="small">
               <TableHead>
                 <TableRow>
                   <TableCell>Plano</TableCell>
                   <TableCell align="right">Assinantes ativos</TableCell>
                   <TableCell align="right">MRR</TableCell>
+                  <TableCell align="right">ARPU</TableCell>
+                  <TableCell align="right">LTV estimado</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
-                {data.byPlan.map((plan) => (
-                  <TableRow key={plan.planCode}>
-                    <TableCell>{plan.planLabel} ({plan.planCode})</TableCell>
-                    <TableCell align="right">{plan.activeCount}</TableCell>
-                    <TableCell align="right">{formatBRL(plan.mrr)}</TableCell>
+                {data.byPlan.map((plan) => {
+                  const ltv = data.ltvByPlan.find((l) => l.planCode === plan.planCode);
+                  return (
+                    <TableRow key={plan.planCode}>
+                      <TableCell>{plan.planLabel} ({plan.planCode})</TableCell>
+                      <TableCell align="right">{plan.activeCount}</TableCell>
+                      <TableCell align="right">{formatBRL(plan.mrr)}</TableCell>
+                      <TableCell align="right">{ltv ? formatBRL(ltv.arpu) : "—"}</TableCell>
+                      <TableCell align="right">{ltv?.ltv != null ? formatBRL(ltv.ltv) : "Sem churn observado"}</TableCell>
+                    </TableRow>
+                  );
+                })}
+                {data.byPlan.length === 0 && <TableRow><TableCell colSpan={5}>Nenhuma assinatura ativa.</TableCell></TableRow>}
+              </TableBody>
+            </Table>
+          </TableContainer>
+
+          <Typography variant="h6" sx={{ mb: 2 }}>
+            MRR por módulo add-on (total: {formatBRL(data.totalModuleMrr)})
+          </Typography>
+          <TableContainer component={Paper}>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Módulo</TableCell>
+                  <TableCell align="right">Tenants ativos</TableCell>
+                  <TableCell align="right">MRR</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {data.byModule.map((m) => (
+                  <TableRow key={m.moduleCode}>
+                    <TableCell>{m.moduleLabel} ({m.moduleCode})</TableCell>
+                    <TableCell align="right">{m.activeTenantCount}</TableCell>
+                    <TableCell align="right">{formatBRL(m.mrr)}</TableCell>
                   </TableRow>
                 ))}
-                {data.byPlan.length === 0 && <TableRow><TableCell colSpan={3}>Nenhuma assinatura ativa.</TableCell></TableRow>}
+                {data.byModule.length === 0 && <TableRow><TableCell colSpan={3}>Nenhum módulo add-on ativo.</TableCell></TableRow>}
               </TableBody>
             </Table>
           </TableContainer>
