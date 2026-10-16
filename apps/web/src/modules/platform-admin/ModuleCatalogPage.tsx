@@ -1,10 +1,36 @@
 // apps/web/src/modules/platform-admin/ModuleCatalogPage.tsx
 // Capítulo 15.2 — catálogo de módulos/feature flags globais, com rollout percentual
 // e lista opcional de tenants beneficiados antecipadamente (early access).
+// GAP DE AUDITORIA FECHADO (mega-audit round de 100%, criticidade MEDIA): o backend
+// já aceitava PATCH de `rolloutPercent`/`enabledForTenantIds` desde sempre, mas esta
+// tela só deixava definir o rollout % na CRIAÇÃO (nunca editar depois) e mostrava a
+// lista de early access apenas como contador somente-leitura — nenhum jeito de
+// adicionar/remover um tenant de rollout antecipado sem acesso direto ao banco.
+// Adicionado: edição inline de rollout %, e um seletor por tenant (busca por
+// nome/slug/CNPJ via `listTenants`) para adicionar/remover da lista
+// `enabledForTenantIds`.
 import { useEffect, useState } from "react";
-import { Alert, Box, Button, Chip, Paper, Stack, Switch, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from "@mui/material";
+import {
+  Alert,
+  Autocomplete,
+  Box,
+  Button,
+  Chip,
+  Collapse,
+  Paper,
+  Stack,
+  Switch,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  TextField,
+  Typography,
+} from "@mui/material";
 import { usePlatformAdminAuth } from "./PlatformAdminAuthContext";
-import { listFeatureFlags, createFeatureFlag, updateFeatureFlag, FeatureFlag } from "./platform-admin-ops.api";
+import { listFeatureFlags, createFeatureFlag, updateFeatureFlag, FeatureFlag, listTenants, TenantSummary } from "./platform-admin-ops.api";
 
 function NewFlagForm({ onCreated }: { onCreated: (flag: FeatureFlag) => void }) {
   const [key, setKey] = useState("");
@@ -43,6 +69,112 @@ function NewFlagForm({ onCreated }: { onCreated: (flag: FeatureFlag) => void }) 
   );
 }
 
+function RolloutPercentEditor({ flag, canEdit, onSaved }: { flag: FeatureFlag; canEdit: boolean; onSaved: (flag: FeatureFlag) => void }) {
+  const [value, setValue] = useState(flag.rolloutPercent);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => setValue(flag.rolloutPercent), [flag.rolloutPercent]);
+
+  async function commit() {
+    if (value === flag.rolloutPercent) return;
+    setSaving(true);
+    try {
+      const clamped = Math.min(100, Math.max(0, Math.round(value)));
+      const updated = await updateFeatureFlag(flag.id, { rolloutPercent: clamped });
+      onSaved(updated);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <TextField
+      type="number"
+      size="small"
+      value={value}
+      disabled={!canEdit || saving}
+      onChange={(e) => setValue(Number(e.target.value))}
+      onBlur={commit}
+      sx={{ width: 90 }}
+      inputProps={{ min: 0, max: 100 }}
+    />
+  );
+}
+
+function EarlyAccessEditor({ flag, canEdit, onSaved }: { flag: FeatureFlag; canEdit: boolean; onSaved: (flag: FeatureFlag) => void }) {
+  const [open, setOpen] = useState(false);
+  const [tenantOptions, setTenantOptions] = useState<TenantSummary[]>([]);
+  const [search, setSearch] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const timeout = setTimeout(() => {
+      listTenants(search ? { search } : undefined).then(setTenantOptions).catch(() => setTenantOptions([]));
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [open, search]);
+
+  const enabledTenants = tenantOptions.filter((t) => flag.enabledForTenantIds.includes(t.id));
+
+  async function addTenant(tenant: TenantSummary | null) {
+    if (!tenant || flag.enabledForTenantIds.includes(tenant.id)) return;
+    setSaving(true);
+    try {
+      const updated = await updateFeatureFlag(flag.id, { enabledForTenantIds: [...flag.enabledForTenantIds, tenant.id] });
+      onSaved(updated);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeTenant(tenantId: string) {
+    setSaving(true);
+    try {
+      const updated = await updateFeatureFlag(flag.id, { enabledForTenantIds: flag.enabledForTenantIds.filter((id) => id !== tenantId) });
+      onSaved(updated);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Box>
+      <Chip
+        size="small"
+        label={`${flag.enabledForTenantIds.length} tenant(s)`}
+        onClick={() => setOpen((v) => !v)}
+        clickable={canEdit}
+      />
+      <Collapse in={open}>
+        <Stack spacing={1} sx={{ mt: 1, minWidth: 320 }}>
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+            {enabledTenants.map((t) => (
+              <Chip key={t.id} size="small" label={`${t.tradeName} (${t.slug})`} onDelete={canEdit ? () => removeTenant(t.id) : undefined} />
+            ))}
+            {flag.enabledForTenantIds.length > enabledTenants.length && (
+              <Typography variant="caption" color="text.secondary">
+                +{flag.enabledForTenantIds.length - enabledTenants.length} tenant(s) fora da busca atual
+              </Typography>
+            )}
+          </Stack>
+          {canEdit && (
+            <Autocomplete
+              size="small"
+              options={tenantOptions}
+              getOptionLabel={(t) => `${t.tradeName} (${t.slug})`}
+              loading={saving}
+              onInputChange={(_e, v) => setSearch(v)}
+              onChange={(_e, v) => addTenant(v)}
+              renderInput={(params) => <TextField {...params} label="Adicionar tenant ao early access" placeholder="Buscar por nome/slug/CNPJ" />}
+            />
+          )}
+        </Stack>
+      </Collapse>
+    </Box>
+  );
+}
+
 export function ModuleCatalogPage() {
   const { admin } = usePlatformAdminAuth();
   const canEdit = admin?.role === "SUPER_ADMIN";
@@ -61,10 +193,14 @@ export function ModuleCatalogPage() {
     void reload();
   }, []);
 
+  function applyUpdatedFlag(updated: FeatureFlag) {
+    setFlags((prev) => prev?.map((f) => (f.id === updated.id ? updated : f)) ?? null);
+  }
+
   async function toggleActive(flag: FeatureFlag) {
     try {
       const updated = await updateFeatureFlag(flag.id, { active: !flag.active });
-      setFlags((prev) => prev?.map((f) => (f.id === updated.id ? updated : f)) ?? null);
+      applyUpdatedFlag(updated);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -94,8 +230,12 @@ export function ModuleCatalogPage() {
               <TableRow key={flag.id}>
                 <TableCell>{flag.key}</TableCell>
                 <TableCell>{flag.description}</TableCell>
-                <TableCell align="right">{flag.rolloutPercent}%</TableCell>
-                <TableCell><Chip size="small" label={`${flag.enabledForTenantIds.length} tenant(s)`} /></TableCell>
+                <TableCell align="right">
+                  <RolloutPercentEditor flag={flag} canEdit={canEdit} onSaved={applyUpdatedFlag} />
+                </TableCell>
+                <TableCell>
+                  <EarlyAccessEditor flag={flag} canEdit={canEdit} onSaved={applyUpdatedFlag} />
+                </TableCell>
                 <TableCell>
                   <Switch size="small" checked={flag.active} disabled={!canEdit} onChange={() => toggleActive(flag)} />
                 </TableCell>
