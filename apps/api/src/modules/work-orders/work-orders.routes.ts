@@ -22,6 +22,13 @@ import {
   BudgetAlreadyProcessedError,
   BudgetExpiredError,
 } from "../../services/work-order/approve-budget.service";
+import {
+  billAndDeliverWorkOrder,
+  WorkOrderNotFoundError,
+  WorkOrderNotReadyForDeliveryError,
+  WorkOrderHasNoBillableItemsError,
+} from "./bill-and-deliver-work-order.service";
+import { enqueueFiscalEmission } from "../fiscal/queues/fiscal-emission.queue";
 import { notifyTenant } from "../notifications/notify.service";
 
 export const workOrdersRouter = Router();
@@ -455,28 +462,61 @@ workOrdersRouter.post("/work-orders/:id/photos", requireAuth, requireModule("WOR
   return res.status(201).json({ success: true, data: photo, error: null });
 });
 
+const deliverWorkOrderSchema = z.object({
+  cashRegisterId: z.string().min(1),
+  paymentMethod: z.enum(["CASH", "DEBIT_CARD", "CREDIT_CARD", "PIX", "BOLETO", "STORE_CREDIT"]),
+});
+
 /**
  * Entrega do equipamento: única transição válida é READY → DELIVERED.
- * Grava `deliveredAt` para contagem de garantia a partir deste exato instante.
+ * CORREÇÃO DE AUDITORIA (Capítulo 4.2): "DELIVERED (pagamento + nota + termo de
+ * garantia entregue)" — a entrega agora cobra o cliente de verdade (cria Sale +
+ * Payment) e emite o(s) documento(s) fiscal(is) reais (NFCE para peças, NFSE
+ * para mão de obra), em vez de apenas marcar o status. Ver
+ * bill-and-deliver-work-order.service.ts. `deliveredAt` continua sendo a base da
+ * contagem de garantia, inalterado.
  */
 workOrdersRouter.post("/work-orders/:id/deliver", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "work-order:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite entregar ordens de serviço." } });
   }
-
-  const workOrder = await prisma.workOrder.findFirst({ where: { id: req.params.id, tenantId } });
-  if (!workOrder) {
-    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Ordem de serviço não encontrada." } });
-  }
-  if (workOrder.status !== "READY") {
-    return res.status(409).json({ success: false, data: null, error: { code: "INVALID_STATUS_TRANSITION", message: "Só é possível entregar uma O.S. com status READY." } });
+  const parsed = deliverWorkOrderSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
   }
 
-  const updated = await prisma.workOrder.update({
-    where: { id: workOrder.id },
-    data: { status: "DELIVERED", deliveredAt: new Date() },
-  });
+  try {
+    const result = await billAndDeliverWorkOrder(prisma, {
+      tenantId,
+      workOrderId: req.params.id,
+      cashierId: userId,
+      cashRegisterId: parsed.data.cashRegisterId,
+      paymentMethod: parsed.data.paymentMethod,
+    });
 
-  return res.json({ success: true, data: updated, error: null });
+    // Fora da transação (commit já confirmado) — mesmo princípio de
+    // close-sale.service.ts/comanda.routes.ts: nunca emitir de forma síncrona
+    // dentro da transação de banco, para não segurar o lock de estoque esperando
+    // resposta de rede externa (SEFAZ/Focus NFe).
+    if (result.fiscalDocument) {
+      await enqueueFiscalEmission({ fiscalDocumentId: result.fiscalDocument.id, tenantId });
+    }
+    if (result.serviceFiscalDocument) {
+      await enqueueFiscalEmission({ fiscalDocumentId: result.serviceFiscalDocument.id, tenantId });
+    }
+
+    return res.json({ success: true, data: result, error: null });
+  } catch (err) {
+    if (err instanceof WorkOrderNotFoundError) {
+      return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: err.message } });
+    }
+    if (err instanceof WorkOrderNotReadyForDeliveryError) {
+      return res.status(409).json({ success: false, data: null, error: { code: "INVALID_STATUS_TRANSITION", message: err.message } });
+    }
+    if (err instanceof WorkOrderHasNoBillableItemsError) {
+      return res.status(409).json({ success: false, data: null, error: { code: "NO_BILLABLE_ITEMS", message: err.message } });
+    }
+    throw err;
+  }
 });

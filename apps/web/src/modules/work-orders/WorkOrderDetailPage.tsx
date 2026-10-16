@@ -9,6 +9,10 @@ import {
   Button,
   Checkbox,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControlLabel,
   IconButton,
   MenuItem,
@@ -30,10 +34,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link as RouterLink, useParams } from "react-router-dom";
 import {
   PATCH_TRANSITIONS,
+  PAYMENT_METHOD_LABEL,
   WO_STATUS,
   workOrderTotal,
   workOrdersApi,
   type Checklist,
+  type PaymentMethod,
   type WorkOrderDetail,
 } from "./api";
 import { Page, PageHeader, QueryState, errorMessage } from "../../shared/ui/PageLayout";
@@ -41,6 +47,7 @@ import { ConfirmDialog } from "../../shared/ui/ConfirmDialog";
 import { useToast } from "../../shared/ui/Toast";
 import { formatDate, formatDateTime, money, parseDecimal, qty, toNumber } from "../../shared/ui/format";
 import { resolveStorageDownloadUrl, uploadFileToStorage } from "../../shared/storage/upload";
+import { fetchCurrentCashRegister } from "../../api/client";
 
 const STAGE_LABEL: Record<Checklist["stage"], string> = { ENTRY: "Entrada", DIAGNOSIS: "Diagnóstico", DELIVERY: "Entrega" };
 
@@ -394,7 +401,7 @@ function DiagnosisCard({ order }: { order: WorkOrderDetail }) {
   );
 }
 
-type Confirm = { kind: "status"; status: string } | { kind: "deliver" } | { kind: "approve" } | null;
+type Confirm = { kind: "status"; status: string } | { kind: "approve" } | null;
 
 function Detail({ order }: { order: WorkOrderDetail }) {
   const toast = useToast();
@@ -404,11 +411,13 @@ function Detail({ order }: { order: WorkOrderDetail }) {
   const [validForDays, setValidForDays] = useState("7");
   const [warrantyDays, setWarrantyDays] = useState("");
   const [budgetOpen, setBudgetOpen] = useState(false);
+  const [deliverOpen, setDeliverOpen] = useState(false);
+  const [deliverPaymentMethod, setDeliverPaymentMethod] = useState<PaymentMethod>("CASH");
+  const [deliverError, setDeliverError] = useState<string | null>(null);
 
   const transition = useMutation({
     mutationFn: async (action: NonNullable<Confirm>) => {
       if (action.kind === "status") return workOrdersApi.update(order.id, { status: action.status });
-      if (action.kind === "deliver") return workOrdersApi.deliver(order.id);
       if (!order.budgetApprovalToken) throw new Error("Orçamento sem token de aprovação.");
       return workOrdersApi.approveBudget(order.budgetApprovalToken);
     },
@@ -421,6 +430,20 @@ function Detail({ order }: { order: WorkOrderDetail }) {
       toast.error(errorMessage(error));
       setConfirm(null);
     },
+  });
+
+  const deliver = useMutation({
+    mutationFn: async () => {
+      const current = await fetchCurrentCashRegister();
+      if (!current.data?.id) throw new Error("Nenhum caixa aberto. Abra o caixa antes de entregar a O.S.");
+      return workOrdersApi.deliver(order.id, { cashRegisterId: current.data.id, paymentMethod: deliverPaymentMethod });
+    },
+    onSuccess: () => {
+      toast.success("O.S. entregue, venda registrada e nota fiscal emitida.");
+      setDeliverOpen(false);
+      refresh();
+    },
+    onError: (error) => setDeliverError(errorMessage(error)),
   });
 
   const budget = useMutation({
@@ -444,9 +467,7 @@ function Detail({ order }: { order: WorkOrderDetail }) {
   const confirmCopy =
     confirm?.kind === "status"
       ? { title: "Mudar status", message: `Mover a O.S. para “${WO_STATUS[confirm.status as keyof typeof WO_STATUS].label}”?` }
-      : confirm?.kind === "deliver"
-        ? { title: "Entregar equipamento", message: "Registrar a entrega ao cliente? A O.S. será encerrada." }
-        : { title: "Registrar aprovação do orçamento", message: "Confirma que o cliente aprovou o orçamento? A O.S. seguirá para reparo." };
+      : { title: "Registrar aprovação do orçamento", message: "Confirma que o cliente aprovou o orçamento? A O.S. seguirá para reparo." };
 
   return (
     <>
@@ -472,7 +493,7 @@ function Detail({ order }: { order: WorkOrderDetail }) {
           </Button>
         )}
         {order.status === "READY" && (
-          <Button size="small" variant="contained" onClick={() => setConfirm({ kind: "deliver" })}>
+          <Button size="small" variant="contained" onClick={() => { setDeliverError(null); setDeliverOpen(true); }}>
             Entregar ao cliente
           </Button>
         )}
@@ -527,6 +548,38 @@ function Detail({ order }: { order: WorkOrderDetail }) {
         onConfirm={() => confirm && transition.mutate(confirm)}
         onClose={() => setConfirm(null)}
       />
+
+      <Dialog open={deliverOpen} onClose={() => setDeliverOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Entregar ao cliente</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            {deliverError && <Alert severity="error">{deliverError}</Alert>}
+            <Typography variant="body2">
+              A entrega gera a cobrança ({money(workOrderTotal(order.items))}), registra a venda no caixa e emite a nota fiscal (NFC-e para peças e/ou NFS-e para serviço).
+            </Typography>
+            <TextField
+              select
+              label="Forma de pagamento"
+              value={deliverPaymentMethod}
+              onChange={(e) => setDeliverPaymentMethod(e.target.value as PaymentMethod)}
+            >
+              {(Object.keys(PAYMENT_METHOD_LABEL) as PaymentMethod[]).map((m) => (
+                <MenuItem key={m} value={m}>
+                  {PAYMENT_METHOD_LABEL[m]}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeliverOpen(false)} disabled={deliver.isPending}>
+            Voltar
+          </Button>
+          <Button variant="contained" onClick={() => deliver.mutate()} disabled={deliver.isPending}>
+            {deliver.isPending ? "Entregando…" : "Confirmar entrega"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </>
   );
 }

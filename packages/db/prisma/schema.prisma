@@ -1381,12 +1381,20 @@ model WorkOrder {
   estimatedReadyAt      DateTime? // prazo do laboratório (11.2): estoque 1-2 dias úteis, personalizada 3-10+ dias úteis
   opticalPrescriptionId String?
   saleId                String? // venda que originou o pedido de laboratório (OPTICAL_LAB)
+  // CORREÇÃO DE AUDITORIA (Capítulo 4.2): "DELIVERED (pagamento + nota + termo de
+  // garantia entregue)" — antes desta correção, a transição READY → DELIVERED só
+  // atualizava o status, sem nenhum pagamento, Sale ou FiscalDocument real. Direção
+  // INVERSA de `saleId` acima (que é a venda que ORIGINA uma O.S. de laboratório
+  // óptico): `billingSaleId` é a venda CRIADA ao faturar/entregar esta O.S.
+  // (bill-and-deliver-work-order.service.ts) — nunca a mesma Sale nos dois campos.
+  billingSaleId         String?              @unique
 
   tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
   assignedTechnician  User?                @relation("AssignedTechnician", fields: [assignedTechnicianId], references: [id])
   opticalPrescription OpticalPrescription? @relation(fields: [opticalPrescriptionId], references: [id])
   sale                Sale?                @relation(fields: [saleId], references: [id])
+  billingSale         Sale?                @relation("WorkOrderBillingSale", fields: [billingSaleId], references: [id])
   items               WorkOrderItem[]
   checklist           OsChecklist[]
   photos              OsPhoto[]
@@ -1565,6 +1573,7 @@ model Sale {
   marketplaceExpenses       AccountPayable[] // Capítulo 11.1 — comissão de marketplace (iFood) vinculada à venda de origem, para margem líquida por canal
   serviceCommissionEntries  ServiceCommissionEntry[] // Capítulo 11.6
   workOrders                WorkOrder[] // Capítulo 11.2 — Ótica: O.S. de laboratório óptico aberta a partir desta venda
+  billedWorkOrder           WorkOrder?               @relation("WorkOrderBillingSale") // Capítulo 4.2 — lado inverso de WorkOrder.billingSaleId: a O.S. faturada por esta venda
   materialDeliveries        MaterialDelivery[] // Capítulo 11.8 — entrega de material vinculada a esta venda
 
   @@unique([tenantId, idempotencyKey])
@@ -1587,6 +1596,13 @@ model SaleItem {
   productId         String?
   serviceId         String?
   productVariantId  String?
+  // CORREÇÃO DE AUDITORIA (Capítulo 4.2 — Assistência Técnica): mão de obra de
+  // O.S. (`WorkOrderItem.itemType = "LABOR"`) não tem `Service` próprio (modelo
+  // usado apenas por Salão/Petshop/Lava-Rápido, Capítulo 11.6) nem é produto de
+  // estoque — por isso `productId`/`serviceId` ficam ambos nulos neste único caso
+  // e `description` (copiado de `WorkOrderItem.description`) é o que aparece na
+  // nota/relatório. Nulo em qualquer SaleItem de produto/serviço normal.
+  description       String?
   quantity          Decimal   @db.Decimal(12, 3)
   unitPrice         Decimal   @db.Decimal(12, 2)
   totalPrice        Decimal   @db.Decimal(12, 2)

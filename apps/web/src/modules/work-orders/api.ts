@@ -1,6 +1,8 @@
 // apps/web/src/modules/work-orders/api.ts
 // Contratos reais de work-orders.routes.ts.
 import { api } from "../../api/client";
+export { PAYMENT_METHOD_LABEL, type PaymentMethod } from "../comanda/api";
+import type { PaymentMethod } from "../comanda/api";
 
 export type WorkOrderStatus = "RECEIVED" | "DIAGNOSING" | "AWAITING_APPROVAL" | "IN_REPAIR" | "READY" | "DELIVERED" | "CANCELLED";
 
@@ -92,7 +94,8 @@ export const workOrdersApi = {
   addChecklist: (id: string, input: { stage: Checklist["stage"]; items: Record<string, boolean> }) =>
     api.post<Checklist>(`/work-orders/${id}/checklist`, input),
   addPhoto: (id: string, input: { storageKey: string; caption?: string | null }) => api.post<Photo>(`/work-orders/${id}/photos`, input),
-  deliver: (id: string) => api.post<WorkOrder>(`/work-orders/${id}/deliver`),
+  deliver: (id: string, input: { cashRegisterId: string; paymentMethod: PaymentMethod }) =>
+    api.post<WorkOrder>(`/work-orders/${id}/deliver`, input),
 };
 
 export function workOrderTotal(items: WorkOrderItem[]): number {
