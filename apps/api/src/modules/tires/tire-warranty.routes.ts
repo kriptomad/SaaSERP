@@ -150,34 +150,51 @@ tireWarrantyRouter.get("/tire-warranty/rotation-suggestions", requireAuth, requi
   });
   if (vehicles.length === 0) return res.json({ success: true, data: [], error: null });
 
-  const suggestions = await Promise.all(
-    vehicles.map(async (vehicle) => {
-      const lastTireSaleItem = await prisma.saleItem.findFirst({
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7, N+1 CRÍTICO): antes, `Promise.all`
+  // disparava um `saleItem.findFirst` POR VEÍCULO — uma loja com centenas de
+  // veículos cadastrados gerava centenas de round-trips ao banco nesta única rota.
+  // Agora uma ÚNICA query busca todos os itens de venda de pneu de todos os
+  // donos de veículo de uma vez (ordenados por data desc) e o "último por
+  // cliente" é resolvido em memória (primeira ocorrência de cada clientId, já
+  // que a lista vem ordenada da mais recente para a mais antiga).
+  const ownerIds = [...new Set(vehicles.map((v) => v.ownerId).filter((id): id is string => Boolean(id)))];
+  const tireSaleItems = ownerIds.length
+    ? await prisma.saleItem.findMany({
         where: {
           tenantId,
           product: { category: { contains: "pneu", mode: "insensitive" } },
-          sale: { tenantId, clientId: vehicle.ownerId },
+          sale: { tenantId, clientId: { in: ownerIds } },
         },
-        include: { sale: { select: { id: true, createdAt: true } }, product: { select: { id: true, name: true } } },
+        include: { sale: { select: { id: true, createdAt: true, clientId: true } }, product: { select: { id: true, name: true } } },
         orderBy: { sale: { createdAt: "desc" } },
-      });
-      if (!lastTireSaleItem) {
-        return { vehicleId: vehicle.id, licensePlate: vehicle.licensePlate, model: vehicle.model, owner: vehicle.owner, mileageKm: vehicle.mileageKm, lastTireSale: null, monthsSinceLastTireSale: null, suggestsRotation: false };
-      }
-      const saleDate = lastTireSaleItem.sale.createdAt;
-      const monthsSince = (Date.now() - saleDate.getTime()) / (1000 * 60 * 60 * 24 * 30.44);
-      return {
-        vehicleId: vehicle.id,
-        licensePlate: vehicle.licensePlate,
-        model: vehicle.model,
-        owner: vehicle.owner,
-        mileageKm: vehicle.mileageKm,
-        lastTireSale: { saleId: lastTireSaleItem.sale.id, productName: lastTireSaleItem.product?.name ?? null, soldAt: saleDate },
-        monthsSinceLastTireSale: Math.round(monthsSince * 10) / 10,
-        suggestsRotation: monthsSince >= ROTATION_SUGGESTION_MONTHS,
-      };
-    }),
-  );
+      })
+    : [];
+  const lastTireSaleByClientId = new Map<string, (typeof tireSaleItems)[number]>();
+  for (const item of tireSaleItems) {
+    const clientId = item.sale.clientId;
+    if (clientId && !lastTireSaleByClientId.has(clientId)) {
+      lastTireSaleByClientId.set(clientId, item);
+    }
+  }
+
+  const suggestions = vehicles.map((vehicle) => {
+    const lastTireSaleItem = vehicle.ownerId ? lastTireSaleByClientId.get(vehicle.ownerId) : undefined;
+    if (!lastTireSaleItem) {
+      return { vehicleId: vehicle.id, licensePlate: vehicle.licensePlate, model: vehicle.model, owner: vehicle.owner, mileageKm: vehicle.mileageKm, lastTireSale: null, monthsSinceLastTireSale: null, suggestsRotation: false };
+    }
+    const saleDate = lastTireSaleItem.sale.createdAt;
+    const monthsSince = (Date.now() - saleDate.getTime()) / (1000 * 60 * 60 * 24 * 30.44);
+    return {
+      vehicleId: vehicle.id,
+      licensePlate: vehicle.licensePlate,
+      model: vehicle.model,
+      owner: vehicle.owner,
+      mileageKm: vehicle.mileageKm,
+      lastTireSale: { saleId: lastTireSaleItem.sale.id, productName: lastTireSaleItem.product?.name ?? null, soldAt: saleDate },
+      monthsSinceLastTireSale: Math.round(monthsSince * 10) / 10,
+      suggestsRotation: monthsSince >= ROTATION_SUGGESTION_MONTHS,
+    };
+  });
 
   return res.json({ success: true, data: suggestions.filter((s) => s.lastTireSale !== null), error: null });
 });

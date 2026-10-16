@@ -1655,6 +1655,11 @@ model SaleItem {
 
   @@index([tenantId, saleId])
   @@index([tenantId, productId])
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7, ALTO): variant-turnover.routes.ts
+  // (Capítulo 4.6) filtra SaleItem por tenantId+productVariantId (não nulo) para
+  // todo relatório de giro por grade/variante — sem este índice, o Postgres
+  // varria toda a tabela sale_items do tenant para montar o agregado.
+  @@index([tenantId, productVariantId])
   @@map("sale_items")
 }
 
@@ -1769,6 +1774,12 @@ model StockMovement {
 
   @@index([tenantId, productId, createdAt])
   @@index([tenantId, type])
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7, ALTO): GET /stock-movements
+  // (stock.routes.ts) filtra por tenantId+type (sem productId, ex.: ver todos os
+  // ADJUSTMENT/LOSS do período) e ordena por createdAt desc com `take: 200` — sem
+  // este índice composto, o Postgres precisava varrer tudo que bate `[tenantId,
+  // type]` e ordenar em memória em vez de usar o índice para o sort também.
+  @@index([tenantId, type, createdAt])
   @@map("stock_movements")
 }
 

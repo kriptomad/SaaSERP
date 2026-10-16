@@ -54,13 +54,26 @@ const periodQuerySchema = z.object({
 // LABOR, commissionable = true), apenas de O.S. que chegaram a DELIVERED.
 // ─────────────────────────────────────────────────────────────────────────
 
-async function resolveCommissionPercent(tenantId: string, technicianId: string): Promise<number> {
-  const [own, fallback] = await Promise.all([
-    prisma.technicianCommissionRule.findUnique({ where: { technicianId } }),
+// CORREÇÃO DE AUDITORIA (mega-audit rodada 7, N+1 ALTO): antes, `resolveCommissionPercent`
+// era chamado por técnico (2 queries cada — a regra PRÓPRIA do técnico + a regra
+// PADRÃO do tenant, esta ÚLTIMA IDÊNTICA e refeita redundantemente para cada técnico).
+// Agora resolve tudo em 2 queries totais, não 2×N: uma única `findMany` com todas as
+// regras próprias dos técnicos envolvidos + uma única busca da regra padrão do tenant.
+async function resolveCommissionPercentsBatch(tenantId: string, technicianIds: string[]): Promise<Map<string, number>> {
+  const [ownRules, fallback] = await Promise.all([
+    technicianIds.length
+      ? prisma.technicianCommissionRule.findMany({ where: { tenantId, technicianId: { in: technicianIds } } })
+      : Promise.resolve([]),
     prisma.technicianCommissionRule.findFirst({ where: { tenantId, technicianId: null } }),
   ]);
-  const rule = own && own.tenantId === tenantId ? own : fallback;
-  return rule ? Number(rule.commissionPercent) : 0;
+  const ownByTechnicianId = new Map(ownRules.map((rule) => [rule.technicianId as string, rule]));
+  const fallbackPercent = fallback ? Number(fallback.commissionPercent) : 0;
+  const result = new Map<string, number>();
+  for (const technicianId of technicianIds) {
+    const own = ownByTechnicianId.get(technicianId);
+    result.set(technicianId, own ? Number(own.commissionPercent) : fallbackPercent);
+  }
+  return result;
 }
 
 workOrderReportsRouter.get("/work-order-reports/commissions", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
@@ -106,19 +119,18 @@ workOrderReportsRouter.get("/work-order-reports/commissions", requireAuth, requi
     byTechnician.set(wo.assignedTechnician.id, entry);
   }
 
-  const rows = await Promise.all(
-    Array.from(byTechnician.values()).map(async (entry) => {
-      const commissionPercent = await resolveCommissionPercent(tenantId, entry.technicianId);
-      return {
-        ...entry,
-        commissionPercent,
-        commissionValue: Number(((entry.commissionableLaborValue * commissionPercent) / 100).toFixed(2)),
-      };
-    }),
-  );
-  rows.sort((a, b) => b.commissionValue - a.commissionValue);
+  const commissionPercentsByTechnicianId = await resolveCommissionPercentsBatch(tenantId, Array.from(byTechnician.keys()));
+  const computedRows = Array.from(byTechnician.values()).map((entry) => {
+    const commissionPercent = commissionPercentsByTechnicianId.get(entry.technicianId) ?? 0;
+    return {
+      ...entry,
+      commissionPercent,
+      commissionValue: Number(((entry.commissionableLaborValue * commissionPercent) / 100).toFixed(2)),
+    };
+  });
+  computedRows.sort((a, b) => b.commissionValue - a.commissionValue);
 
-  return res.json({ success: true, data: { from: from ?? null, to: to ?? null, technicians: rows }, error: null });
+  return res.json({ success: true, data: { from: from ?? null, to: to ?? null, technicians: computedRows }, error: null });
 });
 
 workOrderReportsRouter.get("/work-order-reports/commissions/rules", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {

@@ -86,11 +86,17 @@ clientRecordsRouter.get("/pets/:id/crm-summary", requireAuth, requireModule("PET
   const pet = await prisma.pet.findFirst({ where: { id: req.params.id, tenantId }, include: { owner: { select: { id: true, name: true, phone: true, email: true } } } });
   if (!pet) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Pet não encontrado." } });
   const [vaccineRecords, appointments, sales] = await Promise.all([
-    prisma.vaccineRecord.findMany({ where: { tenantId, petId: pet.id }, orderBy: { appliedAt: "desc" } }),
+    // CORREÇÃO DE AUDITORIA (mega-audit rodada 7, ALTO): sem `take`, um pet com anos
+    // de histórico (vacinas anuais + banho/tosa mensal) devolvia a lista INTEIRA
+    // nesta tela de resumo — que é um CRM consolidado, não uma tela de histórico
+    // completo paginado. Limitado aos registros mais recentes, mesmo teto já usado
+    // para `sales` logo abaixo.
+    prisma.vaccineRecord.findMany({ where: { tenantId, petId: pet.id }, orderBy: { appliedAt: "desc" }, take: 50 }),
     prisma.appointment.findMany({
       where: { tenantId, petId: pet.id },
       include: { service: { select: { id: true, name: true } }, professional: { select: { id: true, name: true } } },
       orderBy: { scheduledAt: "desc" },
+      take: 50,
     }),
     prisma.sale.findMany({
       where: { tenantId, clientId: pet.ownerId },

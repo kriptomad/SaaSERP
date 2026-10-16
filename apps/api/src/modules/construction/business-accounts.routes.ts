@@ -82,6 +82,13 @@ businessAccountsRouter.get("/business-accounts/:clientId/monthly-statement", req
     where: { tenantId, clientId: client.id, paymentMethod: "STORE_CREDIT", createdAt: { gte: start, lte: end } },
     include: { items: true },
     orderBy: { createdAt: "asc" },
+    // CORREÇÃO DE AUDITORIA (mega-audit rodada 7, defesa em profundidade): já
+    // escopado por cliente único + mês único (não é um N+1 nem uma listagem global
+    // sem filtro), mas sem nenhum teto explícito uma conta profissional com volume
+    // anômalo de vendas no mês (ex.: integração externa com bug gerando milhares de
+    // vendas) ainda conseguiria estourar a resposta. Mesmo padrão de `take` usado em
+    // outras rotas de relatório do arquivo (ex.: work-order-reports.routes.ts).
+    take: 5000,
   });
 
   return res.json({
