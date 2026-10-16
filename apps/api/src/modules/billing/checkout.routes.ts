@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { hasManageSubscriptionPermission } from "./modules.routes";
 import { findOrCreateStripeCustomer, createStripeCheckoutSession, StripeCheckoutLineItem } from "./stripe.client";
@@ -29,6 +29,8 @@ const log = createModuleLogger("billing-checkout");
 
 const err = (res: Response, status: number, code: string, message: string) =>
   res.status(status).json({ success: false, data: null, error: { code, message } });
+
+class AlreadySubscribedError extends Error {}
 
 const checkoutSchema = z.object({
   planCode: z.string().min(1),
@@ -64,10 +66,14 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
   if (!owner) return err(res, 500, "OWNER_NOT_FOUND", "Nenhum usuário OWNER encontrado para este tenant.");
   if (!plan || !plan.active) return err(res, 404, "PLAN_NOT_FOUND", `Plano "${input.planCode}" não existe ou foi descontinuado.`);
 
-  const existingActive = await prisma.subscription.findFirst({
+  // GAP DE AUDITORIA FECHADO (Rodada 6) — a checagem de "já tem assinatura ativa"
+  // rodava solta, antes da validação de módulos. Mantida aqui cedo (falha rápida),
+  // mas a decisão definitiva de bloquear/prosseguir é refeita dentro da transação
+  // abaixo, que é quem efetivamente serializa a concorrência.
+  const existingActivePrecheck = await prisma.subscription.findFirst({
     where: { tenantId, status: { in: ["ACTIVE", "PAST_DUE"] } },
   });
-  if (existingActive) {
+  if (existingActivePrecheck) {
     return err(
       res,
       409,
@@ -99,21 +105,58 @@ checkoutRouter.post("/api/billing/checkout", requireAuth, async (req: Request, r
   ];
   const computedMrr = breakdown.reduce((sum, item) => sum + item.price, 0);
 
-  // Descarta qualquer tentativa anterior não concluída deste tenant — nunca acumula
-  // linhas órfãs em PENDING_CHECKOUT (o lojista pode mudar de ideia de plano/módulos
-  // e tentar de novo quantas vezes quiser antes de efetivamente pagar).
-  await prisma.subscription.deleteMany({ where: { tenantId, status: "PENDING_CHECKOUT" } });
+  // GAP DE AUDITORIA FECHADO (Rodada 6) — a checagem de "já tem assinatura ativa" +
+  // o descarte de tentativa anterior + a criação da nova linha PENDING_CHECKOUT
+  // rodavam como 3 operações soltas: duas requisições concorrentes do mesmo tenant
+  // (duplo clique, aba duplicada) podiam ambas passar pela checagem antes de
+  // qualquer uma escrever, resultando em 2 linhas PENDING_CHECKOUT e 2 checkouts
+  // abertos no provedor para o mesmo tenant. Serializable fatia o acesso: a segunda
+  // transação concorrente recebe um erro de conflito (P2034) do Postgres, nunca
+  // duas linhas vivas ao mesmo tempo.
+  let pendingSubscription;
+  try {
+    pendingSubscription = await prisma.$transaction(
+      async (tx) => {
+        const existingActive = await tx.subscription.findFirst({
+          where: { tenantId, status: { in: ["ACTIVE", "PAST_DUE"] } },
+        });
+        if (existingActive) {
+          throw new AlreadySubscribedError();
+        }
 
-  const pendingSubscription = await prisma.subscription.create({
-    data: {
-      tenantId,
-      planId: plan.id,
-      provider: input.paymentGateway.toLowerCase(),
-      externalSubscriptionId: `pending:${randomUUID()}`,
-      status: "PENDING_CHECKOUT",
-      pendingModuleCodes: billableModules.map((m) => m.code),
-    },
-  });
+        // Descarta qualquer tentativa anterior não concluída deste tenant — nunca
+        // acumula linhas órfãs em PENDING_CHECKOUT (o lojista pode mudar de ideia de
+        // plano/módulos e tentar de novo quantas vezes quiser antes de efetivamente
+        // pagar).
+        await tx.subscription.deleteMany({ where: { tenantId, status: "PENDING_CHECKOUT" } });
+
+        return tx.subscription.create({
+          data: {
+            tenantId,
+            planId: plan.id,
+            provider: input.paymentGateway.toLowerCase(),
+            externalSubscriptionId: `pending:${randomUUID()}`,
+            status: "PENDING_CHECKOUT",
+            pendingModuleCodes: billableModules.map((m) => m.code),
+          },
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+  } catch (caughtErr) {
+    if (caughtErr instanceof AlreadySubscribedError) {
+      return err(
+        res,
+        409,
+        "ALREADY_SUBSCRIBED",
+        "Este tenant já possui uma assinatura ativa — use a troca de plano/ativação de módulos em vez de um novo checkout.",
+      );
+    }
+    if (caughtErr instanceof Prisma.PrismaClientKnownRequestError && caughtErr.code === "P2034") {
+      return err(res, 409, "CONCURRENT_CHECKOUT_CONFLICT", "Outra solicitação de checkout para este tenant está em andamento. Tente novamente em instantes.");
+    }
+    throw caughtErr;
+  }
 
   const appBaseUrl = await resolveAppBaseUrl();
   const successUrl = `${appBaseUrl}/billing/checkout/success?subscriptionId=${pendingSubscription.id}`;

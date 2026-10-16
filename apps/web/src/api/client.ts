@@ -180,6 +180,14 @@ export function login(input: LoginInput): Promise<AuthResponse> {
   return request("/auth/login", { method: "POST", body: JSON.stringify(input) });
 }
 
+export function requestPasswordReset(input: { tenantSlug: string; email: string }): Promise<{ message: string }> {
+  return api.post("/auth/password-reset/request", input);
+}
+
+export function confirmPasswordReset(input: { token: string; newPassword: string }): Promise<{ message: string }> {
+  return api.post("/auth/password-reset/confirm", input);
+}
+
 export function fetchMe(): Promise<{ session: { tenantId: string; userId: string; role: string } }> {
   return request("/me");
 }

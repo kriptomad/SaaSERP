@@ -18,11 +18,24 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prismaUnscoped as prisma } from "@filitech/db";
+import { isTenantLocked } from "../../middlewares/tenant-lockout.middleware";
 
 export const publicBookingRouter = Router();
 
+// GAP DE AUDITORIA FECHADO (Rodada 6) — esta rota pública nunca checava
+// `Tenant.status`: um tenant SUSPENDED/CANCELLED (ou PAST_DUE fora do grace period)
+// continuava recebendo agendamentos novos indefinidamente pela página pública, mesmo
+// com o app autenticado inteiro bloqueado por `tenantLockoutMiddleware` (Capítulo 2).
+// Mesma regra de negócio (`isTenantLocked`), nunca duplicada — e mesmo tratamento de
+// "não encontrado" dos outros bloqueios aqui (nunca revela que o slug existe mas está
+// suspenso, evitando enumeração de tenants inadimplentes).
 async function resolveTenantBySlug(slug: string) {
-  return prisma.tenant.findUnique({ where: { slug }, select: { id: true, tradeName: true } });
+  const tenant = await prisma.tenant.findUnique({
+    where: { slug },
+    select: { id: true, tradeName: true, status: true, gracePeriodEndsAt: true },
+  });
+  if (!tenant || isTenantLocked(tenant)) return null;
+  return tenant;
 }
 
 function notFoundTenant(res: Response) {

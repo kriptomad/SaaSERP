@@ -4,6 +4,8 @@ import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { LandingPage } from "./landing/LandingPage";
 import { LoginPage } from "./pages/LoginPage";
 import { SignupPage } from "./pages/SignupPage";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { StatusPage } from "./pages/StatusPage";
 import { LegalPage } from "./pages/LegalPage";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -122,6 +124,8 @@ export function App() {
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/signup" element={<SignupPage />} />
+            <Route path="/esqueci-senha" element={<ForgotPasswordPage />} />
+            <Route path="/redefinir-senha" element={<ResetPasswordPage />} />
             {/* Pública, sem auth: Cap. 15.1.5 — página de status da plataforma */}
             <Route path="/status" element={<StatusPage />} />
             {/* Pública, sem auth: Termos de Uso e Política de Privacidade (linkados no cadastro) */}

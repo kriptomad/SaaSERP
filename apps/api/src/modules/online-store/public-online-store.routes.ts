@@ -9,18 +9,23 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { presignObjectDownload } from "../../lib/object-storage";
+import { isTenantLocked } from "../../middlewares/tenant-lockout.middleware";
 
 export const publicOnlineStoreRouter = Router();
 
 async function resolveActiveStoreBySlug(customSlug: string) {
   const settings = await prisma.onlineStoreSettings.findUnique({
     where: { customSlug },
-    include: { tenant: { select: { id: true, tradeName: true, status: true } } },
+    include: { tenant: { select: { id: true, tradeName: true, status: true, gracePeriodEndsAt: true } } },
   });
-  // Loja desativada pelo lojista ou tenant suspenso por inadimplência -> mesmo
-  // tratamento de "não encontrada" (nunca revela que o slug existe mas está
-  // bloqueado, evitando enumeração de tenants inadimplentes).
-  if (!settings || !settings.isActive || settings.tenant.status === "SUSPENDED") return null;
+  // Loja desativada pelo lojista ou tenant bloqueado por inadimplência (SUSPENDED/
+  // CANCELLED/PAST_DUE fora do grace period — GAP DE AUDITORIA FECHADO na Rodada 6:
+  // antes só checava SUSPENDED, nunca CANCELLED nem PAST_DUE vencido, deixando a
+  // vitrine pública aceitando pedidos novos indefinidamente para tenants bloqueados
+  // em qualquer uma dessas duas outras situações) -> mesmo tratamento de "não
+  // encontrada" (nunca revela que o slug existe mas está bloqueado, evitando
+  // enumeração de tenants inadimplentes).
+  if (!settings || !settings.isActive || isTenantLocked(settings.tenant)) return null;
   return settings;
 }
 

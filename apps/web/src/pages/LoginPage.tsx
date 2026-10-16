@@ -70,6 +70,9 @@ export function LoginPage() {
               {loading ? "Entrando..." : "Entrar"}
             </Button>
             <Typography variant="body2" align="center">
+              <MuiLink href="/esqueci-senha">Esqueci minha senha</MuiLink>
+            </Typography>
+            <Typography variant="body2" align="center">
               Não tem conta? <MuiLink href="/signup">Criar empresa</MuiLink>
             </Typography>
           </Stack>

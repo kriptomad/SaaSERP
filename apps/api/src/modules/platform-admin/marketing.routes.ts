@@ -7,6 +7,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { requirePlatformAdminAuth, requireSuperAdmin } from "./platform-admin-auth.middleware";
+import { applyReferrerCreditToProvider, applyReferredDiscountToProvider } from "../billing/referral-billing.service";
 
 export const marketingAdminRouter = Router();
 
@@ -237,6 +238,16 @@ marketingAdminRouter.post("/platform-admin/referrals/:id/reward-applied", requir
           }),
         ]
       : []),
+  ]);
+
+  // GAP DE AUDITORIA FECHADO (Rodada 6) — até aqui só o banco local sabia do crédito;
+  // agora a cobrança real no Stripe/Asaas também é abatida (best-effort, nunca
+  // bloqueia a recompensa já persistida acima em caso de falha do provedor).
+  await Promise.all([
+    referrerSubscription ? applyReferrerCreditToProvider(referrerSubscription.id, creditMonths) : Promise.resolve(),
+    referredSubscription && referredSubscription.firstCycleDiscountPercent == null
+      ? applyReferredDiscountToProvider(referredSubscription.id, referredDiscountPercent)
+      : Promise.resolve(),
   ]);
 
   await writeAuditLog(req, "REFERRAL_REWARD_APPLIED", "Referral", referral.id, {

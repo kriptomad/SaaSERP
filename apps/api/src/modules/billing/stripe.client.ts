@@ -216,3 +216,35 @@ export async function refundLatestStripeInvoice(stripeSubscriptionId: string): P
   const refund = await stripe.refunds.create({ payment_intent: paymentIntentId });
   return refund.id;
 }
+
+// GAP DE AUDITORIA FECHADO (Rodada 6, Capítulo 2.8) — a recompensa do indicador
+// (`Subscription.creditBalanceMonths`) era gravada só localmente e NUNCA refletia na
+// cobrança de verdade. Usa o "customer balance" nativo do Stripe (crédito acumulado
+// que se abate automaticamente na(s) próxima(s) fatura(s), suportando inclusive mais
+// de um mês de crédito de uma vez): um valor negativo aqui é crédito a favor do
+// cliente, nunca débito.
+export async function grantStripeCustomerBalanceCredit(stripeCustomerId: string, amountBrlCents: number, description: string): Promise<void> {
+  if (amountBrlCents <= 0) return;
+  const stripe = await getStripeClient();
+  await stripe.customers.createBalanceTransaction(stripeCustomerId, {
+    amount: -Math.round(amountBrlCents),
+    currency: "brl",
+    description,
+  });
+}
+
+// Desconto de primeiro ciclo para o tenant INDICADO (Capítulo 2.8) — cupom
+// `duration: "once"` criado sob demanda (nunca reaproveitado entre tenants
+// diferentes, já que `percent_off` pode variar por SystemParameter) e aplicado
+// diretamente na assinatura: o Stripe abate automaticamente na PRÓXIMA fatura
+// gerada e nunca mais depois disso.
+export async function applyStripeFirstCycleDiscount(stripeSubscriptionId: string, percentOff: number): Promise<void> {
+  if (percentOff <= 0) return;
+  const stripe = await getStripeClient();
+  const coupon = await stripe.coupons.create({
+    percent_off: percentOff,
+    duration: "once",
+    name: `Desconto de indicação — primeiro ciclo (${percentOff}%)`,
+  });
+  await stripe.subscriptions.update(stripeSubscriptionId, { coupon: coupon.id });
+}

@@ -195,3 +195,26 @@ export interface AsaasPixQrCode {
 export function getAsaasPixQrCode(paymentId: string): Promise<AsaasPixQrCode> {
   return asaasRequest(`/payments/${paymentId}/pixQrCode`);
 }
+
+// GAP DE AUDITORIA FECHADO (Rodada 6, Capítulo 2.8) — equivalente Asaas do crédito de
+// indicação. O Asaas não tem "customer balance" nativo como o Stripe: a única forma
+// real de abater um valor é alterar a cobrança (`payment`) futura ANTES dela ser paga.
+// Busca as próximas N cobranças PENDING desta assinatura (mais antiga primeiro — FIFO,
+// mesmo princípio de outras filas deste sistema) para zerar/descontar.
+export interface AsaasSubscriptionPayment {
+  id: string;
+  value: number;
+  dueDate: string;
+  status: string;
+}
+
+export async function listPendingAsaasSubscriptionPayments(subscriptionId: string, limit: number): Promise<AsaasSubscriptionPayment[]> {
+  const result = await asaasRequest<{ data: AsaasSubscriptionPayment[] }>(
+    `/subscriptions/${subscriptionId}/payments?status=PENDING&limit=${limit}&order=asc`,
+  );
+  return result.data ?? [];
+}
+
+export function updateAsaasPaymentValue(paymentId: string, newValue: number) {
+  return asaasRequest(`/payments/${paymentId}`, { method: "PUT", body: JSON.stringify({ value: Math.max(newValue, 0.01) }) });
+}
