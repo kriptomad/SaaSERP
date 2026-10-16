@@ -29,7 +29,12 @@ export async function syncPendingSales(): Promise<SyncResult> {
   const result: SyncResult = { synced: [], failed: [], stillPending: [] };
   if (!token) return result;
 
-  const pending = await offlineDb.pendingSales.where("syncStatus").anyOf("PENDING", "SYNCING").toArray();
+  const pending = (await offlineDb.pendingSales.where("syncStatus").anyOf("PENDING", "SYNCING").toArray()).filter(
+    // Respeita o backoff agendado — uma venda que acabou de falhar não é
+    // reprocessada de novo neste mesmo disparo de sync, mesmo que o evento
+    // "online"/background sync dispare repetidamente em sequência.
+    (sale) => !sale.nextAttemptAt || sale.nextAttemptAt <= Date.now(),
+  );
 
   for (const sale of pending) {
     await offlineDb.pendingSales.update(sale.localId, { syncStatus: "SYNCING" });
@@ -74,10 +79,16 @@ export async function syncPendingSales(): Promise<SyncResult> {
 
 async function requeueWithBackoff(sale: PendingSale, errorMessage: string) {
   const nextAttempts = sale.syncAttempts + 1;
+  // Backoff exponencial (2s, 4s, 8s... teto de 2min) com jitter de até 25% — evita
+  // que várias vendas pendentes retentem todas no MESMO instante exato (efeito
+  // manada) quando a rede volta.
+  const baseDelayMs = Math.min(2_000 * 2 ** sale.syncAttempts, 120_000);
+  const jitterMs = baseDelayMs * 0.25 * Math.random();
   await offlineDb.pendingSales.update(sale.localId, {
     syncStatus: nextAttempts >= MAX_SYNC_ATTEMPTS ? "FAILED" : "PENDING",
     syncAttempts: nextAttempts,
     lastError: errorMessage,
+    nextAttemptAt: nextAttempts >= MAX_SYNC_ATTEMPTS ? undefined : Date.now() + baseDelayMs + jitterMs,
   });
 }
 

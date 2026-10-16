@@ -29,7 +29,7 @@ import {
 import { useLiveQuery } from "dexie-react-hooks";
 import { useAuth } from "../../../auth/AuthContext";
 import { offlineDb } from "../../../shared/offline/db";
-import { syncProductCatalog } from "../../../shared/offline/sync-catalog";
+import { syncProductCatalog, getOldestCachedProductAge, CATALOG_STALE_THRESHOLD_MS } from "../../../shared/offline/sync-catalog";
 import { syncPendingSales, retryFailedSale, retryAllFailedSales } from "../../../shared/offline/sync-pending-sales";
 import { closeSaleOffline } from "./close-sale-offline";
 import { fetchCurrentCashRegister, openCashRegister } from "../../../api/client";
@@ -40,7 +40,7 @@ import { loadHardwareConfig, type HardwareConfig } from "../../../shared/hardwar
 import { ThermalPrinterService, PRINTER_PROFILES, isWebSerialSupported } from "../../../shared/hardware/thermal-printer.service";
 import { buildReceipt } from "../../../shared/hardware/receipt-layout";
 import { ScaleService, SCALE_PROFILES, isWebSerialSupportedForScale } from "../../../shared/hardware/scale.service";
-import { startTefTransaction, confirmTefTransaction, cancelTefTransaction } from "../../../shared/hardware/tef-client";
+import { startTefTransaction, confirmTefTransaction, cancelTefTransaction, continueTefTransaction, TefSessionResult } from "../../../shared/hardware/tef-client";
 
 interface CartLine {
   productId: string;
@@ -86,6 +86,11 @@ export function PosPage() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [lastSaleMessage, setLastSaleMessage] = useState<string | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): idade (ms) do catálogo offline desde
+  // o último sync bem-sucedido — null enquanto nunca sincronizou nesta sessão. Usado
+  // para alertar o caixa ANTES de fechar vendas com um preço/estoque local velho
+  // demais para confiar (ver CATALOG_STALE_THRESHOLD_MS).
+  const [catalogAgeMs, setCatalogAgeMs] = useState<number | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH");
   // Pagamento Dividido/Split (Capítulo 9) — o cenário real mais comum de PDV físico:
   // parte em dinheiro, parte no cartão (débito OU crédito, nunca os dois juntos nesta
@@ -99,6 +104,22 @@ export function PosPage() {
   const [printerConnected, setPrinterConnected] = useState(false);
   const [hardwareMessage, setHardwareMessage] = useState<string | null>(null);
   const [tefBusy, setTefBusy] = useState(false);
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): antes, quando a maquininha
+  // retornava AWAITING_CONTINUATION (ex.: pedindo senha/confirmação adicional no
+  // pinpad), o PDV simplesmente informava "não suportado" e abandonava a sessão
+  // SEM cancelá-la — a transação ficava pendurada no daemon SiTef/adquirente até o
+  // TTL expirar sozinho (180s), podendo confundir o operador sobre se o cartão foi
+  // ou não cobrado. Agora o PDV de fato RESPONDE à continuação via um diálogo
+  // modal (texto ou confirmação, conforme `pendingContinuation.kind`) e só desiste
+  // — cancelando explicitamente a sessão — se o operador recusar/fechar o diálogo.
+  const [tefContinuation, setTefContinuation] = useState<{
+    sessionId: string;
+    fieldId: string;
+    label: string;
+    kind: "CONFIRMATION" | "TEXT";
+    value: string;
+  } | null>(null);
+  const tefContinuationResolverRef = useRef<((value: string | null) => void) | null>(null);
   const [prescriptionPrompt, setPrescriptionPrompt] = useState<{
     product: { id: string; name: string; unitPrice: number };
     prescriptionType: "NOTIFICACAO_B_AZUL" | "RECEITA_A_AMARELA" | "RECEITA_ELETRONICA_SNCR";
@@ -137,7 +158,10 @@ export function PosPage() {
   const [reconcileOpen, setReconcileOpen] = useState(false);
 
   useEffect(() => {
-    syncProductCatalog().catch((error) => setCatalogError((error as Error).message));
+    syncProductCatalog()
+      .then(() => getOldestCachedProductAge())
+      .then(setCatalogAgeMs)
+      .catch((error) => setCatalogError((error as Error).message));
     syncPendingSales().catch(() => undefined);
 
     fetchCurrentCashRegister()
@@ -148,9 +172,18 @@ export function PosPage() {
     const handleOffline = () => setIsOnline(false);
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
+
+    // Reavalia a idade do catálogo local a cada minuto, mesmo sem reconectar — é o
+    // que faz o aviso aparecer "ao vivo" num tablet esquecido offline por horas, em
+    // vez de só no carregamento inicial da tela.
+    const staleCheckInterval = setInterval(() => {
+      getOldestCachedProductAge().then(setCatalogAgeMs).catch(() => undefined);
+    }, 60_000);
+
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
+      clearInterval(staleCheckInterval);
     };
   }, []);
 
@@ -374,6 +407,41 @@ export function PosPage() {
     }
   }
 
+  // Resolve o diálogo de continuação TEF aberto (ver `tefContinuation` state) com o
+  // valor digitado/confirmado pelo operador, ou `null` se ele cancelar o diálogo —
+  // usado tanto pelo botão "Confirmar" quanto por "Cancelar" no JSX do diálogo.
+  function resolveTefContinuationPrompt(value: string | null) {
+    tefContinuationResolverRef.current?.(value);
+    tefContinuationResolverRef.current = null;
+    setTefContinuation(null);
+  }
+
+  // Executa o fluxo de transação TEF por completo, inclusive respondendo a
+  // quantos passos de `AWAITING_CONTINUATION` a adquirente pedir (ex.: confirmar
+  // valor no pinpad, digitar CPF na nota) — nunca abandona uma sessão em
+  // continuação sem cancelá-la explicitamente no daemon.
+  async function runTefTransactionWithContinuation(params: {
+    amountCents: number;
+    transactionType: "CREDIT" | "DEBIT";
+    saleReference: string;
+  }): Promise<TefSessionResult> {
+    let result = await startTefTransaction(params);
+    while (result.status === "AWAITING_CONTINUATION" && result.pendingContinuation) {
+      const { fieldId, label, kind } = result.pendingContinuation;
+      const userValue = await new Promise<string | null>((resolve) => {
+        tefContinuationResolverRef.current = resolve;
+        setTefContinuation({ sessionId: result.sessionId, fieldId, label, kind, value: kind === "CONFIRMATION" ? "S" : "" });
+      });
+      if (userValue === null) {
+        // Operador cancelou o diálogo — nunca deixa a sessão pendurada no daemon.
+        await cancelTefTransaction(result.sessionId, result.nsu ?? "N/A", "Operador cancelou a confirmação pedida pela maquininha.").catch(() => undefined);
+        return { ...result, status: "CANCELLED", rejectionReason: "Confirmação cancelada pelo operador no PDV." };
+      }
+      result = await continueTefTransaction(result.sessionId, fieldId, userValue);
+    }
+    return result;
+  }
+
   async function handleCloseSale() {
     if (!user || cart.length === 0 || !cashRegisterId) return;
 
@@ -405,17 +473,13 @@ export function PosPage() {
       setHardwareMessage("Enviando transação para a maquininha (TEF)…");
       try {
         const saleReference = `pdv-${Date.now()}`;
-        const result = await startTefTransaction({
+        const result = await runTefTransactionWithContinuation({
           amountCents: Math.round(cardAmount * 100),
           transactionType: cardMethod === "CREDIT_CARD" ? "CREDIT" : "DEBIT",
           saleReference,
         });
         if (result.status !== "APPROVED") {
-          setHardwareMessage(
-            result.status === "AWAITING_CONTINUATION"
-              ? "A maquininha pediu uma confirmação adicional não suportada neste fluxo simplificado — cancele e tente novamente."
-              : `Transação recusada: ${result.rejectionReason ?? "motivo não informado."}`,
-          );
+          setHardwareMessage(`Transação recusada: ${result.rejectionReason ?? "motivo não informado."}`);
           setTefBusy(false);
           return;
         }
@@ -509,6 +573,13 @@ export function PosPage() {
       </Stack>
 
       {catalogError && <Alert severity="warning" sx={{ mb: 2 }}>Catálogo não sincronizado: {catalogError}</Alert>}
+      {catalogAgeMs !== null && catalogAgeMs > CATALOG_STALE_THRESHOLD_MS && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Catálogo local desatualizado há {Math.floor(catalogAgeMs / (60 * 60 * 1000))}h — preços e estoque exibidos podem estar
+          incorretos. Conecte-se à internet para sincronizar antes de continuar vendendo. (O servidor sempre revalida o preço
+          real no fechamento da venda, mas a tela pode estar mostrando valores antigos ao caixa.)
+        </Alert>
+      )}
       {lastSaleMessage && <Alert severity="success" sx={{ mb: 2 }}>{lastSaleMessage}</Alert>}
       {hardwareMessage && <Alert severity="info" sx={{ mb: 2 }}>{hardwareMessage}</Alert>}
 
@@ -739,6 +810,33 @@ export function PosPage() {
             onClick={confirmPrescriptionPrompt}
           >
             Confirmar e adicionar ao carrinho
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Continuação de transação TEF (Capítulo 23.5): a maquininha/adquirente pode
+          pedir um passo extra (ex.: confirmar valor no pinpad, digitar um dado) antes
+          de aprovar — nunca abandonamos a sessão sem responder ou cancelar
+          explicitamente (ver runTefTransactionWithContinuation acima). */}
+      <Dialog open={Boolean(tefContinuation)} onClose={() => resolveTefContinuationPrompt(null)} fullWidth maxWidth="xs">
+        <DialogTitle>Confirmação pedida pela maquininha</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Alert severity="info">{tefContinuation?.label ?? "A maquininha está aguardando uma confirmação adicional."}</Alert>
+            {tefContinuation?.kind === "TEXT" && (
+              <TextField
+                autoFocus
+                label={tefContinuation.label}
+                value={tefContinuation.value}
+                onChange={(e) => setTefContinuation((prev) => (prev ? { ...prev, value: e.target.value } : prev))}
+              />
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => resolveTefContinuationPrompt(null)}>Cancelar transação</Button>
+          <Button variant="contained" onClick={() => resolveTefContinuationPrompt(tefContinuation?.value ?? "")}>
+            Confirmar
           </Button>
         </DialogActions>
       </Dialog>

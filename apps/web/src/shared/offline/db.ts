@@ -20,6 +20,13 @@ export interface CachedProduct {
   // (ou, pior, na sincronização em segundo plano, quando o cliente já saiu da loja).
   requiresPrescriptionRetention: boolean;
   isControlledSubstance: boolean;
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): sem isto não havia como o PDV saber
+  // há quanto tempo este preço/estoque foi sincronizado pela última vez — um tablet
+  // esquecido offline por dias continuava vendendo pelo preço antigo silenciosamente.
+  // Epoch ms do último `syncProductCatalog()` bem-sucedido para ESTE produto — usado
+  // pela UI do PDV para exibir um aviso visível quando o catálogo local está velho
+  // demais para ser confiável (ver `CATALOG_STALE_THRESHOLD_MS` em sync-catalog.ts).
+  cachedAt: number;
 }
 
 export interface PendingSale {
@@ -29,6 +36,13 @@ export interface PendingSale {
   syncStatus: "PENDING" | "SYNCING" | "FAILED" | "SYNCED";
   syncAttempts: number;
   lastError?: string;
+  // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): sem isto, uma venda PENDING era
+  // retentada em TODO disparo de sync (evento "online", postMessage do Background
+  // Sync, múltiplas abas) sem nenhum espaçamento — numa reconexão instável, isso
+  // martelava o backend repetidas vezes em sequência rápida. Agora guarda o
+  // timestamp (epoch ms) antes do qual esta venda NÃO deve ser retentada —
+  // calculado com backoff exponencial + jitter em `requeueWithBackoff`.
+  nextAttemptAt?: number;
 }
 
 export interface CatalogSyncState {

@@ -131,6 +131,17 @@ export class ConsignmentSupplierRequiredError extends Error {}
 // ser vendido.
 export class KitCompositionMissingError extends Error {}
 
+// CORREÇÃO DE AUDITORIA (mega-audit rodada 7, falha CRÍTICA de integridade financeira):
+// `item.unitPrice` vinha do CLIENTE (payload do PDV — inclusive do carrinho offline,
+// Capítulo 8.3) e era usado DIRETO no cálculo de `lineGross`/`SaleItem.unitPrice`, sem
+// qualquer verificação contra o preço real cadastrado no servidor (`Product.unitPrice`/
+// `wholesalePrice`/`resalePrice`/`ProductVariant.priceOverride` — mesma cascata de
+// `product-pricing.routes.ts`). Um caixa mal-intencionado (ou um cache offline
+// desatualizado/corrompido) podia fechar qualquer venda pelo preço que quisesse, sem
+// nenhuma trava — ex.: vender um produto de R$ 5.000 por R$ 0,01. Lançado quando o
+// preço enviado diverge do preço canônico resolvido no servidor.
+export class PriceMismatchError extends Error {}
+
 export async function closeSale(prisma: TenantScopedPrismaClient, input: CloseSaleServerInput) {
   // Idempotência em primeiro lugar, fora/antes de qualquer efeito colateral: o Service
   // Worker do PDV offline (Capítulo 8.3) pode reenviar a mesma venda várias vezes
@@ -191,7 +202,7 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
       // anônimo) nunca cruza fronteira estadual de fato, então cai para a UF do
       // próprio tenant (destino = origem, DIFAL inaplicável por definição).
       const saleClient = input.clientId
-        ? await tx.client.findFirst({ where: { id: input.clientId, tenantId: input.tenantId }, select: { uf: true, icmsContributor: true } })
+        ? await tx.client.findFirst({ where: { id: input.clientId, tenantId: input.tenantId }, select: { uf: true, icmsContributor: true, isReseller: true } })
         : null;
       // O caixa precisa pertencer ao tenant da sessão — nunca aceita um cashRegisterId alheio.
       // Não exige status OPEN: vendas do PDV offline (Capítulo 8.3) podem sincronizar
@@ -235,6 +246,33 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
 
       for (const item of input.items) {
         const product = await tx.product.findFirstOrThrow({ where: { id: item.productId, tenantId: input.tenantId } });
+
+        // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): resolve o preço canônico no
+        // SERVIDOR — nunca confia no `item.unitPrice` enviado pelo cliente (PDV online
+        // ou fila offline, Capítulo 8.3) — e rejeita a venda se ele divergir (tolerância
+        // de 1 centavo para arredondamento de Decimal). Mesma cascata de prioridade de
+        // `product-pricing.routes.ts`: 1) `ProductVariant.priceOverride`, 2) Preço
+        // Revenda (`Client.isReseller` + `Product.resalePrice`), 3) Preço Atacado
+        // (`quantity >= wholesaleMinQty` + `wholesalePrice`), 4) Preço Unidade.
+        let expectedUnitPrice: Prisma.Decimal;
+        if (item.productVariantId) {
+          const variantForPricing = await tx.productVariant.findFirst({
+            where: { id: item.productVariantId, tenantId: input.tenantId, productId: product.id },
+            select: { priceOverride: true },
+          });
+          expectedUnitPrice = variantForPricing?.priceOverride ?? product.unitPrice;
+        } else if (saleClient?.isReseller && product.resalePrice !== null) {
+          expectedUnitPrice = product.resalePrice;
+        } else if (product.wholesaleMinQty !== null && product.wholesalePrice !== null && item.quantity >= product.wholesaleMinQty) {
+          expectedUnitPrice = product.wholesalePrice;
+        } else {
+          expectedUnitPrice = product.unitPrice;
+        }
+        if (expectedUnitPrice.minus(new Prisma.Decimal(item.unitPrice)).abs().greaterThan("0.01")) {
+          throw new PriceMismatchError(
+            `Preço divergente para ${product.name}: enviado R$ ${item.unitPrice.toFixed(2)}, preço atual no servidor é R$ ${expectedUnitPrice.toFixed(2)}. Atualize o catálogo e tente novamente.`,
+          );
+        }
 
         // Trava regulatória SNGPC/SNCR (Capítulo 4.5): produto de retenção obrigatória
         // (Lista B/tarja preta — Portaria 344/1998, RDC 1.000/2025) OU classificado como

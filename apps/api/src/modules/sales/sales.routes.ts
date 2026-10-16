@@ -27,6 +27,7 @@ import {
   ConsignmentSupplierRequiredError,
   KitCompositionMissingError,
   SplitPaymentValidationError,
+  PriceMismatchError,
 } from "./close-sale.service";
 import { RateLimitExceededError } from "../../lib/rate-limit";
 import { InsufficientStockError } from "../../services/stock/deduct-stock-fefo.service";
@@ -250,6 +251,7 @@ function resolveSaleCloseError(err: unknown): { status: number; code: string; me
   if (err instanceof ConsignmentSupplierRequiredError) return { status: 400, code: "CONSIGNMENT_SUPPLIER_REQUIRED", message: err.message };
   if (err instanceof KitCompositionMissingError) return { status: 400, code: "KIT_COMPOSITION_MISSING", message: err.message };
   if (err instanceof SplitPaymentValidationError) return { status: 400, code: "SPLIT_PAYMENT_VALIDATION_ERROR", message: err.message };
+  if (err instanceof PriceMismatchError) return { status: 409, code: "PRICE_MISMATCH", message: err.message };
   return null;
 }
 

@@ -33,6 +33,7 @@ export async function syncProductCatalog(): Promise<{ syncedCount: number }> {
   }
   const body = (await response.json()) as { data: RemoteProduct[] };
   const syncedAt = new Date().toISOString();
+  const cachedAt = Date.now();
 
   await offlineDb.transaction("rw", offlineDb.products, offlineDb.syncState, async () => {
     for (const product of body.data) {
@@ -47,10 +48,24 @@ export async function syncProductCatalog(): Promise<{ syncedCount: number }> {
         category: product.category,
         requiresPrescriptionRetention: product.requiresPrescriptionRetention,
         isControlledSubstance: product.isControlledSubstance,
+        cachedAt,
       });
     }
     await offlineDb.syncState.put({ key: "lastSyncedAt", value: syncedAt });
   });
 
   return { syncedCount: body.data.length };
+}
+
+// CORREÇÃO DE AUDITORIA (mega-audit rodada 7): acima de 2 horas sem um
+// `syncProductCatalog()` bem-sucedido, o preço/estoque local não é mais confiável o
+// bastante para o PDV confiar silenciosamente — o backend ainda é a fonte de
+// verdade final (close-sale.service.ts valida o preço de novo), mas o caixa precisa
+// ser avisado ANTES de fechar a venda, não só depois que ela falhar na sincronização.
+export const CATALOG_STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000;
+
+export async function getOldestCachedProductAge(): Promise<number | null> {
+  const lastSync = await offlineDb.syncState.get("lastSyncedAt");
+  if (!lastSync) return null;
+  return Date.now() - new Date(lastSync.value).getTime();
 }
