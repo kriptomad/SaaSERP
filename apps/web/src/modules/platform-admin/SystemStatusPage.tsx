@@ -13,8 +13,8 @@
 // leitura via `GET` simples no primeiro render para já exibir dado antes do
 // primeiro evento SSE chegar.
 import { useEffect, useState, useCallback } from "react";
-import { Alert, Box, Chip, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Typography } from "@mui/material";
-import { fetchSystemStatus, SystemStatusSnapshot, ComponentStatus } from "./system-status.api";
+import { Alert, Box, Button, Chip, MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from "@mui/material";
+import { fetchSystemStatus, SystemStatusSnapshot, ComponentStatus, listIncidents, createIncident, updateIncident, IncidentEventRecord } from "./system-status.api";
 import { useSseStream } from "../../shared/useSseStream";
 import { getStoredPlatformAdminToken } from "./platform-admin-client";
 
@@ -44,12 +44,35 @@ export function SystemStatusPage() {
   const [data, setData] = useState<SystemStatusSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
+  const [incidents, setIncidents] = useState<IncidentEventRecord[]>([]);
+  const [newIncident, setNewIncident] = useState<{ component: "DATABASE" | "REDIS" | "BACKGROUND_JOBS"; severity: "WARNING" | "CRITICAL"; description: string }>({
+    component: "DATABASE",
+    severity: "WARNING",
+    description: "",
+  });
+
+  const refreshIncidents = useCallback(() => {
+    listIncidents().then(setIncidents).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     fetchSystemStatus()
       .then(setData)
       .catch((err) => setError((err as Error).message));
-  }, []);
+    refreshIncidents();
+  }, [refreshIncidents]);
+
+  async function handleCreateIncident() {
+    if (!newIncident.description.trim()) return;
+    await createIncident(newIncident);
+    setNewIncident({ component: "DATABASE", severity: "WARNING", description: "" });
+    refreshIncidents();
+  }
+
+  async function handleResolveIncident(id: string) {
+    await updateIncident(id, { resolvedAt: new Date().toISOString() });
+    refreshIncidents();
+  }
 
   const handleSseEvent = useCallback((event: { type: string; data: unknown }) => {
     if (event.type !== "status") return;
@@ -119,6 +142,82 @@ export function SystemStatusPage() {
                     <TableCell align="right">{q.failed}</TableCell>
                   </TableRow>
                 ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+
+          <Typography variant="h6" sx={{ mt: 4, mb: 2 }}>
+            Incidentes (histórico + registro manual — refletido na página pública /status)
+          </Typography>
+          <Paper sx={{ p: 2, mb: 2 }}>
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap alignItems="center">
+              <TextField
+                select
+                size="small"
+                label="Componente"
+                value={newIncident.component}
+                onChange={(e) => setNewIncident((prev) => ({ ...prev, component: e.target.value as typeof prev.component }))}
+                sx={{ minWidth: 180 }}
+              >
+                <MenuItem value="DATABASE">Banco de dados</MenuItem>
+                <MenuItem value="REDIS">Redis / Cache</MenuItem>
+                <MenuItem value="BACKGROUND_JOBS">Processamento em segundo plano</MenuItem>
+              </TextField>
+              <TextField
+                select
+                size="small"
+                label="Severidade"
+                value={newIncident.severity}
+                onChange={(e) => setNewIncident((prev) => ({ ...prev, severity: e.target.value as typeof prev.severity }))}
+                sx={{ minWidth: 140 }}
+              >
+                <MenuItem value="WARNING">Aviso</MenuItem>
+                <MenuItem value="CRITICAL">Crítico</MenuItem>
+              </TextField>
+              <TextField
+                size="small"
+                label="Descrição pública"
+                value={newIncident.description}
+                onChange={(e) => setNewIncident((prev) => ({ ...prev, description: e.target.value }))}
+                sx={{ flex: 1, minWidth: 260 }}
+              />
+              <Button variant="contained" onClick={handleCreateIncident} disabled={!newIncident.description.trim()}>
+                Registrar incidente
+              </Button>
+            </Stack>
+          </Paper>
+          <TableContainer component={Paper}>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Componente</TableCell>
+                  <TableCell>Severidade</TableCell>
+                  <TableCell>Descrição</TableCell>
+                  <TableCell>Início</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell align="right">Ação</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {incidents.map((incident) => (
+                  <TableRow key={incident.id}>
+                    <TableCell>{incident.component}</TableCell>
+                    <TableCell>{incident.severity}</TableCell>
+                    <TableCell>{incident.description}</TableCell>
+                    <TableCell>{new Date(incident.startedAt).toLocaleString("pt-BR")}</TableCell>
+                    <TableCell>
+                      <Chip size="small" color={incident.resolvedAt ? "default" : "error"} label={incident.resolvedAt ? "Resolvido" : "Em andamento"} />
+                    </TableCell>
+                    <TableCell align="right">
+                      {!incident.resolvedAt && (
+                        <Button size="small" onClick={() => handleResolveIncident(incident.id)}>
+                          Marcar resolvido
+                        </Button>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {incidents.length === 0 && <TableRow><TableCell colSpan={6}>Nenhum incidente registrado.</TableCell></TableRow>}
               </TableBody>
             </Table>
           </TableContainer>

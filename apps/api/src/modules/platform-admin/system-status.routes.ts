@@ -15,13 +15,27 @@
 // cada réplica computa e entrega seu próprio snapshot periódico diretamente aos
 // clientes SSE conectados A ELA, sem necessidade de broadcast cross-réplica.
 import { Router, Request, Response } from "express";
-import { requirePlatformAdminAuth } from "./platform-admin-auth.middleware";
-import { getSystemStatusSnapshot, QUEUE_DISPLAY_NAMES, ComponentStatus } from "./system-status.service";
+import { requirePlatformAdminAuth, requireSuperAdmin } from "./platform-admin-auth.middleware";
+import { getSystemStatusSnapshot, QUEUE_DISPLAY_NAMES, ComponentStatus, recordIncidentTransitions, INCIDENT_COMPONENTS } from "./system-status.service";
 import { createModuleLogger } from "../../lib/logger";
+import { prismaUnscoped as prisma } from "@filitech/db";
+import { z } from "zod";
 
 const log = createModuleLogger("system-status.routes");
 
 export const systemStatusRouter = Router();
+
+async function writeAuditLog(req: Request, action: string, targetType: string, targetId: string | null, metadata: Record<string, unknown>) {
+  await prisma.auditLog.create({
+    data: {
+      platformAdminUserId: req.platformAdminSession!.platformAdminUserId,
+      action,
+      targetType,
+      targetId,
+      metadata: metadata as any,
+    },
+  });
+}
 
 function serializeSnapshot(snapshot: Awaited<ReturnType<typeof getSystemStatusSnapshot>>) {
   return {
@@ -111,6 +125,11 @@ systemStatusRouter.get("/status", async (_req: Request, res: Response) => {
         ? "degraded"
         : "operational";
 
+  // Persiste abertura/resolução automática de IncidentEvent — única chamada deste
+  // efeito colateral no sistema (ver nota em system-status.service.ts), throttled
+  // naturalmente pelo cache de 10s desta rota.
+  recordIncidentTransitions(snapshot).catch((err) => log.error({ err }, "falha ao registrar transição de incidente de status"));
+
   const payload = {
     success: true,
     data: {
@@ -127,4 +146,84 @@ systemStatusRouter.get("/status", async (_req: Request, res: Response) => {
 
   publicStatusCache = { expiresAt: Date.now() + PUBLIC_STATUS_CACHE_TTL_MS, payload };
   return res.json(payload);
+});
+
+// GAP DE AUDITORIA FECHADO (mega-audit round de 100%): histórico de incidentes
+// público (changelog de disponibilidade) — exige transparência real com clientes
+// B2B grandes, que costumam pedir isso em due diligence de segurança/infra antes
+// de contratar. Só os últimos 90 dias, só os campos não-sensíveis (nunca nome
+// técnico de fila ou profundidade de job).
+systemStatusRouter.get("/status/incidents", async (_req: Request, res: Response) => {
+  const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  const incidents = await prisma.incidentEvent.findMany({
+    where: { startedAt: { gte: since } },
+    orderBy: { startedAt: "desc" },
+    take: 50,
+  });
+  return res.json({
+    success: true,
+    data: incidents.map((i) => ({
+      id: i.id,
+      component: i.component,
+      componentLabel: INCIDENT_COMPONENTS[i.component as keyof typeof INCIDENT_COMPONENTS] ?? i.component,
+      severity: i.severity,
+      description: i.description,
+      startedAt: i.startedAt,
+      resolvedAt: i.resolvedAt,
+    })),
+    error: null,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// PAINEL ADMIN — gestão manual de incidentes (edição de descrição pública para
+// um post-mortem legível, ou registro manual de uma janela de manutenção
+// planejada que não necessariamente dispara um componente para "degraded").
+// ─────────────────────────────────────────────────────────────────────────
+const manualIncidentSchema = z.object({
+  component: z.enum(["DATABASE", "REDIS", "BACKGROUND_JOBS"]),
+  severity: z.enum(["WARNING", "CRITICAL"]),
+  description: z.string().min(1),
+});
+
+systemStatusRouter.get("/platform-admin/incidents", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
+  const incidents = await prisma.incidentEvent.findMany({ orderBy: { startedAt: "desc" }, take: 200 });
+  return res.json({ success: true, data: incidents, error: null });
+});
+
+systemStatusRouter.post("/platform-admin/incidents", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
+  const parsed = manualIncidentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+  const incident = await prisma.incidentEvent.create({ data: parsed.data });
+  await writeAuditLog(req, "INCIDENT_CREATED_MANUAL", "IncidentEvent", incident.id, parsed.data);
+  return res.status(201).json({ success: true, data: incident, error: null });
+});
+
+const patchIncidentSchema = z.object({
+  description: z.string().min(1).optional(),
+  severity: z.enum(["WARNING", "CRITICAL"]).optional(),
+  resolvedAt: z.union([z.string().datetime(), z.null()]).optional(),
+});
+
+systemStatusRouter.patch("/platform-admin/incidents/:id", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
+  const parsed = patchIncidentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+  const existing = await prisma.incidentEvent.findUnique({ where: { id: req.params.id } });
+  if (!existing) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Incidente não encontrado." } });
+  }
+  const updated = await prisma.incidentEvent.update({
+    where: { id: req.params.id },
+    data: {
+      ...(parsed.data.description !== undefined ? { description: parsed.data.description } : {}),
+      ...(parsed.data.severity !== undefined ? { severity: parsed.data.severity } : {}),
+      ...(parsed.data.resolvedAt !== undefined ? { resolvedAt: parsed.data.resolvedAt ? new Date(parsed.data.resolvedAt) : null } : {}),
+    },
+  });
+  await writeAuditLog(req, "INCIDENT_UPDATED", "IncidentEvent", updated.id, { before: existing, after: updated });
+  return res.json({ success: true, data: updated, error: null });
 });

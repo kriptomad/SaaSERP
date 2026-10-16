@@ -28,3 +28,26 @@ export interface SystemStatusSnapshot {
 export function fetchSystemStatus(): Promise<SystemStatusSnapshot> {
   return platformAdminApi.get("/platform-admin/system-status");
 }
+
+// GAP DE AUDITORIA FECHADO (mega-audit round de 100%): CRUD de incidentes (edição
+// de descrição pública/post-mortem e registro manual de manutenção planejada).
+export interface IncidentEventRecord {
+  id: string;
+  component: string;
+  severity: "WARNING" | "CRITICAL";
+  description: string;
+  startedAt: string;
+  resolvedAt: string | null;
+}
+
+export function listIncidents(): Promise<IncidentEventRecord[]> {
+  return platformAdminApi.get("/platform-admin/incidents");
+}
+
+export function createIncident(input: { component: "DATABASE" | "REDIS" | "BACKGROUND_JOBS"; severity: "WARNING" | "CRITICAL"; description: string }): Promise<IncidentEventRecord> {
+  return platformAdminApi.post("/platform-admin/incidents", input);
+}
+
+export function updateIncident(id: string, input: { description?: string; severity?: "WARNING" | "CRITICAL"; resolvedAt?: string | null }): Promise<IncidentEventRecord> {
+  return platformAdminApi.patch(`/platform-admin/incidents/${id}`, input);
+}

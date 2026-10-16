@@ -47,6 +47,65 @@ const ALL_QUEUES = [
 
 export type ComponentStatus = "operational" | "degraded" | "outage";
 
+// GAP DE AUDITORIA FECHADO (mega-audit round de 100%, criticidade MEDIA): o modelo
+// `IncidentEvent` existia no schema desde o round anterior mas nunca era escrito
+// nem lido em lugar nenhum do código — página de status pública não tinha histórico
+// de incidentes/changelog, só o status instantâneo. `recordIncidentTransitions`
+// persiste automaticamente abertura/resolução de incidente por componente sempre
+// que o status muda, usando o próprio IncidentEvent (resolvedAt null = incidente
+// aberto) como estado — nenhuma tabela nova precisa existir. Chamado uma única vez
+// por refresh real do cache público (nunca por leitura do painel interno/SSE, que
+// atualiza a cada 5s e duplicaria incidentes por condição de corrida).
+export const INCIDENT_COMPONENTS = {
+  DATABASE: "Banco de dados",
+  REDIS: "Redis / Cache",
+  BACKGROUND_JOBS: "Processamento em segundo plano (filas)",
+} as const;
+
+function incidentDescription(component: keyof typeof INCIDENT_COMPONENTS, status: ComponentStatus): string {
+  const label = INCIDENT_COMPONENTS[component];
+  if (status === "outage") return `${label} está indisponível.`;
+  return `${label} está operando de forma degradada (latência elevada ou backlog acumulado).`;
+}
+
+export async function recordIncidentTransitions(snapshot: SystemStatusSnapshot): Promise<void> {
+  const backgroundJobsStatus = worstStatus(snapshot.queues.map((q) => q.status));
+  const componentStatuses: Array<[keyof typeof INCIDENT_COMPONENTS, ComponentStatus]> = [
+    ["DATABASE", snapshot.database.status],
+    ["REDIS", snapshot.redis.status],
+    ["BACKGROUND_JOBS", backgroundJobsStatus],
+  ];
+
+  for (const [component, status] of componentStatuses) {
+    const openIncident = await prisma.incidentEvent.findFirst({
+      where: { component, resolvedAt: null },
+      orderBy: { startedAt: "desc" },
+    });
+
+    if (status === "operational") {
+      if (openIncident) {
+        await prisma.incidentEvent.update({ where: { id: openIncident.id }, data: { resolvedAt: new Date() } });
+      }
+      continue;
+    }
+
+    const severity = status === "outage" ? "CRITICAL" : "WARNING";
+    if (!openIncident) {
+      await prisma.incidentEvent.create({
+        data: { component, severity, description: incidentDescription(component, status) },
+      });
+    } else if (openIncident.severity !== severity) {
+      // Agravou/melhorou dentro do mesmo incidente aberto (ex.: degraded -> outage)
+      // — atualiza severidade/descrição no mesmo registro em vez de abrir um
+      // segundo incidente simultâneo para o mesmo componente.
+      await prisma.incidentEvent.update({
+        where: { id: openIncident.id },
+        data: { severity, description: incidentDescription(component, status) },
+      });
+    }
+  }
+}
+
 export interface QueueHealth {
   name: string;
   status: ComponentStatus;
