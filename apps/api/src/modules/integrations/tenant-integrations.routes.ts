@@ -128,10 +128,13 @@ const createWebhookEndpointSchema = z.object({
 // CORREÇÃO DE AUDITORIA: a URL de webhook era aceita sem nenhuma checagem de
 // destino, permitindo SSRF (o backend faria POST para IP interno/metadata da
 // nuvem a partir de uma URL cadastrada pelo próprio tenant). Bloqueia protocolo
-// não-HTTPS (exceto localhost em dev) e hosts/IPs privados conhecidos; não
-// resolve DNS (checagem só de forma literal), documentado como mitigação
-// parcial — um domínio público que resolva para IP privado via DNS rebinding
-// ainda não é bloqueado.
+// não-HTTPS (exceto localhost em dev) e hosts/IPs privados conhecidos LITERAIS
+// nesta validação de CADASTRO (feedback rápido ao usuário, sem round-trip de DNS
+// na rota HTTP). A proteção DEFINITIVA contra DNS rebinding/redirecionamento —
+// que esta checagem literal sozinha não cobre — está em
+// `lib/ssrf-safe-fetch.ts`, usado pelo worker de ENTREGA real
+// (`webhook-delivery.worker.ts`), que resolve e valida o IP no exato momento da
+// conexão TCP e nunca segue 3xx (mega-audit rodada 10).
 const PRIVATE_HOST_PATTERNS = [
   /^localhost$/i,
   /^127\./, /^0\.0\.0\.0$/, /^::1$/,

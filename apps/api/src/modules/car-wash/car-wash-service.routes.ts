@@ -52,6 +52,15 @@ async function requireRead(req: Request, res: Response): Promise<boolean> {
 // Garante que o `Appointment` tenha uma `WorkOrder` (CAR_WASH) vinculada,
 // criando-a na primeira chamada (entrada). Idempotente: chamadas seguintes
 // (saída) reaproveitam a mesma O.S.
+//
+// GAP DE AUDITORIA FECHADO (mega-audit rodada 10): a versão anterior lia o
+// `Appointment`, via que `workOrderId` era nulo e SÓ DEPOIS criava a WorkOrder — duas
+// requisições concorrentes (duplo-clique, retry de app mobile) podiam ambas passar
+// pela checagem antes de qualquer uma commitar o `appointment.update`, criando DUAS
+// WorkOrders para o mesmo atendimento. Agora a WorkOrder é sempre criada primeiro (sem
+// custo real de se tornar órfã) e o vínculo é "reivindicado" por um `updateMany`
+// condicional (`workOrderId: null`) atômico — só a requisição que vence a corrida
+// mantém sua WorkOrder; a perdedora descarta a que criou e reaproveita a vencedora.
 async function ensureCarWashWorkOrder(tenantId: string, appointmentId: string) {
   const appointment = await prisma.appointment.findFirst({
     where: { id: appointmentId, tenantId },
@@ -61,22 +70,32 @@ async function ensureCarWashWorkOrder(tenantId: string, appointmentId: string) {
   if (appointment.workOrderId) {
     return prisma.workOrder.findUnique({ where: { id: appointment.workOrderId } });
   }
-  const workOrder = await prisma.$transaction(async (tx) => {
-    const wo = await tx.workOrder.create({
-      data: {
-        tenantId,
-        clientId: appointment.clientId,
-        vehicleId: appointment.vehicleId,
-        workOrderType: "CAR_WASH",
-        equipmentDescription: appointment.vehicle ? `${appointment.vehicle.licensePlate} — ${appointment.vehicle.model}` : "Veículo não identificado",
-        reportedIssue: `Serviço: ${appointment.service.name}`,
-        status: "RECEIVED",
-      },
-    });
-    await tx.appointment.update({ where: { id: appointment.id }, data: { workOrderId: wo.id } });
-    return wo;
+
+  const candidateWorkOrder = await prisma.workOrder.create({
+    data: {
+      tenantId,
+      clientId: appointment.clientId,
+      vehicleId: appointment.vehicleId,
+      workOrderType: "CAR_WASH",
+      equipmentDescription: appointment.vehicle ? `${appointment.vehicle.licensePlate} — ${appointment.vehicle.model}` : "Veículo não identificado",
+      reportedIssue: `Serviço: ${appointment.service.name}`,
+      status: "RECEIVED",
+    },
   });
-  return workOrder;
+  const claim = await prisma.appointment.updateMany({
+    where: { id: appointment.id, tenantId, workOrderId: null },
+    data: { workOrderId: candidateWorkOrder.id },
+  });
+  if (claim.count === 1) {
+    return candidateWorkOrder;
+  }
+  // Perdeu a corrida: outra requisição concorrente já vinculou uma WorkOrder
+  // diferente a este Appointment entre o findFirst acima e este updateMany — descarta
+  // a WorkOrder recém-criada (nunca referenciada por ninguém, livre para apagar) e
+  // reaproveita a que já está de fato vinculada.
+  await prisma.workOrder.delete({ where: { id: candidateWorkOrder.id } });
+  const winningAppointment = await prisma.appointment.findUniqueOrThrow({ where: { id: appointment.id } });
+  return prisma.workOrder.findUnique({ where: { id: winningAppointment.workOrderId! } });
 }
 
 const checklistSchema = z.object({
@@ -101,15 +120,31 @@ carWashServiceRouter.post("/car-wash-queue/:appointmentId/checklist", requireAut
   const workOrder = await ensureCarWashWorkOrder(tenantId, req.params.appointmentId);
   if (!workOrder) return fail(res, 404, "NOT_FOUND", "Atendimento de lava-rápido não encontrado.");
 
-  const checklist = await prisma.osChecklist.create({
-    data: { tenantId, workOrderId: workOrder.id, stage: input.stage, items: input.items },
+  // GAP DE AUDITORIA FECHADO (mega-audit rodada 10): duplo-clique/retry de rede
+  // criava um NOVO `OsChecklist` + fotos duplicadas a cada reenvio do mesmo
+  // estágio (ENTRY/DELIVERY) — o laudo de avarias do mesmo atendimento acabava com
+  // registros conflitantes. Como ENTRY/DELIVERY só acontecem uma vez de verdade por
+  // atendimento, o reenvio agora é tratado como correção/confirmação do mesmo
+  // registro: atualiza o checklist já existente daquele estágio em vez de criar
+  // outro, e só insere fotos cuja `storageKey` ainda não está anexada à O.S.
+  const existingChecklist = await prisma.osChecklist.findFirst({
+    where: { tenantId, workOrderId: workOrder.id, stage: input.stage },
+    orderBy: { createdAt: "desc" },
   });
+  const checklist = existingChecklist
+    ? await prisma.osChecklist.update({ where: { id: existingChecklist.id }, data: { items: input.items } })
+    : await prisma.osChecklist.create({ data: { tenantId, workOrderId: workOrder.id, stage: input.stage, items: input.items } });
+  const existingPhotoKeys = new Set(
+    (await prisma.osPhoto.findMany({ where: { tenantId, workOrderId: workOrder.id }, select: { storageKey: true } })).map((p) => p.storageKey),
+  );
   const photos = await Promise.all(
-    input.photoStorageKeys.map((storageKey) =>
-      prisma.osPhoto.create({
-        data: { tenantId, workOrderId: workOrder.id, uploadedById: userId, storageKey, caption: input.stage === "ENTRY" ? "Antes" : "Depois" },
-      }),
-    ),
+    input.photoStorageKeys
+      .filter((storageKey) => !existingPhotoKeys.has(storageKey))
+      .map((storageKey) =>
+        prisma.osPhoto.create({
+          data: { tenantId, workOrderId: workOrder.id, uploadedById: userId, storageKey, caption: input.stage === "ENTRY" ? "Antes" : "Depois" },
+        }),
+      ),
   );
 
   return res.status(201).json({ success: true, data: { checklist, photos }, error: null });

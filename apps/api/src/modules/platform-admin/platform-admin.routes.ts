@@ -553,7 +553,7 @@ platformAdminRouter.get("/platform-admin/webhook-endpoints/:id/deliveries", requ
 // BullMQ (webhook-delivery) consumida por webhook-delivery.worker.ts, que faz o
 // disparo HTTP real com assinatura HMAC-SHA256 e grava uma nova linha em
 // WebhookDelivery com o resultado. Nunca duplica a lógica de entrega aqui.
-platformAdminRouter.post("/platform-admin/webhook-deliveries/:id/replay", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+platformAdminRouter.post("/platform-admin/webhook-deliveries/:id/replay", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
   const delivery = await prisma.webhookDelivery.findUnique({ where: { id: req.params.id }, include: { endpoint: true } });
   if (!delivery) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Entrega de webhook não encontrada." } });
@@ -561,12 +561,21 @@ platformAdminRouter.post("/platform-admin/webhook-deliveries/:id/replay", requir
   if (!delivery.endpoint.active) {
     return res.status(409).json({ success: false, data: null, error: { code: "ENDPOINT_INACTIVE", message: "O endpoint de destino está inativo." } });
   }
+  // GAP DE AUDITORIA FECHADO (mega-audit rodada 10): nada impedia reenviar uma
+  // entrega que já teve SUCESSO — um operador clicando no item errado da lista
+  // (ou um script malicioso) reenviaria um evento sensível (ex.: dados de venda)
+  // uma segunda vez ao endpoint do tenant sem necessidade nenhuma. Reenvio manual
+  // só faz sentido para corrigir uma falha; restringido à ação de super-admin
+  // (mesmo nível de `requireSuperAdmin` já exigido para revogar API keys).
+  if (delivery.success) {
+    return res.status(409).json({ success: false, data: null, error: { code: "DELIVERY_ALREADY_SUCCEEDED", message: "Esta entrega já foi bem-sucedida — reenvio manual é reservado para entregas que falharam." } });
+  }
   await webhookDeliveryQueue.add(
     "deliver",
     { endpointId: delivery.endpointId, eventType: delivery.eventType, payload: delivery.payload as Record<string, unknown> } satisfies WebhookDeliveryJobData,
     { attempts: 6, backoff: { type: "exponential", delay: 5_000 } },
   );
-  await writeAuditLog(req, "WEBHOOK_REPLAY_REQUESTED", "WebhookDelivery", delivery.id, { endpointId: delivery.endpointId, eventType: delivery.eventType });
+  await writeAuditLog(req, "WEBHOOK_REPLAY_REQUESTED", "WebhookDelivery", delivery.id, { endpointId: delivery.endpointId, eventType: delivery.eventType, originalDeliveryId: delivery.id });
   return res.status(202).json({ success: true, data: { id: delivery.id, replayQueued: true }, error: null });
 });
 

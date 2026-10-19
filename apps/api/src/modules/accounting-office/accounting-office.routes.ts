@@ -386,6 +386,21 @@ accountingOfficeRouter.patch("/accounting-tasks/:id", requireAuth, requireModule
   if (!task || task.accountingFirmTenantId !== tenantId) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Tarefa não encontrada." } });
   }
+  // GAP DE AUDITORIA FECHADO: a leitura de tarefas (GET acima) já aceitava o
+  // vínculo apenas por `accountingFirmTenantId === tenantId`, sem checar se a
+  // procuração eletrônica com aquele tenant-cliente específico ainda está
+  // ATIVA. Isso permitia que um escritório, mesmo após o cliente revogar o
+  // vínculo, continuasse editando status/atribuição de tarefas antigas
+  // referentes àquele cliente indefinidamente. Agora toda escrita exige
+  // `assertAccountingAccess()` revalidando o vínculo em tempo real.
+  try {
+    await assertAccountingAccess(tenantId, task.clientTenantId);
+  } catch (err) {
+    if (err instanceof NoActiveEngagementError) {
+      return res.status(403).json({ success: false, data: null, error: { code: "NO_ACTIVE_ENGAGEMENT", message: err.message } });
+    }
+    throw err;
+  }
   const updated = await prisma.accountingTask.update({
     where: { id: task.id },
     data: {

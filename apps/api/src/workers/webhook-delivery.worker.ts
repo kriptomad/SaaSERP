@@ -19,6 +19,7 @@ import { prismaUnscoped as prisma } from "@filitech/db";
 import { queueRedisConnection, QUEUE_NAMES } from "../lib/queue";
 import { decryptEnvelope } from "../lib/envelope-crypto";
 import { createModuleLogger } from "../lib/logger";
+import { ssrfSafeFetch } from "../lib/ssrf-safe-fetch";
 import type { WebhookDeliveryJobData } from "../lib/webhook-dispatch";
 
 const log = createModuleLogger("webhook-delivery");
@@ -50,7 +51,12 @@ export async function webhookDeliveryProcessor(job: Job<WebhookDeliveryJobData>)
   let statusCode: number | null = null;
   let success = false;
   try {
-    const response = await fetch(endpoint.url, {
+    // GAP DE AUDITORIA FECHADO (mega-audit rodada 10): `fetch()` global não
+    // resolvia/validava o IP de destino nem recusava redirecionamentos — um host
+    // público cadastrado que passasse a resolver (DNS rebinding) ou redirecionasse
+    // para um IP privado/metadata da nuvem seria entregue sem bloqueio. `ssrfSafeFetch`
+    // resolve e valida o IP no exato momento da conexão TCP e nunca segue 3xx.
+    const response = await ssrfSafeFetch(endpoint.url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -58,10 +64,10 @@ export async function webhookDeliveryProcessor(job: Job<WebhookDeliveryJobData>)
         "X-Filitech-Event": eventType,
       },
       body: bodyJson,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      timeoutMs: REQUEST_TIMEOUT_MS,
     });
-    statusCode = response.status;
-    success = response.ok;
+    statusCode = response.statusCode;
+    success = response.statusCode >= 200 && response.statusCode < 300;
   } catch (error) {
     log.warn({ endpointId, eventType, err: error }, "falha de rede ao entregar webhook");
   }

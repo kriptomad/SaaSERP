@@ -18,6 +18,15 @@ import { offlineDb, type PendingSale } from "./db";
 const API_BASE_URL = resolveApiBaseUrl();
 const MAX_SYNC_ATTEMPTS = 10;
 
+// 401: sessão/JWT expirado — o próprio app renova o token no próximo login e a
+// venda volta a sincronizar sozinha, sem exigir revisão manual por item.
+// 408/425: timeout/"too early" de proxy, não do backend de negócio em si.
+// 429: rate-limit (WAF/Cloudflare na frente da API) — transitório por definição.
+const TRANSIENT_HTTP_STATUSES = new Set([401, 408, 425, 429]);
+function isTransientHttpStatus(status: number): boolean {
+  return TRANSIENT_HTTP_STATUSES.has(status);
+}
+
 export interface SyncResult {
   synced: string[];
   failed: string[];
@@ -52,6 +61,18 @@ export async function syncPendingSales(): Promise<SyncResult> {
       if (response.ok) {
         await offlineDb.pendingSales.update(sale.localId, { syncStatus: "SYNCED" });
         result.synced.push(sale.localId);
+      } else if (isTransientHttpStatus(response.status)) {
+        // GAP DE AUDITORIA FECHADO (mega-audit rodada 10): 401 (sessão/JWT expirado
+        // durante um período offline prolongado — comuníssimo em POS que fica
+        // desconectado por horas), 408/425/429 (timeout/retry-too-early/rate-limit de
+        // proxy/WAF na frente da API) eram classificados junto com os erros de
+        // NEGÓCIO (estoque, split payment) como falha PERMANENTE — exigindo que o
+        // operador revisasse manualmente cada venda travada na fila mesmo quando o
+        // único problema real era reautenticar (o que o próprio app já faz sozinho no
+        // próximo login). Agora ficam em backoff, reprocessados automaticamente assim
+        // que a causa transitória (token renovado, rate-limit expirado) passar.
+        await requeueWithBackoff(sale, `HTTP ${response.status}`);
+        result.stillPending.push(sale.localId);
       } else if (response.status >= 400 && response.status < 500) {
         // Erro de negócio real (ex.: estoque esgotado no servidor, idempotencyKey
         // divergente) — não deve ser retentado indefinidamente; fica para revisão
