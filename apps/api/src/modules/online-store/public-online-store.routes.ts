@@ -7,7 +7,7 @@
 // confirmação humana (ver comentário no model `OnlineOrder`, schema.prisma).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { Prisma, prismaUnscoped as prisma } from "@filitech/db";
 import { presignObjectDownload } from "../../lib/object-storage";
 import { isTenantLocked } from "../../middlewares/tenant-lockout.middleware";
 import { enforceRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
@@ -45,6 +45,18 @@ function notFoundStore(res: Response) {
 }
 
 publicOnlineStoreRouter.get("/loja/:customSlug", async (req: Request, res: Response) => {
+  // GAP DE AUDITORIA FECHADO (Rodada 13): a landing/metadata da loja fazia
+  // lookup no banco + presign de objeto no R2 por requisição anônima, sem
+  // NENHUM rate limit — era o único endpoint público deste arquivo que ainda
+  // não reutilizava o mesmo teto de leitura aplicado em `/products` na Rodada 12.
+  try {
+    await enforceRateLimit(`public-store:${req.params.customSlug}:landing:${req.ip}`, PUBLIC_STORE_READ_RATE_LIMIT_MAX, PUBLIC_STORE_READ_RATE_LIMIT_WINDOW_SECONDS);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
+  }
   const store = await resolveActiveStoreBySlug(req.params.customSlug);
   if (!store) return notFoundStore(res);
 
@@ -150,11 +162,29 @@ publicOnlineStoreRouter.post("/loja/:customSlug/orders", async (req: Request, re
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Informe o endereço de entrega." } });
   }
 
+  // GAP DE AUDITORIA FECHADO (Rodada 13): linhas duplicadas do mesmo produto
+  // (ex.: cliente clicou "adicionar" várias vezes gerando itens separados em
+  // vez de incrementar a quantidade) não eram mescladas — o pedido persistia
+  // N `OnlineOrderItem` redundantes para o mesmo produto, inflando o registro
+  // e confundindo a conferência do lojista. Mesclamos por `productId` somando
+  // as quantidades antes de qualquer cálculo/validação.
+  const mergedItemsByProductId = new Map<string, number>();
+  for (const item of input.items) {
+    mergedItemsByProductId.set(item.productId, (mergedItemsByProductId.get(item.productId) ?? 0) + item.quantity);
+  }
+  const mergedItems = [...mergedItemsByProductId.entries()].map(([productId, quantity]) => ({ productId, quantity }));
+  // Teto por produto também vale após a mesclagem — sem isso, um cliente podia
+  // contornar o `.max(10_000)` do schema por item enviando várias linhas do
+  // mesmo produto que juntas ultrapassam o limite.
+  if (mergedItems.some((item) => item.quantity > 10_000)) {
+    return res.status(422).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Quantidade total por produto excede o limite permitido." } });
+  }
+
   // Preço e nome sempre lidos do banco no momento do pedido (nunca confiamos no
   // valor enviado pelo cliente final) — depois congelados como snapshot no
   // `OnlineOrderItem`, para o histórico do pedido nunca mudar mesmo que o produto
   // seja reprecificado/renomeado depois.
-  const productIds = [...new Set(input.items.map((item) => item.productId))];
+  const productIds = [...mergedItemsByProductId.keys()];
   const products = await prisma.product.findMany({
     where: { id: { in: productIds }, tenantId: store.tenantId, showInOnlineStore: true, active: true },
   });
@@ -169,7 +199,7 @@ publicOnlineStoreRouter.post("/loja/:customSlug/orders", async (req: Request, re
   // fração (ex.: "0.5 unidade" de um item unitário) é sempre erro de
   // cadastro/abuso de cliente, nunca uma venda real — só `isWeighted` legitima
   // quantidade fracionária.
-  const invalidFractional = input.items.find((item) => {
+  const invalidFractional = mergedItems.find((item) => {
     const product = productById.get(item.productId)!;
     return !product.isWeighted && !Number.isInteger(item.quantity);
   });
@@ -177,11 +207,16 @@ publicOnlineStoreRouter.post("/loja/:customSlug/orders", async (req: Request, re
     return res.status(422).json({ success: false, data: null, error: { code: "INVALID_QUANTITY", message: "Quantidade deve ser um número inteiro para este produto." } });
   }
 
-  let itemsTotalAmount = 0;
-  const itemsData = input.items.map((item) => {
+  // GAP DE AUDITORIA FECHADO (Rodada 13): o total do pedido era somado com
+  // `Number` (ponto flutuante binário) em vez de `Prisma.Decimal`, podendo
+  // divergir em centavos do valor realmente persistido pelo Postgres
+  // (`Decimal(12,2)`). Toda a soma agora usa aritmética decimal exata.
+  let itemsTotalAmount = new Prisma.Decimal(0);
+  const itemsData = mergedItems.map((item) => {
     const product = productById.get(item.productId)!;
-    const unitPrice = Number(product.unitPrice);
-    itemsTotalAmount += unitPrice * item.quantity;
+    const unitPrice = new Prisma.Decimal(product.unitPrice);
+    const lineTotal = unitPrice.mul(item.quantity);
+    itemsTotalAmount = itemsTotalAmount.add(lineTotal);
     return {
       productId: product.id,
       productName: product.name,
@@ -190,10 +225,10 @@ publicOnlineStoreRouter.post("/loja/:customSlug/orders", async (req: Request, re
     };
   });
 
-  const deliveryFee = input.isDelivery && store.deliveryFee ? Number(store.deliveryFee) : 0;
-  const totalAmount = itemsTotalAmount + deliveryFee;
+  const deliveryFee = input.isDelivery && store.deliveryFee ? new Prisma.Decimal(store.deliveryFee) : new Prisma.Decimal(0);
+  const totalAmount = itemsTotalAmount.add(deliveryFee);
 
-  if (store.minOrderAmount && itemsTotalAmount < Number(store.minOrderAmount)) {
+  if (store.minOrderAmount && itemsTotalAmount.lessThan(new Prisma.Decimal(store.minOrderAmount))) {
     return res.status(422).json({
       success: false,
       data: null,

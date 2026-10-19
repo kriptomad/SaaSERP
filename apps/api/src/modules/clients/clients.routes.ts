@@ -138,6 +138,16 @@ clientsRouter.patch("/clients/:id", requireAuth, async (req: Request, res: Respo
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
   }
   const input = parsed.data;
+  // GAP DE AUDITORIA FECHADO (Rodada 13): CREATE já checava unicidade de
+  // CPF/CNPJ por tenant, mas PATCH não — dava para editar um cliente existente
+  // e colocar o mesmo documento de outro cliente, quebrando a garantia de
+  // unicidade só pela metade.
+  if (input.document) {
+    const duplicate = await prisma.client.findFirst({ where: { tenantId, document: input.document, id: { not: existing.id } } });
+    if (duplicate) {
+      return res.status(409).json({ success: false, data: null, error: { code: "DOCUMENT_TAKEN", message: "Já existe um cliente com este CPF/CNPJ." } });
+    }
+  }
   if (input.healthInsurancePlanId) {
     const plan = await prisma.healthInsurancePlan.findFirst({ where: { id: input.healthInsurancePlanId, tenantId } });
     if (!plan) return res.status(404).json({ success: false, data: null, error: { code: "HEALTH_INSURANCE_PLAN_NOT_FOUND", message: "Convênio não encontrado neste tenant." } });

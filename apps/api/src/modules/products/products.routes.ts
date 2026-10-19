@@ -45,6 +45,13 @@ productsRouter.get("/products", requireAuth, async (req: Request, res: Response)
       ...(updatedSince && !Number.isNaN(updatedSince.getTime()) ? { updatedAt: { gt: updatedSince } } : {}),
     },
     orderBy: { name: "asc" },
+    // GAP DE AUDITORIA FECHADO (Rodada 13): esta rota é usada para sincronizar o
+    // catálogo COMPLETO do Dexie do PDV offline — nunca deve ser paginada de
+    // verdade (o PDV precisa do catálogo inteiro para funcionar sem internet),
+    // então aqui `take` é só uma trava de segurança contra um catálogo
+    // patologicamente grande (nunca realista para um tenant real), não uma
+    // paginação funcional.
+    take: 50_000,
     select: {
       id: true,
       sku: true,

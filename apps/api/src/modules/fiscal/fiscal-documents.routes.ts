@@ -43,7 +43,13 @@ async function hasPermission(role: string, userId: string, permissionCode: strin
 // DFe (tenant como destinatário), com o status da última manifestação de cada uma.
 fiscalDocumentsRouter.get("/fiscal/notas-recebidas", requireAuth, async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "stock:product:read"))) {
+  // GAP DE AUDITORIA FECHADO (Rodada 13): esta rota devolve metadado fiscal
+  // sensível (chave de acesso da NF-e, CNPJ do emitente, valores) e estava
+  // liberada para qualquer papel com "stock:product:read" (ex.: estoquista),
+  // um escopo muito mais amplo do que o necessário. "fiscal:document:read" já
+  // existe na matriz RBAC (usada por Contador/Owner) e é a permissão correta
+  // para dados fiscais.
+  if (!(await hasPermission(role, userId, "fiscal:document:read"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar notas fiscais recebidas." } });
   }
 

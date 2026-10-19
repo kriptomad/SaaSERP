@@ -63,7 +63,9 @@ async function requireFinancialWrite(req: Request, res: Response): Promise<boole
 financialRouter.get("/chart-of-accounts", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const accounts = await prisma.chartOfAccount.findMany({ where: { tenantId }, orderBy: { code: "asc" } });
+  // GAP DE AUDITORIA FECHADO (Rodada 13): sem teto, a listagem rodava como
+  // full-table-scan repetível por qualquer usuário com acesso financeiro.
+  const accounts = await prisma.chartOfAccount.findMany({ where: { tenantId }, orderBy: { code: "asc" }, take: 5_000 });
   return res.json({ success: true, data: accounts, error: null });
 });
 
@@ -108,7 +110,7 @@ financialRouter.post("/chart-of-accounts", requireAuth, async (req: Request, res
 financialRouter.get("/cost-centers", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const costCenters = await prisma.costCenter.findMany({ where: { tenantId }, orderBy: { name: "asc" } });
+  const costCenters = await prisma.costCenter.findMany({ where: { tenantId }, orderBy: { name: "asc" }, take: 5_000 });
   return res.json({ success: true, data: costCenters, error: null });
 });
 

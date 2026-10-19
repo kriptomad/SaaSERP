@@ -55,6 +55,26 @@ databaseBackupsRouter.post(
   requirePlatformAdminAuth,
   requireSuperAdmin,
   async (req: Request, res: Response) => {
+    // GAP DE AUDITORIA FECHADO (Rodada 13): nenhuma trava de concorrência —
+    // cliques repetidos no botão (ou dois SUPER_ADMINs distintos) enfileiravam
+    // múltiplos dumps completos simultâneos do banco de produção, competindo
+    // por I/O/CPU entre si. Um backup "preso" em RUNNING por um worker morto
+    // (crash/redeploy no meio do dump) não deve travar backups manuais para
+    // sempre — por isso só bloqueia se o RUNNING mais recente começou há menos
+    // de 2 horas (o cron diário + manual nunca legitimamente levam mais que isso).
+    const STALE_RUNNING_THRESHOLD_MS = 2 * 60 * 60 * 1000;
+    const activeRun = await prisma.databaseBackupLog.findFirst({
+      where: { status: "RUNNING" },
+      orderBy: { startedAt: "desc" },
+    });
+    if (activeRun && Date.now() - activeRun.startedAt.getTime() < STALE_RUNNING_THRESHOLD_MS) {
+      return res.status(409).json({
+        success: false,
+        data: null,
+        error: { code: "BACKUP_ALREADY_RUNNING", message: "Já existe um backup em andamento. Aguarde a conclusão antes de disparar outro." },
+      });
+    }
+
     const platformAdminUserId = req.platformAdminSession!.platformAdminUserId;
     await databaseBackupQueue.add("manual-backup", { triggeredBy: platformAdminUserId });
     await writeAuditLog(req, "database_backup.trigger_manual", null, {});

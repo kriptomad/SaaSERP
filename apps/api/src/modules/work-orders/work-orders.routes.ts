@@ -69,7 +69,17 @@ workOrdersRouter.get("/work-orders", requireAuth, requireModule("WORK_ORDER"), a
       ...(status ? { status: status as any } : {}),
       ...(assignedTechnicianId ? { assignedTechnicianId } : {}),
     },
-    include: { client: true, assignedTechnician: true, items: true, Vehicle: true },
+    include: {
+      client: true,
+      assignedTechnician: true,
+      // GAP DE AUDITORIA FECHADO (Rodada 13): o `take:100` do pai limitava o
+      // número de O.S. retornadas, mas a relação `items` aninhada não tinha
+      // teto nenhum — uma única O.S. com milhares de itens lançados (ou um
+      // abuso deliberado) inflava a resposta de forma ilimitada mesmo com o
+      // teto do pai no lugar.
+      items: { take: 200 },
+      Vehicle: true,
+    },
     orderBy: { createdAt: "desc" },
     take: 100,
   });

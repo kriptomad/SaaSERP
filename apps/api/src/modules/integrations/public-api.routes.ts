@@ -32,6 +32,21 @@ function parsePageSize(raw: unknown): number {
   return Math.min(Math.floor(n), PAGE_SIZE_MAX);
 }
 
+// GAP DE AUDITORIA FECHADO (Rodada 13): `new Date(from)`/`new Date(to)` eram
+// usados direto numa query Prisma sem checar `isNaN` — uma integração externa
+// enviando uma string de data malformada produzia um `Date` inválido que o
+// Prisma só rejeitava em runtime com um 500 genérico, em vez de um 400 claro.
+function parseValidDate(raw: string | undefined): Date | undefined {
+  if (!raw) return undefined;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new InvalidDateRangeError(`Data inválida: "${raw}".`);
+  }
+  return parsed;
+}
+
+class InvalidDateRangeError extends Error {}
+
 // ─────────────────────────────────────────────────────────────────────────
 // VENDAS (escopo "sales:read")
 // ─────────────────────────────────────────────────────────────────────────
@@ -42,10 +57,21 @@ publicApiRouter.get("/api/public/v1/sales", ...salesReadChain, async (req: Reque
   const { tenantId } = req.session!;
   const take = parsePageSize(req.query.limit);
   const { from, to, cashRegisterId } = req.query as Record<string, string | undefined>;
+  let fromDate: Date | undefined;
+  let toDate: Date | undefined;
+  try {
+    fromDate = parseValidDate(from);
+    toDate = parseValidDate(to);
+  } catch (err) {
+    if (err instanceof InvalidDateRangeError) {
+      return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: err.message } });
+    }
+    throw err;
+  }
   const where: Prisma.SaleWhereInput = {
     tenantId,
     ...(cashRegisterId ? { cashRegisterId } : {}),
-    ...(from || to ? { createdAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}),
+    ...(fromDate || toDate ? { createdAt: { ...(fromDate ? { gte: fromDate } : {}), ...(toDate ? { lte: toDate } : {}) } } : {}),
   };
   const sales = await prisma.sale.findMany({
     where,
@@ -114,7 +140,12 @@ publicApiRouter.get("/api/public/v1/products/:id", ...stockReadChain, async (req
 });
 
 const stockAdjustSchema = z.object({
-  quantity: z.number().refine((v) => v !== 0, "A quantidade do ajuste não pode ser zero."),
+  // GAP DE AUDITORIA FECHADO (Rodada 13): só rejeitava zero — nenhum teto de
+  // magnitude nem exigência de número finito. Uma integração externa
+  // comprometida/com bug podia enviar uma quantidade absurda (ou não-finita)
+  // e corromper `stockQuantity` em um único ajuste. `stockQuantity` é
+  // Decimal(12,3) no schema; nenhum ajuste individual real passa de 6 dígitos.
+  quantity: z.number().finite().refine((v) => v !== 0, "A quantidade do ajuste não pode ser zero.").refine((v) => Math.abs(v) <= 999_999, "A quantidade do ajuste excede o limite permitido (999999)."),
   reasonCode: z.string().min(1),
 });
 

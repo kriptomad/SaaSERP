@@ -692,8 +692,22 @@ platformAdminRouter.post("/platform-admin/plans", requirePlatformAdminAuth, requ
   if (existing) {
     return res.status(409).json({ success: false, data: null, error: { code: "DUPLICATE_CODE", message: "Já existe um plano com este código." } });
   }
-  const plan = await prisma.plan.create({ data: parsed.data });
-  await writeAuditLog(req, "PLAN_CREATED", "Plan", plan.id, { code: plan.code, basePrice: plan.basePrice.toString() });
+  // GAP DE AUDITORIA FECHADO (Rodada 13): criação do plano e o registro de
+  // auditoria eram duas escritas separadas — uma falha entre as duas deixava
+  // um Plan criado sem nenhum rastro de quem o criou.
+  const plan = await prisma.$transaction(async (tx) => {
+    const created = await tx.plan.create({ data: parsed.data });
+    await tx.auditLog.create({
+      data: {
+        platformAdminUserId: req.platformAdminSession!.platformAdminUserId,
+        action: "PLAN_CREATED",
+        targetType: "Plan",
+        targetId: created.id,
+        metadata: { code: created.code, basePrice: created.basePrice.toString() } as any,
+      },
+    });
+    return created;
+  });
   return res.status(201).json({ success: true, data: plan, error: null });
 });
 
@@ -708,8 +722,19 @@ platformAdminRouter.patch("/platform-admin/plans/:id", requirePlatformAdminAuth,
   if (!existing) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Plano não encontrado." } });
   }
-  const updated = await prisma.plan.update({ where: { id: existing.id }, data: parsed.data });
-  await writeAuditLog(req, "PLAN_UPDATED", "Plan", existing.id, { changes: parsed.data });
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.plan.update({ where: { id: existing.id }, data: parsed.data });
+    await tx.auditLog.create({
+      data: {
+        platformAdminUserId: req.platformAdminSession!.platformAdminUserId,
+        action: "PLAN_UPDATED",
+        targetType: "Plan",
+        targetId: existing.id,
+        metadata: { changes: parsed.data } as any,
+      },
+    });
+    return result;
+  });
   return res.json({ success: true, data: updated, error: null });
 });
 
@@ -735,8 +760,19 @@ platformAdminRouter.post("/platform-admin/modules", requirePlatformAdminAuth, re
   if (existing) {
     return res.status(409).json({ success: false, data: null, error: { code: "DUPLICATE_CODE", message: "Já existe um módulo com este código." } });
   }
-  const created = await prisma.module.create({ data: parsed.data });
-  await writeAuditLog(req, "MODULE_CREATED", "Module", created.id, { code: created.code, monthlyPrice: created.monthlyPrice.toString() });
+  const created = await prisma.$transaction(async (tx) => {
+    const result = await tx.module.create({ data: parsed.data });
+    await tx.auditLog.create({
+      data: {
+        platformAdminUserId: req.platformAdminSession!.platformAdminUserId,
+        action: "MODULE_CREATED",
+        targetType: "Module",
+        targetId: result.id,
+        metadata: { code: result.code, monthlyPrice: result.monthlyPrice.toString() } as any,
+      },
+    });
+    return result;
+  });
   return res.status(201).json({ success: true, data: created, error: null });
 });
 
@@ -751,7 +787,27 @@ platformAdminRouter.patch("/platform-admin/modules/:id", requirePlatformAdminAut
   if (!existing) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Módulo não encontrado." } });
   }
-  const updated = await prisma.module.update({ where: { id: existing.id }, data: parsed.data });
+  // GAP DE AUDITORIA FECHADO (Rodada 13): update + audit log eram escritas
+  // separadas (mesmo problema de Plan acima), e a invalidação de cache Redis
+  // rodava ENTRE o update e o audit log — uma falha no audit log deixava o
+  // módulo já invisível para os tenants (cache invalidado) mas sem nenhum
+  // registro de quem/quando desativou. Agora: update + audit log atômicos
+  // primeiro, invalidação de cache (efeito colateral externo ao Postgres,
+  // não pode entrar no `$transaction`) só depois que a transação confirma.
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.module.update({ where: { id: existing.id }, data: parsed.data });
+    await tx.auditLog.create({
+      data: {
+        platformAdminUserId: req.platformAdminSession!.platformAdminUserId,
+        action: "MODULE_CATALOG_UPDATED",
+        targetType: "Module",
+        targetId: existing.id,
+        metadata: { changes: parsed.data } as any,
+      },
+    });
+    return result;
+  });
+
   // Se o módulo foi desativado no catálogo global, nenhum tenant que já tinha o
   // cache Redis populado (TTL de 60s, ver gatekeeper.middleware.ts) deve continuar
   // com acesso liberado até o cache expirar sozinho — invalidamos proativamente
@@ -760,7 +816,6 @@ platformAdminRouter.patch("/platform-admin/modules/:id", requirePlatformAdminAut
     const tenantModules = await prisma.tenantModule.findMany({ where: { moduleCode: existing.code, active: true }, select: { tenantId: true } });
     await Promise.all(tenantModules.map((tm) => invalidateTenantModuleCache(tm.tenantId)));
   }
-  await writeAuditLog(req, "MODULE_CATALOG_UPDATED", "Module", existing.id, { changes: parsed.data });
   return res.json({ success: true, data: updated, error: null });
 });
 
