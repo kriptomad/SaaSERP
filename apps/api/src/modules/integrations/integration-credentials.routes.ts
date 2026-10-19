@@ -88,7 +88,16 @@ integrationCredentialsRouter.get("/integration-credentials", requireAuth, async 
 const upsertCredentialSchema = z.object({
   provider: z.nativeEnum(IntegrationProvider),
   environment: z.nativeEnum(IntegrationEnvironment).default("PRODUCTION"),
-  payload: z.record(z.unknown()),
+  // GAP DE AUDITORIA FECHADO (Rodada 11): `z.record(z.unknown())` aceitava JSON
+  // arbitrariamente grande/profundo — qualquer gerente autorizado podia inflar o
+  // payload (serializado, cifrado, salvo, e depois decifrado+mascarado em TODA
+  // listagem) e causar inchaço de banco + CPU/memória em cada GET. Credenciais de
+  // integração reais são sempre um mapa raso de poucas chaves string curtas (API
+  // keys, tokens, client secrets) — nunca objetos aninhados ou arrays.
+  payload: z
+    .record(z.string().max(4000))
+    .refine((obj) => Object.keys(obj).length <= 30, "payload não pode ter mais de 30 campos")
+    .refine((obj) => JSON.stringify(obj).length <= 20_000, "payload serializado excede o tamanho máximo permitido (20KB)"),
 });
 
 integrationCredentialsRouter.put("/integration-credentials", requireAuth, async (req: Request, res: Response) => {

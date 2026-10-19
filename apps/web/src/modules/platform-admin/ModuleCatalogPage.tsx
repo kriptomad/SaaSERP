@@ -110,7 +110,7 @@ function EarlyAccessEditor({ flag, canEdit, onSaved }: { flag: FeatureFlag; canE
   useEffect(() => {
     if (!open) return;
     const timeout = setTimeout(() => {
-      listTenants(search ? { search } : undefined).then(setTenantOptions).catch(() => setTenantOptions([]));
+      listTenants(search ? { search } : undefined).then((result) => setTenantOptions(result.items)).catch(() => setTenantOptions([]));
     }, 250);
     return () => clearTimeout(timeout);
   }, [open, search]);

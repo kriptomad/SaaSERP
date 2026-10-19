@@ -50,17 +50,40 @@ async function writeAuditLog(req: Request, action: string, targetType: string, t
 // TENANTS (Capítulo 13.2)
 // ─────────────────────────────────────────────────────────────────────────
 
+const listTenantsQuerySchema = z.object({
+  status: z.string().optional(),
+  // GAP DE AUDITORIA FECHADO (Rodada 11): sem limite de tamanho, um admin
+  // (ou sessão comprometida) podia submeter strings de busca arbitrariamente
+  // grandes repetidamente, gerando varreduras `contains` caras no Postgres.
+  search: z.string().max(200).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+});
+
 platformAdminRouter.get("/platform-admin/tenants", requirePlatformAdminAuth, async (req: Request, res: Response) => {
-  const { status, search } = req.query as { status?: string; search?: string };
-  const tenants = await prisma.tenant.findMany({
-    where: {
-      ...(status ? { status: status as any } : {}),
-      ...(search ? { OR: [{ legalName: { contains: search, mode: "insensitive" } }, { tradeName: { contains: search, mode: "insensitive" } }, { slug: { contains: search, mode: "insensitive" } }] } : {}),
-    },
-    orderBy: { tradeName: "asc" },
-    take: 100,
-  });
-  return res.json({ success: true, data: tenants, error: null });
+  const parsed = listTenantsQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+  const { status, search, page, pageSize } = parsed.data;
+  const where: import("@filitech/db").Prisma.TenantWhereInput = {
+    ...(status ? { status: status as any } : {}),
+    ...(search ? { OR: [{ legalName: { contains: search, mode: "insensitive" as const } }, { tradeName: { contains: search, mode: "insensitive" as const } }, { slug: { contains: search, mode: "insensitive" as const } }] } : {}),
+  };
+  // GAP DE AUDITORIA FECHADO (Rodada 11): `take: 100` sem paginação truncava
+  // silenciosamente a plataforma inteira no primeiro lote — acima de 100 tenants,
+  // o operador simplesmente não via (nem conseguia buscar/filtrar) o restante.
+  // Agora pagina de verdade e devolve `total` para a UI calcular páginas.
+  const [tenants, total] = await Promise.all([
+    prisma.tenant.findMany({
+      where,
+      orderBy: { tradeName: "asc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.tenant.count({ where }),
+  ]);
+  return res.json({ success: true, data: { items: tenants, total, page, pageSize }, error: null });
 });
 
 platformAdminRouter.get("/platform-admin/tenants/:id", requirePlatformAdminAuth, async (req: Request, res: Response) => {
@@ -87,8 +110,24 @@ platformAdminRouter.patch("/platform-admin/tenants/:id/status", requirePlatformA
   if (!tenant) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Tenant não encontrado." } });
   }
-  const updated = await prisma.tenant.update({ where: { id: tenant.id }, data: { status: parsed.data.status } });
-  await writeAuditLog(req, "TENANT_STATUS_CHANGED", "Tenant", tenant.id, { from: tenant.status, to: parsed.data.status, reason: parsed.data.reason });
+  const updated = await prisma.$transaction(async (tx) => {
+    const tenant_ = await tx.tenant.update({ where: { id: tenant.id }, data: { status: parsed.data.status } });
+    // GAP DE AUDITORIA FECHADO (Rodada 11): `tenant.update()` e `writeAuditLog()`
+    // eram duas escritas separadas e não-atômicas — se a segunda falhasse
+    // (conexão derrubada, etc.), o tenant ficava suspenso/reativado SEM nenhum
+    // registro de motivo/trilha de auditoria, e a resposta de erro ao operador
+    // podia levar a um retry duplicado. Agora as duas escritas sobem ou caem juntas.
+    await tx.auditLog.create({
+      data: {
+        platformAdminUserId: req.platformAdminSession!.platformAdminUserId,
+        action: "TENANT_STATUS_CHANGED",
+        targetType: "Tenant",
+        targetId: tenant.id,
+        metadata: { from: tenant.status, to: parsed.data.status, reason: parsed.data.reason } as any,
+      },
+    });
+    return tenant_;
+  });
   return res.json({ success: true, data: updated, error: null });
 });
 

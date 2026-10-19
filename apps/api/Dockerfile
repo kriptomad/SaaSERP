@@ -33,6 +33,16 @@ COPY --from=build /app/packages/db/prisma /app/packages/db/prisma
 
 ENV NODE_ENV=production
 ENV NODE_PATH=/app/packages/db/node_modules:/app/node_modules
+# GAP DE AUDITORIA FECHADO (Rodada 11): sem TZ explícito, o processo Node roda no
+# fuso do container (UTC por padrão em praticamente toda imagem base de nuvem), e
+# todo código que faz aritmética de "dia local" com `new Date(ano, mes, dia, ...)`
+# (agenda pública de Capítulo 11.6, fechamento de caixa, boundaries de cobrança
+# mensal, etc.) acaba calculando limites de dia errados para tenants brasileiros
+# — ex.: um slot de agendamento às 21h BRT pode cair no dia seguinte em UTC.
+# Node 20 embute ICU completo, então basta fixar TZ aqui (testado: afeta
+# `new Date(...).toString()`/`Intl.DateTimeFormat().resolvedOptions().timeZone`
+# sem exigir pacote `tzdata` extra na imagem distroless).
+ENV TZ=America/Sao_Paulo
 EXPOSE 3333
 # O entrypoint da imagem distroless já é `node`; o CMD recebe apenas o script.
 # Worker BullMQ: APP_ROLE=worker (dist/start.cjs) ou CMD ["apps/api/dist/worker.cjs"].

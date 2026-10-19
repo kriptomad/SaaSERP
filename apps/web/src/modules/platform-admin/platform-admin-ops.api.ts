@@ -15,10 +15,19 @@ export interface TenantSummary {
   createdAt: string;
 }
 
-export function listTenants(params?: { status?: string; search?: string }): Promise<TenantSummary[]> {
+export interface TenantListResult {
+  items: TenantSummary[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export function listTenants(params?: { status?: string; search?: string; page?: number; pageSize?: number }): Promise<TenantListResult> {
   const query = new URLSearchParams();
   if (params?.status) query.set("status", params.status);
   if (params?.search) query.set("search", params.search);
+  query.set("page", String(params?.page ?? 1));
+  query.set("pageSize", String(params?.pageSize ?? 50));
   const qs = query.toString();
   return platformAdminApi.get(`/platform-admin/tenants${qs ? `?${qs}` : ""}`);
 }

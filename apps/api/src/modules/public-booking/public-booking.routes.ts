@@ -60,12 +60,25 @@ publicBookingRouter.get("/public-booking/:tenantSlug", async (req: Request, res:
 });
 
 publicBookingRouter.get("/public-booking/:tenantSlug/services", async (req: Request, res: Response) => {
+  // GAP DE AUDITORIA FECHADO (Rodada 11): esta rota e `/professionals` faziam
+  // consulta anônima ao banco sem NENHUM rate limit, diferente de `/slots` e
+  // `/appointments` — um crawler podia enumerar catálogo de serviços/preços e
+  // profissionais de qualquer tenant em loop irrestrito.
+  try {
+    await enforceRateLimit(`public-booking:${req.params.tenantSlug}:read:${req.ip}`, PUBLIC_BOOKING_READ_RATE_LIMIT_MAX, PUBLIC_BOOKING_READ_RATE_LIMIT_WINDOW_SECONDS);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
+  }
   const tenant = await resolveTenantBySlug(req.params.tenantSlug);
   if (!tenant) return notFoundTenant(res);
   const services = await prisma.service.findMany({
     where: { tenantId: tenant.id, active: true },
     select: { id: true, name: true, basePrice: true, estimatedDurationMinutes: true, nicheTag: true },
     orderBy: { name: "asc" },
+    take: 200,
   });
   return res.json({ success: true, data: services, error: null });
 });
@@ -74,12 +87,21 @@ publicBookingRouter.get("/public-booking/:tenantSlug/services", async (req: Requ
 // (`ProfessionalWorkingHours`) — exclui usuários administrativos/sem agenda
 // pública da vitrine de agendamento.
 publicBookingRouter.get("/public-booking/:tenantSlug/professionals", async (req: Request, res: Response) => {
+  try {
+    await enforceRateLimit(`public-booking:${req.params.tenantSlug}:read:${req.ip}`, PUBLIC_BOOKING_READ_RATE_LIMIT_MAX, PUBLIC_BOOKING_READ_RATE_LIMIT_WINDOW_SECONDS);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
+  }
   const tenant = await resolveTenantBySlug(req.params.tenantSlug);
   if (!tenant) return notFoundTenant(res);
   const professionals = await prisma.user.findMany({
     where: { tenantId: tenant.id, active: true, workingHours: { some: {} } },
     select: { id: true, name: true },
     orderBy: { name: "asc" },
+    take: 200,
   });
   return res.json({ success: true, data: professionals, error: null });
 });
@@ -99,7 +121,10 @@ function parseHHMM(value: string): number {
 
 publicBookingRouter.get("/public-booking/:tenantSlug/slots", async (req: Request, res: Response) => {
   try {
-    await enforceRateLimit(`public-booking:slots:${req.ip}`, PUBLIC_BOOKING_READ_RATE_LIMIT_MAX, PUBLIC_BOOKING_READ_RATE_LIMIT_WINDOW_SECONDS);
+    // GAP DE AUDITORIA FECHADO (Rodada 11): a chave não incluía `tenantSlug`, então
+    // um único IP (NAT compartilhado, torre de celular) esgotava o balde de 60
+    // requisições para TODOS os tenants ao consultar qualquer um deles.
+    await enforceRateLimit(`public-booking:${req.params.tenantSlug}:slots:${req.ip}`, PUBLIC_BOOKING_READ_RATE_LIMIT_MAX, PUBLIC_BOOKING_READ_RATE_LIMIT_WINDOW_SECONDS);
   } catch (err) {
     if (err instanceof RateLimitExceededError) {
       return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
@@ -138,6 +163,12 @@ publicBookingRouter.get("/public-booking/:tenantSlug/slots", async (req: Request
       status: { notIn: ["CANCELLED", "NO_SHOW"] },
     },
     select: { scheduledAt: true, durationMinutes: true },
+    // GAP DE AUDITORIA FECHADO (Rodada 11): sem teto, uma agenda lotada (ou
+    // spam intencional de agendamentos) fazia este endpoint PÚBLICO materializar
+    // o dia inteiro e rodar o scan de sobreposição em memória sem limite —
+    // amplificação de CPU/memória anônima. Um profissional não atende fisicamente
+    // mais que ~200 agendamentos reais em um único dia; acima disso é anomalia.
+    take: 200,
   });
 
   const durationMinutes = service.estimatedDurationMinutes;
@@ -172,7 +203,7 @@ const createPublicAppointmentSchema = z.object({
 
 publicBookingRouter.post("/public-booking/:tenantSlug/appointments", async (req: Request, res: Response) => {
   try {
-    await enforceRateLimit(`public-booking:create:${req.ip}`, PUBLIC_BOOKING_WRITE_RATE_LIMIT_MAX, PUBLIC_BOOKING_WRITE_RATE_LIMIT_WINDOW_SECONDS);
+    await enforceRateLimit(`public-booking:${req.params.tenantSlug}:create:${req.ip}`, PUBLIC_BOOKING_WRITE_RATE_LIMIT_MAX, PUBLIC_BOOKING_WRITE_RATE_LIMIT_WINDOW_SECONDS);
   } catch (err) {
     if (err instanceof RateLimitExceededError) {
       return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
