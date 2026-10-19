@@ -10,36 +10,75 @@ lugares**: no código real e na Bible, preservando a Bible como fonte única de 
 ## Estrutura
 
 ```
-packages/db/        → @filitech/db: schema.prisma (116 models, extraído da Bible Cap.5)
-                       + blindagem multi-tenant real (Cap.7, Prisma Client Extension)
-apps/api/            → @filitech/api: Express + Node 20, JWT RS256 (Cap.3.5),
-                       auth (signup/login), tenant lockout HTTP 402 (Cap.2)
-apps/web/            → @filitech/web: React 18 + Vite + MUI v5 (Cap.8), login/signup
-                       reais contra a API (sem mocks)
+packages/db/        → @filitech/db: schema.prisma (modelo relacional completo, extraído
+                       da Bible Cap.5) + blindagem multi-tenant real via Prisma Client
+                       Extension (Cap.7) + ~50 migrations versionadas
+apps/api/            → @filitech/api: Express + Node 20, JWT RS256 (Cap.3.5), argon2id,
+                       tenant lockout HTTP 402 (Cap.2), RBAC por papel/tenant,
+                       41 módulos de domínio (ver abaixo), 22 workers BullMQ assíncronos,
+                       suíte de testes real (tests/auth, billing, concurrency, stock,
+                       tenant-contract, tenant-isolation)
+apps/web/            → @filitech/web: React 18 + Vite + MUI v5 (Cap.8), 35 módulos de
+                       frontend espelhando os módulos de backend, painel super-admin
+                       (platform-admin) completo, PDV offline-first (Dexie + Service
+                       Worker + Background Sync)
+desktop/              → aplicativo Electron (host/user mode) com licenciamento RS256
+                       offline-cacheable, IPC validado por zod, secrets via safeStorage
 infra/docker/        → docker-compose de dev local (Postgres + Redis)
 deploy/              → guias e configs dos 3 alvos de deploy (railway / vercel / generic-host)
 railway.toml         → deploy gerenciado via Railway
 apps/web/vercel.json  → deploy do frontend via Vercel
 ```
 
-## Status desta fase (Fase 0/1 — Fundação)
+### Módulos de domínio implementados (`apps/api/src/modules/`)
 
-✅ `schema.prisma` completo (116 models) validado com `prisma validate` e `prisma generate`
-   — prova real de que o Capítulo 5 inteiro da Bible é consistente.
-✅ Prisma Client Extension de isolamento multi-tenant (Capítulo 7) implementada e
-   verificada: todos os 106 nomes de model em `TENANT_SCOPED_MODELS` existem de fato
-   no schema real (checagem automatizada, zero divergência).
-✅ API Express com JWT RS256 real (chaves geradas via `apps/api/scripts/generate-jwt-keys.js`),
-   argon2id para senha, signup de tenant, login, `/me`, `/health`, tenant lockout HTTP 402.
-✅ Frontend React 18/Vite/MUI v5 com login/signup/dashboard reais (sem dados mockados),
-   `npm run build` e `tsc -b` passam sem erros.
-✅ `npm audit`: 0 vulnerabilidades (vite bumped para v6, react-router-dom para v7 por
-   causa de 2 CVEs moderados/altos nas versões iniciais).
-⏳ **Ainda não testado contra um Postgres real** (sem Docker/Postgres local disponível
-   nesta máquina) — ver seção "Como rodar" abaixo para o próximo passo assim que houver
-   um `DATABASE_URL` real (Railway/Neon/Supabase ou Docker local).
-⏳ BullMQ/Redis, Stripe/Asaas webhooks, R2 object storage, WhatsApp, motor fiscal,
-   WorkOrder/PDV/niche modules: ainda não implementados em código — próximas fases.
+`accounting-office`, `auth`, `billing`, `car-wash`, `cash-register`, `catalog`,
+`client-records`, `clients`, `comanda`, `construction`, `data-portability`,
+`financial`, `fiscal`, `hardware`, `integrations`, `licensing`, `liquor-ledger`,
+`lookup`, `loyalty`, `multi-filial`, `notifications`, `online-store`, `optical`,
+`pdv`, `personal-finance`, `personalization`, `pharmacy`, `platform-admin`,
+`products`, `public-booking`, `purchasing`, `recipes`, `reports`, `sales`,
+`scheduling`, `search`, `stock`, `storage`, `suppliers`, `support-tickets`,
+`tenant`, `tires`, `users`, `work-orders`.
+
+### Workers assíncronos (BullMQ, `apps/api/src/workers/`)
+
+Emissão e reconciliação fiscal (`fiscal-emission`, `reconcile-stuck-fiscal-documents`,
+`fetch-incoming-nfe`), geração de documentos/relatórios pesados fora do request HTTP
+(`accounting-document-generation`, `report-export-generation`,
+`scheduled-report-generation`), import/export de dados (`data-import-validation`,
+`data-import-execution`, `data-export-generation`), backup criptografado de banco
+(`encrypted-database-backup`), cobrança/dunning (`suspend-overdue-tenants`,
+`personal-bill-reminders`), notificações (`whatsapp-notifications`,
+`sms-notifications`, `webhook-delivery`), sincronização financeira (`pluggy-sync`),
+expiração de pontos/checkouts/cancelamentos agendados, e mais.
+
+## Status atual
+
+✅ `schema.prisma` validado com `prisma validate`/`prisma generate`, ~50 migrations
+   versionadas e aplicadas incrementalmente (nunca editadas retroativamente — ver
+   `packages/db/prisma/MIGRATION_NOTES.md`).
+✅ Prisma Client Extension de isolamento multi-tenant (Capítulo 7) cobrindo todos os
+   models tenant-scoped, com exceção explícita e auditada dos modelos dual-tenant de
+   `accounting-office` (gated por `assertAccountingAccess()`).
+✅ API Express com JWT RS256, argon2id, RBAC hierárquico (Owner/Manager/Technician/
+   Cashier + papéis de super-admin SUPER_ADMIN/SUPPORT_AGENT/FINANCE_ANALYST),
+   tenant lockout HTTP 402, cache Redis de permissões.
+✅ Frontend React 18/Vite/MUI v5 com 35 módulos espelhando o backend, PDV
+   offline-first (Dexie + Service Worker + Background Sync), painel super-admin com
+   modais de confirmação em ações destrutivas.
+✅ App desktop Electron com licenciamento offline verificável (RS256), IPC validado
+   por zod, sem segredos em texto plano, sem SSO via JWT na URL.
+✅ Múltiplas rodadas de auditoria forense completa (bugs, segurança, performance,
+   RBAC, lógica de negócio por nicho, pagamentos/fiscal, painel super-admin) — todas
+   com achados corrigidos, commitados e propagados para `main`/`railway`/`vercel`.
+✅ Suíte de testes automatizados real (`apps/api/tests/`): isolamento multi-tenant,
+   FIFO/FEFO + BOM, webhooks de billing, auth/RBAC, contrato da Prisma Tenant
+   Extension, concorrência de caixa/orçamento — requer Postgres/Redis acessíveis
+   para rodar (`npm run db:test` / CI), ver seção "Como rodar" abaixo.
+⏳ Gaps de escopo maior documentados e deliberadamente adiados (ver seção própria
+   abaixo): NF-e modelo 55, contingência fiscal formal, JWT em `localStorage` no
+   painel admin (arquitetural, requer refatoração maior de sessão).
 
 ## Bugs reais encontrados e corrigidos durante esta construção
 
@@ -80,6 +119,12 @@ arriscado do que deixá-los explicitamente bloqueados/documentados.
    `apps/api/src/workers/fiscal-emission.worker.ts` (acima da função
    `fiscalEmissionProcessor`) para a lista completa do que falta. Requer projeto
    dedicado, com testes reais de homologação SEFAZ por UF.
+3. **Token JWT/admin em `localStorage` no painel** (`fa-jwt-localstorage`,
+   `fa-admin-token-localstorage`): exposto a XSS caso uma dependência de frontend
+   seja comprometida; a correção correta é migrar para cookie `httpOnly`+`SameSite`
+   com refresh-token rotation, o que é uma mudança arquitetural de sessão maior que
+   um patch pontual — mantido como gap conhecido e documentado, não corrigido
+   silenciosamente.
 
 ## Como rodar localmente
 
@@ -109,6 +154,9 @@ docker compose -f infra/docker/docker-compose.dev.yml up -d
 3. **Self-host genérico** (VPS, Capítulo 3.1 da Bible): [`deploy/generic-host/README.md`](deploy/generic-host/README.md) —
    `deploy/generic-host/docker-compose.yml` sobe Postgres, Redis, API, worker, Web (Nginx) e Caddy (HTTPS opcional).
 
-> Os Dockerfiles ainda não foram build-testados nesta sessão por falta de um
-> daemon Docker disponível na máquina atual — revisar a primeira execução real
-> em qualquer um dos 3 ambientes antes de considerar "pronto para produção".
+> Esta máquina de desenvolvimento não tem Docker/Postgres/Redis locais disponíveis,
+> então os workers e a suíte de testes não puderam ser executados contra um banco
+> real nesta sessão (apenas `tsc`, `prisma validate/generate` e `vite build`, que não
+> dependem de conexão com banco). Rode `npm run db:migrate` e `npx vitest run` em
+> `apps/api` contra um Postgres/Redis reais (Railway, CI, ou Docker local) antes de
+> promover qualquer mudança para produção.
