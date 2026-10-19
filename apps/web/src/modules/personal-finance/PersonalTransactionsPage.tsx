@@ -247,8 +247,8 @@ export function PersonalTransactionsPage() {
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<PersonalTransaction | null>(null);
 
-  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts() });
-  const categoriesQuery = useQuery({ queryKey: ["personal-categories"], queryFn: () => personalFinanceApi.categories() });
+  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts(), staleTime: 60_000 });
+  const categoriesQuery = useQuery({ queryKey: ["personal-categories"], queryFn: () => personalFinanceApi.categories(), staleTime: 60_000 });
   const transactionsQuery = useQuery({
     queryKey: ["personal-transactions", accountId, categoryId, from, to],
     queryFn: () =>
@@ -258,6 +258,7 @@ export function PersonalTransactionsPage() {
         from: from ? dateInputToIso(from) : undefined,
         to: to ? dateInputToIso(to) : undefined,
       }),
+    staleTime: 30_000,
   });
 
   const deleteMutation = useMutation({

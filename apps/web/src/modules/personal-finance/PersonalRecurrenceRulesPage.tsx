@@ -32,8 +32,8 @@ import { RECURRENCE_FREQUENCY_LABEL, personalFinanceApi, type PersonalRecurrence
 function CreateRuleDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts() });
-  const categoriesQuery = useQuery({ queryKey: ["personal-categories"], queryFn: () => personalFinanceApi.categories() });
+  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts(), staleTime: 60_000 });
+  const categoriesQuery = useQuery({ queryKey: ["personal-categories"], queryFn: () => personalFinanceApi.categories(), staleTime: 60_000 });
   const [frequency, setFrequency] = useState<PersonalRecurrenceFrequency>("MONTHLY");
   const [dayOfMonth, setDayOfMonth] = useState("1");
   const [templateDescription, setTemplateDescription] = useState("");
@@ -134,7 +134,7 @@ function CreateRuleDialog({ onClose }: { onClose: () => void }) {
 export function PersonalRecurrenceRulesPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const query = useQuery({ queryKey: ["personal-recurrence-rules"], queryFn: () => personalFinanceApi.recurrenceRules() });
+  const query = useQuery({ queryKey: ["personal-recurrence-rules"], queryFn: () => personalFinanceApi.recurrenceRules(), staleTime: 30_000 });
   const [creating, setCreating] = useState(false);
 
   const toggle = useMutation({

@@ -39,7 +39,7 @@ function monthInputToIso(value: string): string {
 function BudgetDialog({ budget, monthReference, onClose }: { budget: PersonalBudget | null; monthReference: string; onClose: () => void }) {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const categoriesQuery = useQuery({ queryKey: ["personal-categories"], queryFn: () => personalFinanceApi.categories() });
+  const categoriesQuery = useQuery({ queryKey: ["personal-categories"], queryFn: () => personalFinanceApi.categories(), staleTime: 60_000 });
   const [categoryId, setCategoryId] = useState(budget?.categoryId ?? "");
   const [limitAmount, setLimitAmount] = useState(budget ? String(Number(budget.limitAmount)) : "");
   const [rolloverEnabled, setRolloverEnabled] = useState(budget?.rolloverEnabled ?? false);
@@ -105,6 +105,7 @@ export function PersonalBudgetPage() {
   const query = useQuery({
     queryKey: ["personal-budgets", monthReference],
     queryFn: () => personalFinanceApi.budgets(monthInputToIso(monthReference)),
+    staleTime: 30_000,
   });
 
   return (

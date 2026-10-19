@@ -5,7 +5,7 @@
 // terminal — nesta v1 o dashboard mostra o ping agregado do backend; a lista nominal de
 // sessões ativas depende de um endpoint `GET /admin/active-sessions` (pendência, ver
 // README.md) pois o módulo de sessões atual (Capítulo 14) não expõe isso publicamente.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Box from "@mui/material/Box";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
@@ -25,6 +25,12 @@ export function HostDashboard({ config }: { config: DesktopConfig }) {
   const [refreshing, setRefreshing] = useState(false);
 
   const apiBaseUrl = `http://127.0.0.1:${config.network.port}`;
+  // CORREÇÃO DE AUDITORIA (fa-desktop-host-dashboard-refresh-stuck): `requestIdRef`
+  // é um contador monotônico — cada chamada a `refreshHealth` recebe um id próprio;
+  // se uma chamada mais nova já começou quando uma mais antiga termina (overlap do
+  // intervalo de 30s com um clique manual em "Atualizar status", por exemplo), o
+  // resultado desatualizado é descartado em vez de sobrescrever o estado mais recente.
+  const requestIdRef = useRef(0);
 
   useEffect(() => {
     const api = getDesktopApi();
@@ -34,14 +40,22 @@ export function HostDashboard({ config }: { config: DesktopConfig }) {
   }, []);
 
   async function refreshHealth() {
+    const requestId = ++requestIdRef.current;
     setRefreshing(true);
-    const api = getDesktopApi();
-    const results: Record<string, HealthPingResult> = {};
-    for (const route of CRITICAL_ROUTES) {
-      results[route] = await api.network.pingUrl(`${apiBaseUrl}${route}`);
+    try {
+      const api = getDesktopApi();
+      const settled = await Promise.allSettled(CRITICAL_ROUTES.map((route) => api.network.pingUrl(`${apiBaseUrl}${route}`)));
+      if (requestId !== requestIdRef.current) return; // uma chamada mais nova já assumiu — descarta este resultado
+      const results: Record<string, HealthPingResult> = {};
+      settled.forEach((outcome, index) => {
+        const route = CRITICAL_ROUTES[index];
+        results[route] =
+          outcome.status === "fulfilled" ? outcome.value : { ok: false, latencyMs: null, detail: outcome.reason instanceof Error ? outcome.reason.message : "Falha ao verificar rota." };
+      });
+      setRouteHealth(results);
+    } finally {
+      if (requestId === requestIdRef.current) setRefreshing(false);
     }
-    setRouteHealth(results);
-    setRefreshing(false);
   }
 
   useEffect(() => {
@@ -59,7 +73,7 @@ export function HostDashboard({ config }: { config: DesktopConfig }) {
           <Button variant="outlined" onClick={refreshHealth} disabled={refreshing}>
             {refreshing ? <CircularProgress size={18} /> : "Atualizar status"}
           </Button>
-          <Button variant="contained" onClick={() => getDesktopApi().window.openErp(apiBaseUrl)}>
+          <Button variant="contained" onClick={() => getDesktopApi().window.openErp()}>
             Abrir Filitech ERP
           </Button>
         </Stack>

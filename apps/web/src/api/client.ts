@@ -2,23 +2,27 @@
 // Cliente HTTP real contra apps/api — sem mocks. Base URL configurável via
 // VITE_API_BASE_URL (Vercel/Railway injetam em build/runtime; dev usa localhost).
 //
-// Override em runtime via `?apiBaseUrl=...`: usado pelo shell Electron
-// (apps/desktop/electron/main.ts) para apontar esta mesma UI web — sem duplicar
-// nenhum código de página/componente — tanto para o backend local (modo HOST)
-// quanto para o PC HOST configurado na rede (modo USUÁRIO), sem precisar de um
+// Override em runtime via `window.filitech.apiBaseUrl`: usado pelo shell Electron
+// (apps/desktop/electron/erp-preload.ts) para apontar esta mesma UI web — sem
+// duplicar nenhum código de página/componente — tanto para o backend local (modo
+// HOST) quanto para o PC HOST configurado na rede (modo USUÁRIO), sem precisar de um
 // build do apps/web diferente por modo/host.
 //
-// CORREÇÃO DE AUDITORIA (full-audit, sev. 85): antes, `?apiBaseUrl=` era aceito em
-// QUALQUER contexto (inclusive a web pública), permitindo que um link malicioso
-// (ex.: enviado por e-mail/WhatsApp) redirecionasse todas as chamadas de API —
+// CORREÇÃO DE AUDITORIA (fa-desktop-apibaseurl-override-web, fa-desktop-arbitrary-erp-url):
+// antes, `?apiBaseUrl=` era aceito via query string em QUALQUER contexto (inclusive a
+// web pública) sempre que `window.filitech` existisse, e o valor em si vinha
+// diretamente da URL — um link malicioso (ex.: enviado por e-mail/WhatsApp) com
+// `?apiBaseUrl=https://atacante.exemplo` redirecionaria todas as chamadas de API —
 // incluindo login — para um servidor controlado por um atacante (phishing de
-// credenciais). Agora só é honrado quando a página está rodando dentro do shell
-// Electron (que injeta `window.filitechDesktop` via preload script), nunca na web
-// pública servida pelo Vercel/Railway.
+// credenciais), mesmo dentro do shell Electron. Agora `apiBaseUrl` só pode vir de
+// `window.filitech.apiBaseUrl`, uma propriedade somente-leitura injetada pelo preload
+// do processo main ANTES de qualquer script da página rodar — nunca da URL/query
+// string, que nunca é lida para este fim. Na web pública (sem `window.filitech`), o
+// comportamento é inalterado: sempre `VITE_API_BASE_URL`.
 export function resolveApiBaseUrl(): string {
-  if (typeof window !== "undefined" && Boolean((window as unknown as { filitech?: unknown }).filitech)) {
-    const fromQuery = new URLSearchParams(window.location.search).get("apiBaseUrl");
-    if (fromQuery) return fromQuery;
+  const bridge = typeof window !== "undefined" ? (window as unknown as { filitech?: { apiBaseUrl?: string } }).filitech : undefined;
+  if (bridge && typeof bridge.apiBaseUrl === "string" && bridge.apiBaseUrl) {
+    return bridge.apiBaseUrl;
   }
   return import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3333";
 }
@@ -102,40 +106,28 @@ export function setStoredSession(response: AuthResponse | null): void {
   }
 }
 
-function base64UrlDecode(value: string): string {
-  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(value.length + ((4 - (value.length % 4)) % 4), "=");
-  return decodeURIComponent(
-    atob(padded)
-      .split("")
-      .map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`)
-      .join(""),
-  );
-}
-
 /**
- * SSO do shell desktop (apps/desktop/electron/main.ts, `openErpWindow`): repassa o
- * AuthResponse já obtido no login do onboarding via `?sso=<base64url JSON>` para esta
- * janela do apps/web nunca pedir login uma segunda vez. Roda uma única vez no boot do
- * módulo (antes de qualquer render) e remove o parâmetro da URL imediatamente — o
- * token nunca fica visível na barra de endereço depois do primeiro carregamento.
+ * SSO do shell desktop (apps/desktop/electron/main.ts + erp-preload.ts): repassa o
+ * AuthResponse já obtido no login do onboarding via `window.filitech.sso` (injetado
+ * pelo preload síncrono ANTES de qualquer script desta página rodar) para esta janela
+ * do apps/web nunca pedir login uma segunda vez.
+ *
+ * CORREÇÃO DE AUDITORIA (fa-desktop-sso-in-url): antes, o AuthResponse (contendo o
+ * token de sessão) era serializado como `?sso=<base64url JSON>` na própria URL,
+ * ficando exposto em logs do Electron, histórico de navegação e no `Referer` de
+ * qualquer requisição subsequente feita pela página. Agora nunca é lido da URL — só
+ * de `window.filitech.sso`, que o main apaga do seu registro interno após a primeira
+ * leitura desta janela (uso único).
  */
-function consumeSsoFromQuery(): void {
+function consumeSsoFromBridge(): void {
   if (typeof window === "undefined") return;
-  const url = new URL(window.location.href);
-  const sso = url.searchParams.get("sso");
-  if (!sso) return;
-  try {
-    const response = JSON.parse(base64UrlDecode(sso)) as AuthResponse;
-    if (response?.token && response.tenant && response.user) {
-      setStoredSession(response);
-    }
-  } catch {
-    // sso inválido/corrompido — ignora silenciosamente e segue para a tela de login normal.
+  const bridge = (window as unknown as { filitech?: { sso?: AuthResponse | null } }).filitech;
+  const response = bridge?.sso;
+  if (response?.token && response.tenant && response.user) {
+    setStoredSession(response);
   }
-  url.searchParams.delete("sso");
-  window.history.replaceState({}, "", url.pathname + (url.search ? url.search : ""));
 }
-consumeSsoFromQuery();
+consumeSsoFromBridge();
 // Garante que o service worker tenha o token espelhado mesmo após um reload de
 // página (onde nenhum novo `setStoredToken` é chamado, pois a sessão já existia em
 // localStorage de um boot anterior) — sem isto, o Background Sync real só passaria a

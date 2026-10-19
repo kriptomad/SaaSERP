@@ -19,12 +19,17 @@ export function ClientLauncher({ config, onReconfigure }: { config: DesktopConfi
 
   async function handleOpen() {
     setChecking(true);
-    const result = await getDesktopApi().network.pingUrl(`${apiBaseUrl}/health`);
-    setReachable(result.ok);
-    setChecking(false);
+    try {
+      const result = await getDesktopApi().network.pingUrl(`${apiBaseUrl}/health`);
+      setReachable(result.ok);
+    } catch {
+      setReachable(false);
+    } finally {
+      setChecking(false);
+    }
     // Abre mesmo se o host estiver inacessível: o PDV offline-first (Dexie + Service
     // Worker + Background Sync, apps/web/src/shared/offline) cobre a venda sem rede.
-    await getDesktopApi().window.openErp(apiBaseUrl);
+    await getDesktopApi().window.openErp();
   }
 
   return (

@@ -62,6 +62,7 @@ export function DataImportWizardPage() {
     queryKey: ["data-import", "job", jobId],
     queryFn: () => dataImportApi.detail(jobId!),
     enabled: Boolean(jobId),
+    staleTime: 10_000,
     refetchInterval: (query) => {
       const status = query.state.data?.status;
       return status === "VALIDATING" || status === "IMPORTING" ? 2_000 : false;

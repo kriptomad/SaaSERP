@@ -80,9 +80,32 @@ export interface HealthPingResult {
   detail?: string;
 }
 
+/**
+ * Dados computados e validados 100% no processo main, entregues à janela do
+ * `apps/web` (erpWindow) via canal IPC síncrono dedicado (`ERP_BOOTSTRAP`) — nunca
+ * mais via query string da URL (ver fa-desktop-sso-in-url, fa-desktop-arbitrary-erp-url).
+ * `sso` é consumido uma única vez (o main apaga seu registro interno após a primeira
+ * leitura desta janela).
+ */
+export interface ErpBootstrapPayload {
+  apiBaseUrl: string;
+  sso: TenantSessionCache | null;
+}
+
+// CORREÇÃO DE AUDITORIA (fa-desktop-config-patch-bypass): o antigo `CONFIG_SET`
+// genérico aceitava qualquer `Partial<DesktopConfig>` vindo do renderer, incluindo
+// `license`/`session`/`deviceId` — um renderer comprometido (ex. via XSS numa
+// dependência) podia fabricar uma licença válida só escrevendo esses campos
+// diretamente no config-store. Agora cada campo tem um canal IPC próprio, com
+// validação de schema (ver `validation.ts`), e `license`/`session`/`deviceId` NUNCA
+// são aceitos vindos do renderer — só o próprio main os escreve, sempre como
+// resultado de uma resposta validada da API real (login/ativação/trial/status).
 export const IPC_CHANNELS = {
   CONFIG_GET: "config:get",
-  CONFIG_SET: "config:set",
+  CONFIG_SET_INSTALL_MODE: "config:set-install-mode",
+  CONFIG_SET_NETWORK: "config:set-network",
+  CONFIG_SET_CLIENT_HOST: "config:set-client-host",
+  CONFIG_SET_ONBOARDING_COMPLETE: "config:set-onboarding-complete",
   BACKEND_START: "backend:start",
   BACKEND_STOP: "backend:stop",
   BACKEND_STATUS: "backend:status",
@@ -90,6 +113,7 @@ export const IPC_CHANNELS = {
   DIALOG_CHOOSE_FOLDER: "dialog:choose-folder",
   NETWORK_LOCAL_IPS: "network:local-ips",
   NETWORK_PING_URL: "network:ping-url",
+  NETWORK_TEST_CANDIDATE_HOST: "network:test-candidate-host",
   LICENSE_ACTIVATE: "license:activate",
   LICENSE_TRIAL: "license:trial",
   LICENSE_STATUS: "license:status",
@@ -97,4 +121,5 @@ export const IPC_CHANNELS = {
   AUTH_LOGOUT: "auth:logout",
   WINDOW_OPEN_ERP: "window:open-erp",
   APP_VERSION: "app:version",
+  ERP_BOOTSTRAP: "erp:bootstrap",
 } as const;

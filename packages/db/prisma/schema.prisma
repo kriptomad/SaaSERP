@@ -2630,6 +2630,13 @@ model OnlineOrder {
   totalAmount      Decimal           @db.Decimal(12, 2)
   customerNotes    String?
   cancelReason     String?
+  // GAP DE AUDITORIA FECHADO (fa-online-store-order-not-idempotent): criação de
+  // pedido pela vitrine pública não tinha nenhuma proteção contra duplo clique/
+  // retry do cliente final — mesmo padrão de `idempotencyKey` já usado em
+  // Sale/Payment/FailedOfflineSaleSync. Opcional (nem todo cliente anônimo envia
+  // o header), mas quando enviado é único por tenant — um retry com a MESMA
+  // chave devolve o pedido já criado em vez de duplicar.
+  idempotencyKey   String?
   linkedSaleId     String? // preenchido quando o lojista confirma e converte este pedido numa Sale real do PDV
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
@@ -2639,6 +2646,7 @@ model OnlineOrder {
 
   @@index([tenantId, status])
   @@index([tenantId, createdAt])
+  @@unique([tenantId, idempotencyKey])
   @@map("online_orders")
 }
 

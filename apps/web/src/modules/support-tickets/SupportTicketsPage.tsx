@@ -131,7 +131,11 @@ function TicketDetailDialog({ ticketId, onClose }: { ticketId: string; onClose: 
   const [reply, setReply] = useState("");
   const [attachmentKeys, setAttachmentKeys] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
-  const query = useQuery({ queryKey: ["support-tickets", ticketId], queryFn: () => supportTicketsApi.get(ticketId) });
+  const query = useQuery({
+    queryKey: ["support-tickets", ticketId],
+    queryFn: () => supportTicketsApi.get(ticketId),
+    staleTime: 30_000,
+  });
 
   const sendReply = useMutation({
     mutationFn: () => supportTicketsApi.addMessage(ticketId, reply.trim(), attachmentKeys),
@@ -243,7 +247,7 @@ function TicketDetailDialog({ ticketId, onClose }: { ticketId: string; onClose: 
 }
 
 export function SupportTicketsPage() {
-  const query = useQuery({ queryKey: ["support-tickets"], queryFn: () => supportTicketsApi.list() });
+  const query = useQuery({ queryKey: ["support-tickets"], queryFn: () => supportTicketsApi.list(), staleTime: 30_000 });
   const [newOpen, setNewOpen] = useState(false);
   const [openTicketId, setOpenTicketId] = useState<string | null>(null);
 

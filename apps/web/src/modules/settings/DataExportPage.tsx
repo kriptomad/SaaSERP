@@ -33,6 +33,7 @@ export function DataExportPage() {
   const jobsQuery = useQuery({
     queryKey: ["data-export", "jobs"],
     queryFn: dataExportApi.list,
+    staleTime: 30_000,
     refetchInterval: (query) => {
       const jobs = query.state.data as TenantDataExportJob[] | undefined;
       const stillRunning = jobs?.some((j) => j.status === "QUEUED" || j.status === "GENERATING");

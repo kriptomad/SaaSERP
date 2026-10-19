@@ -13,6 +13,17 @@ import { createModuleLogger } from "./logger";
 
 const log = createModuleLogger("queue-redis");
 
+// fa-infra-redis-silent-localhost-fallback: mesma justificativa de lib/redis.ts —
+// em produção, nunca cair silenciosamente para um Redis local inexistente dentro
+// do container (o worker/BullMQ ficaria tentando reconectar para sempre sem
+// nenhum job sendo processado, sem nenhum log claro do motivo raiz).
+if (process.env.NODE_ENV === "production" && !process.env.REDIS_URL) {
+  throw new Error(
+    "REDIS_URL é obrigatório em produção (NODE_ENV=production) — defina a variável de " +
+      "ambiente apontando para o Redis real (ver .env.example).",
+  );
+}
+
 // BullMQ exige `maxRetriesPerRequest: null` na conexão dedicada que ele gerencia
 // internamente (requisito documentado da própria lib) — connection isolada da
 // usada pelo gatekeeper (lib/redis.ts) para não competir por retry/pipeline.

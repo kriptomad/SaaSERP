@@ -10,7 +10,10 @@ services:
       POSTGRES_PASSWORD: filitech_dev_password
       POSTGRES_DB: filitech
     ports:
-      - "5432:5432"
+      # fa-infra-compose-dev-exposes-db-redis: publica só em loopback — evita exposição
+      # em hosts compartilhados/VPN onde "0.0.0.0" seria alcançável por outras máquinas
+      # da mesma rede.
+      - "127.0.0.1:5432:5432"
     volumes:
       - filitech_postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +27,7 @@ services:
     container_name: filitech-redis-dev
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - filitech_redis_data:/data
     healthcheck:

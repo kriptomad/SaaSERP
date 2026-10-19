@@ -473,6 +473,14 @@ const OWNER_PERMISSIONS = [
   // Capítulo 11.5 — Papelaria/Presentes: O.S. de personalização (bordado/sublimação).
   "personalization:order:read",
   "personalization:order:write",
+  // Capítulo 8.5 — Vitrine Virtual/Loja Online: configuração da loja (slug, cor,
+  // logo, entrega) é decisão de dono/gerência do negócio, nunca de qualquer
+  // usuário autenticado qualquer. GAP DE AUDITORIA FECHADO: antes do RBAC
+  // existir aqui, `online-store.routes.ts` só checava `requireAuth` — um
+  // TECHNICIAN ou HOUSEHOLD_MEMBER conseguia reconfigurar a loja pública.
+  "online-store:settings:manage",
+  "online-store:order:read",
+  "online-store:order:write",
 ];
 
 // CORREÇÃO DE BUG PRÉ-EXISTENTE (bloqueante): esta constante estava sem a
@@ -550,6 +558,11 @@ const MANAGER_PERMISSIONS = [
   "car-wash:queue:write",
   "personalization:order:read",
   "personalization:order:write",
+  // Capítulo 8.5 — Vitrine Virtual/Loja Online: MANAGER administra a loja no dia
+  // a dia (mesmo nível de OWNER); ver nota em OWNER_PERMISSIONS.
+  "online-store:settings:manage",
+  "online-store:order:read",
+  "online-store:order:write",
 ];
 
 const TECHNICIAN_PERMISSIONS = [
@@ -598,6 +611,12 @@ const CASHIER_PERMISSIONS = [
   // de atendimento walk-in do dia a dia (mesmo nível que pdv:comanda acima).
   "car-wash:queue:read",
   "car-wash:queue:write",
+  // Capítulo 8.5 — Vitrine Virtual/Loja Online: caixa/balcão confirma e avança o
+  // status dos pedidos recebidos da loja pública no dia a dia (ex.: confirmar
+  // recebimento, marcar como "preparando"), mas não reconfigura a loja em si
+  // (slug/cor/logo/entrega é MANAGER/OWNER, ver `online-store:settings:manage`).
+  "online-store:order:read",
+  "online-store:order:write",
 ];
 
 // Capítulo 20.9 — Portal do Contador: somente leitura financeiro/fiscal, sem

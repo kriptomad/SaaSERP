@@ -2,14 +2,27 @@
 // Ponte segura renderer <-> main. contextIsolation=true + nodeIntegration=false (padrão
 // recomendado do Electron) — o renderer nunca tem acesso direto a `require`/`fs`/`child_process`,
 // só ao que é exposto explicitamente aqui via contextBridge.
+//
+// CORREÇÃO DE AUDITORIA (fa-desktop-config-patch-bypass): `config.patch` genérico foi
+// removido — cada campo mutável pelo renderer agora tem um método/canal IPC dedicado,
+// validado no main (ver `validation.ts`). `license`, `session` e `deviceId` nunca têm
+// um setter exposto aqui: só o main os escreve, sempre a partir de uma resposta real
+// da API (login/licenciamento), nunca a partir de um valor arbitrário do renderer.
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC_CHANNELS } from "./ipc-contract";
-import type { DesktopConfig, NetworkConfig } from "./ipc-contract";
+import type { DesktopConfig, NetworkConfig, ClientHostConfig, InstallMode } from "./ipc-contract";
 
 const api = {
   config: {
     get: (): Promise<DesktopConfig> => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_GET),
-    patch: (patch: Partial<DesktopConfig>): Promise<DesktopConfig> => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET, patch),
+    setInstallMode: (installMode: InstallMode): Promise<DesktopConfig> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET_INSTALL_MODE, { installMode }),
+    setNetwork: (network: NetworkConfig): Promise<DesktopConfig> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET_NETWORK, network),
+    setClientHost: (clientHost: ClientHostConfig): Promise<DesktopConfig> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET_CLIENT_HOST, clientHost),
+    setOnboardingComplete: (): Promise<DesktopConfig> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET_ONBOARDING_COMPLETE, { onboardingComplete: true }),
   },
   backend: {
     start: (network: NetworkConfig) => ipcRenderer.invoke(IPC_CHANNELS.BACKEND_START, network),
@@ -24,6 +37,7 @@ const api = {
   network: {
     localIps: (): Promise<string[]> => ipcRenderer.invoke(IPC_CHANNELS.NETWORK_LOCAL_IPS),
     pingUrl: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.NETWORK_PING_URL, url),
+    testCandidateHost: (candidate: ClientHostConfig) => ipcRenderer.invoke(IPC_CHANNELS.NETWORK_TEST_CANDIDATE_HOST, candidate),
   },
   dialog: {
     chooseFolder: (): Promise<string | null> => ipcRenderer.invoke(IPC_CHANNELS.DIALOG_CHOOSE_FOLDER),
@@ -31,6 +45,12 @@ const api = {
   license: {
     activate: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSE_ACTIVATE),
     trial: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSE_TRIAL),
+    // CORREÇÃO DE AUDITORIA (fa-desktop-license-status-no-signature-check): este
+    // método só repassa para o renderer o resultado JÁ validado pelo main
+    // (`checkLicenseStatus` em main.ts agora verifica a assinatura RS256 do token
+    // offline antes de responder — ver fa-desktop-offline-license-no-signature). O
+    // preload não adiciona nem remove nenhuma garantia: é apenas o canal de
+    // transporte, nunca a fonte de verdade sobre validade da licença.
     status: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSE_STATUS),
   },
   auth: {
@@ -39,7 +59,10 @@ const api = {
     logout: () => ipcRenderer.invoke(IPC_CHANNELS.AUTH_LOGOUT),
   },
   window: {
-    openErp: (apiBaseUrl: string) => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_OPEN_ERP, apiBaseUrl),
+    // CORREÇÃO DE AUDITORIA (fa-desktop-arbitrary-erp-url): não recebe mais
+    // `apiBaseUrl` do renderer — o main recalcula a URL a partir do config validado
+    // internamente (ver `resolveActiveApiBaseUrl` + allowlist em main.ts).
+    openErp: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_OPEN_ERP),
   },
   app: {
     version: (): Promise<string> => ipcRenderer.invoke(IPC_CHANNELS.APP_VERSION),

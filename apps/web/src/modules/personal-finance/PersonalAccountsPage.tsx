@@ -175,7 +175,7 @@ function ReconcileDialog({ account, onClose }: { account: PersonalAccount; onClo
 export function PersonalAccountsPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const query = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts() });
+  const query = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts(), staleTime: 60_000 });
   const [editing, setEditing] = useState<PersonalAccount | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reconciling, setReconciling] = useState<PersonalAccount | null>(null);

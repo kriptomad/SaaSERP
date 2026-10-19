@@ -262,7 +262,7 @@ function DebtRow({ debt }: { debt: PersonalDebt }) {
 }
 
 export function PersonalDebtsPage() {
-  const query = useQuery({ queryKey: ["personal-debts"], queryFn: () => personalFinanceApi.debts() });
+  const query = useQuery({ queryKey: ["personal-debts"], queryFn: () => personalFinanceApi.debts(), staleTime: 30_000 });
   const [creating, setCreating] = useState(false);
   const [simulating, setSimulating] = useState(false);
 

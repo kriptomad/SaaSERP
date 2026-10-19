@@ -161,7 +161,7 @@ function UpdatePriceDialog({ investment, onClose }: { investment: PersonalInvest
 }
 
 function PriceHistoryDialog({ investment, onClose }: { investment: PersonalInvestment; onClose: () => void }) {
-  const query = useQuery({ queryKey: ["personal-investment-history", investment.id], queryFn: () => personalFinanceApi.priceHistory(investment.id) });
+  const query = useQuery({ queryKey: ["personal-investment-history", investment.id], queryFn: () => personalFinanceApi.priceHistory(investment.id), staleTime: 60_000 });
 
   return (
     <Dialog open onClose={onClose} fullWidth maxWidth="xs">
@@ -198,8 +198,8 @@ function PriceHistoryDialog({ investment, onClose }: { investment: PersonalInves
 export function PersonalInvestmentsPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const query = useQuery({ queryKey: ["personal-investments"], queryFn: () => personalFinanceApi.investments() });
-  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts() });
+  const query = useQuery({ queryKey: ["personal-investments"], queryFn: () => personalFinanceApi.investments(), staleTime: 30_000 });
+  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts(), staleTime: 60_000 });
   const [creating, setCreating] = useState(false);
   const [updatingPrice, setUpdatingPrice] = useState<PersonalInvestment | null>(null);
   const [viewingHistory, setViewingHistory] = useState<PersonalInvestment | null>(null);

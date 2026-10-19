@@ -17,18 +17,19 @@ function currentMonthReference(): string {
 }
 
 export function PersonalDashboardPage() {
-  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts() });
+  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts(), staleTime: 60_000 });
   const monthReference = currentMonthReference();
   const now = new Date();
   const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
   const transactionsQuery = useQuery({
     queryKey: ["personal-transactions", "dashboard", monthReference],
     queryFn: () => personalFinanceApi.transactions({ from: firstDayOfMonth }),
+    staleTime: 30_000,
   });
-  const budgetsQuery = useQuery({ queryKey: ["personal-budgets", monthReference], queryFn: () => personalFinanceApi.budgets(monthReference) });
-  const billsQuery = useQuery({ queryKey: ["personal-bills"], queryFn: () => personalFinanceApi.bills() });
-  const goalsQuery = useQuery({ queryKey: ["personal-goals"], queryFn: () => personalFinanceApi.goals() });
-  const netWorthQuery = useQuery({ queryKey: ["personal-net-worth"], queryFn: () => personalFinanceApi.netWorthSnapshots() });
+  const budgetsQuery = useQuery({ queryKey: ["personal-budgets", monthReference], queryFn: () => personalFinanceApi.budgets(monthReference), staleTime: 30_000 });
+  const billsQuery = useQuery({ queryKey: ["personal-bills"], queryFn: () => personalFinanceApi.bills(), staleTime: 30_000 });
+  const goalsQuery = useQuery({ queryKey: ["personal-goals"], queryFn: () => personalFinanceApi.goals(), staleTime: 30_000 });
+  const netWorthQuery = useQuery({ queryKey: ["personal-net-worth"], queryFn: () => personalFinanceApi.netWorthSnapshots(), staleTime: 60_000 });
 
   const loading = accountsQuery.isLoading || transactionsQuery.isLoading;
 

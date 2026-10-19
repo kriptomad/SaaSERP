@@ -139,8 +139,8 @@ function UpdateProgressDialog({ goal, onClose }: { goal: PersonalGoal; onClose: 
 export function PersonalGoalsPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const query = useQuery({ queryKey: ["personal-goals"], queryFn: () => personalFinanceApi.goals() });
-  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts() });
+  const query = useQuery({ queryKey: ["personal-goals"], queryFn: () => personalFinanceApi.goals(), staleTime: 30_000 });
+  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts(), staleTime: 60_000 });
   const [creating, setCreating] = useState(false);
   const [updating, setUpdating] = useState<PersonalGoal | null>(null);
 

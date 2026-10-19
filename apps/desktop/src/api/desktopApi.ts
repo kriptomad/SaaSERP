@@ -4,18 +4,23 @@
 import type {
   DesktopConfig,
   NetworkConfig,
+  ClientHostConfig,
+  InstallMode,
   BackendState,
   HealthPingResult,
   LicenseCache,
   TenantSessionCache,
 } from "../../electron/ipc-contract";
 
-export type { DesktopConfig, NetworkConfig, BackendState, HealthPingResult, LicenseCache, TenantSessionCache };
+export type { DesktopConfig, NetworkConfig, ClientHostConfig, InstallMode, BackendState, HealthPingResult, LicenseCache, TenantSessionCache };
 
 export interface FilitechDesktopBridge {
   config: {
     get(): Promise<DesktopConfig>;
-    patch(patch: Partial<DesktopConfig>): Promise<DesktopConfig>;
+    setInstallMode(installMode: InstallMode): Promise<DesktopConfig>;
+    setNetwork(network: NetworkConfig): Promise<DesktopConfig>;
+    setClientHost(clientHost: ClientHostConfig): Promise<DesktopConfig>;
+    setOnboardingComplete(): Promise<DesktopConfig>;
   };
   backend: {
     start(network: NetworkConfig): Promise<BackendState>;
@@ -26,6 +31,7 @@ export interface FilitechDesktopBridge {
   network: {
     localIps(): Promise<string[]>;
     pingUrl(url: string): Promise<HealthPingResult>;
+    testCandidateHost(candidate: ClientHostConfig): Promise<HealthPingResult>;
   };
   dialog: {
     chooseFolder(): Promise<string | null>;
@@ -40,7 +46,7 @@ export interface FilitechDesktopBridge {
     logout(): Promise<void>;
   };
   window: {
-    openErp(apiBaseUrl: string): Promise<void>;
+    openErp(): Promise<void>;
   };
   app: {
     version(): Promise<string>;

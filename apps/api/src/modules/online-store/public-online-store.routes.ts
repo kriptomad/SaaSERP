@@ -155,6 +155,24 @@ publicOnlineStoreRouter.post("/loja/:customSlug/orders", async (req: Request, re
   }
   const input = parsed.data;
 
+  // GAP DE AUDITORIA FECHADO (fa-online-store-order-not-idempotent): mesmo
+  // padrão de `Idempotency-Key` já usado em sales.routes.ts (Capítulo 9.5) —
+  // aqui opcional (cliente final anônimo pode não implementar o header), mas
+  // quando enviado garante que um duplo clique/retry no checkout da vitrine
+  // NUNCA cria dois pedidos: a segunda tentativa com a MESMA chave devolve o
+  // pedido já criado (200) em vez de duplicar (201).
+  const idempotencyKeyHeader = req.header("Idempotency-Key");
+  const idempotencyKey = typeof idempotencyKeyHeader === "string" && idempotencyKeyHeader.trim().length > 0 ? idempotencyKeyHeader.trim().slice(0, 200) : null;
+  if (idempotencyKey) {
+    const existingOrder = await prisma.onlineOrder.findFirst({
+      where: { tenantId: store.tenantId, idempotencyKey },
+      include: { items: true },
+    });
+    if (existingOrder) {
+      return res.status(200).json({ success: true, data: existingOrder, error: null });
+    }
+  }
+
   if (input.isDelivery && !store.deliveryEnabled) {
     return res.status(422).json({ success: false, data: null, error: { code: "DELIVERY_NOT_AVAILABLE", message: "Esta loja não realiza entrega." } });
   }
@@ -248,10 +266,24 @@ publicOnlineStoreRouter.post("/loja/:customSlug/orders", async (req: Request, re
       itemsTotalAmount,
       deliveryFee: input.isDelivery ? deliveryFee : null,
       totalAmount,
+      idempotencyKey,
       items: { create: itemsData },
     },
     include: { items: true },
+  }).catch(async (err) => {
+    // GAP DE AUDITORIA FECHADO (fa-online-store-order-not-idempotent): corrida
+    // residual entre o `findFirst` de dedupe acima e este `create` — duas
+    // requisições simultâneas com a MESMA `Idempotency-Key` podiam ambas passar
+    // pela checagem antes de qualquer uma commitar. O índice único
+    // `@@unique([tenantId, idempotencyKey])` garante que só uma vence; a outra
+    // recebe P2002 aqui e devolve o pedido que de fato venceu, nunca duplica.
+    if (idempotencyKey && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      const winner = await prisma.onlineOrder.findFirst({ where: { tenantId: store.tenantId, idempotencyKey }, include: { items: true } });
+      if (winner) return winner;
+    }
+    throw err;
   });
 
   return res.status(201).json({ success: true, data: order, error: null });
 });
+

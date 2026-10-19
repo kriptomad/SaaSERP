@@ -7,7 +7,7 @@
 // (profundidade de fila, latência exata, nomes técnicos) — isso fica em
 // /platform-admin/status, autenticado.
 import { useEffect, useState, useCallback } from "react";
-import { Alert, Box, Chip, Divider, Paper, Stack, Typography } from "@mui/material";
+import { Alert, Box, Chip, CircularProgress, Divider, Paper, Skeleton, Stack, Typography } from "@mui/material";
 import { resolveApiBaseUrl } from "../api/client";
 
 type ComponentStatus = "operational" | "degraded" | "outage";
@@ -48,16 +48,31 @@ export function StatusPage() {
   const [data, setData] = useState<PublicStatusResponse | null>(null);
   const [incidents, setIncidents] = useState<PublicIncident[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [incidentsError, setIncidentsError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(() => {
     fetch(`${resolveApiBaseUrl()}/status`)
-      .then((res) => res.json())
-      .then((body) => setData(body.data as PublicStatusResponse))
-      .catch(() => setError("Não foi possível carregar o status no momento."));
+      .then((res) => {
+        if (!res.ok) throw new Error(`Falha ao carregar status (HTTP ${res.status}).`);
+        return res.json();
+      })
+      .then((body) => {
+        setData(body.data as PublicStatusResponse);
+        setError(null);
+      })
+      .catch(() => setError("Não foi possível carregar o status no momento."))
+      .finally(() => setLoading(false));
     fetch(`${resolveApiBaseUrl()}/status/incidents`)
-      .then((res) => res.json())
-      .then((body) => setIncidents((body.data as PublicIncident[]) ?? []))
-      .catch(() => undefined);
+      .then((res) => {
+        if (!res.ok) throw new Error(`Falha ao carregar incidentes (HTTP ${res.status}).`);
+        return res.json();
+      })
+      .then((body) => {
+        setIncidents((body.data as PublicIncident[]) ?? []);
+        setIncidentsError(null);
+      })
+      .catch(() => setIncidentsError("Não foi possível carregar o histórico de incidentes no momento."));
   }, []);
 
   useEffect(() => {
@@ -71,6 +86,18 @@ export function StatusPage() {
       <Paper elevation={2} sx={{ p: 4, width: 560, maxWidth: "100%" }}>
         <Typography variant="h5" gutterBottom>Status da plataforma Filitech ERP</Typography>
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        {loading && !data && !error && (
+          <Stack spacing={1.5} sx={{ mb: 2 }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <CircularProgress size={18} />
+              <Typography variant="body2" color="text.secondary">Carregando status…</Typography>
+            </Box>
+            <Skeleton variant="rounded" height={40} />
+            <Skeleton variant="text" />
+            <Skeleton variant="text" />
+            <Skeleton variant="text" />
+          </Stack>
+        )}
         {data && (
           <>
             <Alert severity={data.overallStatus === "operational" ? "success" : data.overallStatus === "degraded" ? "warning" : "error"} sx={{ mb: 3 }}>
@@ -90,7 +117,8 @@ export function StatusPage() {
 
             <Divider sx={{ my: 3 }} />
             <Typography variant="h6" gutterBottom>Histórico de incidentes (últimos 90 dias)</Typography>
-            {incidents.length === 0 && (
+            {incidentsError && <Alert severity="error" sx={{ mb: 2 }}>{incidentsError}</Alert>}
+            {!incidentsError && incidents.length === 0 && (
               <Typography variant="body2" color="text.secondary">Nenhum incidente registrado no período.</Typography>
             )}
             <Stack spacing={1.5}>

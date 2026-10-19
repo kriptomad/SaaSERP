@@ -37,9 +37,13 @@ export function HostNetworkConfig({ config, onComplete }: { config: DesktopConfi
     setStatus("starting");
     setErrorMessage(null);
     const api = getDesktopApi();
-    await api.config.patch({
-      network: { bindAddress, port, backupFolderPath: backupFolderPath || null, backupSchedule, databaseUrl },
-    });
+    try {
+      await api.config.setNetwork({ bindAddress, port, backupFolderPath: backupFolderPath || null, backupSchedule, databaseUrl });
+    } catch (error) {
+      setStatus("error");
+      setErrorMessage(error instanceof Error ? error.message : "Configuração de rede inválida.");
+      return;
+    }
     const state = await api.backend.start({ bindAddress, port, backupFolderPath, backupSchedule, databaseUrl });
     if (state.status === "ERROR") {
       setStatus("error");
@@ -66,7 +70,7 @@ export function HostNetworkConfig({ config, onComplete }: { config: DesktopConfi
             value={bindAddress}
             onChange={(e) => setBindAddress(e.target.value)}
           >
-            <MenuItem value="0.0.0.0">Todas as redes (0.0.0.0) — recomendado</MenuItem>
+            <MenuItem value="0.0.0.0">Todas as redes (0.0.0.0)</MenuItem>
             {localIps.map((ip) => (
               <MenuItem key={ip} value={ip}>
                 {ip}
@@ -74,6 +78,17 @@ export function HostNetworkConfig({ config, onComplete }: { config: DesktopConfi
             ))}
           </Select>
         </FormControl>
+
+        {bindAddress === "0.0.0.0" && (
+          <Alert severity="warning">
+            Expor em "todas as redes" torna o backend local acessível por QUALQUER dispositivo nas
+            redes deste PC (inclusive Wi-Fi pública/convidados), não só pelos caixas da loja. Prefira
+            escolher o IP específico da rede interna da loja acima. Garanta também que o firewall do
+            Windows bloqueie a porta {port} para redes não confiáveis, e que a rede da loja seja
+            isolada/privada — este backend não usa TLS nesta versão (apenas HTTP), então trate-o como
+            confiável apenas dentro de uma LAN já protegida.
+          </Alert>
+        )}
 
         <TextField
           label="Porta"

@@ -18,17 +18,57 @@ export function listLocalIPv4Addresses(): string[] {
   return addresses;
 }
 
-/** Ping HTTP real (não apenas TCP) contra uma URL — usado para /health e saúde de módulos. */
+/**
+ * IPs de loopback/link-local/RFC1918 (inclui o endpoint de metadata de nuvem
+ * 169.254.169.254, link-local) — usado como defesa em profundidade além do allowlist
+ * de origem feito em main.ts (fa-desktop-ssrf-ping-url). Mantido aqui só para
+ * referência/uso por quem compuser chamadas diretamente a `pingUrl`.
+ */
+export function isPrivateOrLoopbackHost(hostname: string): boolean {
+  const kind = net.isIP(hostname);
+  if (kind === 4) {
+    const octets = hostname.split(".").map(Number);
+    const [a, b] = octets;
+    if (a === 127) return true; // loopback
+    if (a === 10) return true; // RFC1918
+    if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
+    if (a === 192 && b === 168) return true; // RFC1918
+    if (a === 169 && b === 254) return true; // link-local / metadata
+    if (a === 0) return true;
+    return false;
+  }
+  if (kind === 6) {
+    const normalized = hostname.toLowerCase();
+    if (normalized === "::1") return true; // loopback
+    if (normalized.startsWith("fc") || normalized.startsWith("fd")) return true; // fc00::/7 ULA
+    if (normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) return true; // fe80::/10
+    return false;
+  }
+  // Hostname não-IP (ex. "localhost"): trata como privado por segurança.
+  return hostname.toLowerCase() === "localhost" || !kind;
+}
+
+/**
+ * Ping HTTP real (não apenas TCP) contra uma URL — usado para /health e saúde de
+ * módulos. `redirect: "error"` é obrigatório (fa-desktop-pingurl-redirect-ssrf):
+ * o fetch nativo segue redirects por padrão sem revalidar o destino contra o
+ * allowlist feito pelo chamador (main.ts), permitindo que um endpoint
+ * aparentemente permitido responda com um 3xx apontando para um alvo interno não
+ * autorizado (ex. metadata da nuvem). Falhar explicitamente em redirect força o
+ * chamador a decidir, em vez de seguir silenciosamente.
+ */
 export async function pingUrl(url: string, timeoutMs = 3000): Promise<HealthPingResult> {
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, { signal: controller.signal, redirect: "error" });
     const latencyMs = Date.now() - startedAt;
     return { ok: response.ok, latencyMs, detail: `HTTP ${response.status}` };
   } catch (error) {
-    return { ok: false, latencyMs: null, detail: (error as Error).message };
+    const message = (error as Error).message;
+    const isRedirectBlock = /redirect/i.test(message);
+    return { ok: false, latencyMs: null, detail: isRedirectBlock ? "Redirecionamento bloqueado (SSRF)" : message };
   } finally {
     clearTimeout(timeout);
   }

@@ -12,6 +12,7 @@ import Switch from "@mui/material/Switch";
 import Alert from "@mui/material/Alert";
 import CircularProgress from "@mui/material/CircularProgress";
 import { getDesktopApi, type DesktopConfig } from "../api/desktopApi";
+import { clientHostConfigSchema } from "../../electron/validation";
 
 export function ClientHostConfig({ config, onComplete }: { config: DesktopConfig; onComplete: () => void }) {
   const [host, setHost] = useState(config.clientHost?.host ?? "");
@@ -19,18 +20,41 @@ export function ClientHostConfig({ config, onComplete }: { config: DesktopConfig
   const [useHttps, setUseHttps] = useState(config.clientHost?.useHttps ?? false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; detail?: string | null } | null>(null);
+  // CORREÇÃO DE AUDITORIA (fa-desktop-client-host-config-no-validation): validação
+  // runtime real (zod, mesmo schema usado pelo main em `CONFIG_SET_CLIENT_HOST`) de
+  // hostname/IP/porta/injeção de caracteres — tipos TS sozinhos desaparecem em
+  // runtime e não impediam um `host` com espaços, `;`, ou uma porta fora do range.
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  function validateInput(): { host: string; port: number; useHttps: boolean } | null {
+    const result = clientHostConfigSchema.safeParse({ host: host.trim(), port, useHttps });
+    if (!result.success) {
+      setValidationError(result.error.issues.map((issue) => issue.message).join("; "));
+      return null;
+    }
+    setValidationError(null);
+    return result.data;
+  }
 
   async function handleTest() {
+    const parsed = validateInput();
+    if (!parsed) return;
     setTesting(true);
     setTestResult(null);
-    const scheme = useHttps ? "https" : "http";
-    const result = await getDesktopApi().network.pingUrl(`${scheme}://${host}:${port}/health`);
-    setTestResult({ ok: result.ok, detail: result.detail });
-    setTesting(false);
+    try {
+      const result = await getDesktopApi().network.testCandidateHost(parsed);
+      setTestResult({ ok: result.ok, detail: result.detail });
+    } catch (error) {
+      setTestResult({ ok: false, detail: error instanceof Error ? error.message : "Falha ao testar conexão." });
+    } finally {
+      setTesting(false);
+    }
   }
 
   async function handleSave() {
-    await getDesktopApi().config.patch({ clientHost: { host, port, useHttps } });
+    const parsed = validateInput();
+    if (!parsed) return;
+    await getDesktopApi().config.setClientHost(parsed);
     onComplete();
   }
 
@@ -48,6 +72,8 @@ export function ClientHostConfig({ config, onComplete }: { config: DesktopConfig
           control={<Switch checked={useHttps} onChange={(e) => setUseHttps(e.target.checked)} />}
           label="Usar HTTPS"
         />
+
+        {validationError && <Alert severity="error">{validationError}</Alert>}
 
         <Stack direction="row" spacing={2}>
           <Button variant="outlined" onClick={handleTest} disabled={!host || testing}>

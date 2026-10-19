@@ -100,7 +100,15 @@ const app = express();
 // retornaria o IP interno do proxy reverso, nunca o IP real do cliente, quebrando
 // silenciosamente qualquer lógica dependente de IP (allowlist de admin, Capítulo
 // 14.5; rate limit e AuditLog por IP, Capítulo 14.4).
-app.set("trust proxy", true);
+// fa-infra-trust-proxy-true-global: `true` confiava cegamente em QUALQUER proxy
+// informado em `X-Forwarded-For` (inclusive um cliente malicioso que fale
+// diretamente com o processo, se ele algum dia ficar alcançável sem passar pelo
+// proxy da plataforma) — o atacante poderia forjar o próprio IP e burlar
+// allowlist/rate-limit por IP. Agora o número de "hops" de proxy confiáveis é
+// configurável via `TRUST_PROXY_HOPS` (padrão 1 — Railway/Vercel/Caddy/Nginx do
+// generic-host ficam todos a exatamente 1 proxy reverso do processo Node).
+const TRUST_PROXY_HOPS = Number(process.env.TRUST_PROXY_HOPS ?? 1);
+app.set("trust proxy", TRUST_PROXY_HOPS);
 
 app.use(helmet());
 app.use(
@@ -332,6 +340,30 @@ const HOST = process.env.HOST ?? "0.0.0.0";
 // o app é importado sem subir um listener de verdade — evita porta ocupada/EADDRINUSE
 // quando vários arquivos de teste importam o módulo em paralelo.
 if (process.env.NODE_ENV !== "test") {
+  // fa-infra-cors-origin-doc-gap: valida no boot (não bloqueante — CORS_ORIGIN pode
+  // ter sido configurado só via painel admin/DB, não via env, então um processo
+  // recém-subido ainda pode não enxergá-lo num cold start de secret cache) se existe
+  // alguma origem de CORS configurada em produção. Sem isso, o comportamento
+  // "fail closed" do middleware de CORS acima é silencioso: toda requisição de
+  // navegador falha com erro genérico e o operador não tem nenhuma pista do motivo
+  // nos logs de inicialização.
+  if (process.env.NODE_ENV === "production") {
+    getPlatformSecret("CORS_ORIGIN")
+      .then((raw) => {
+        const allowedOrigins = raw?.split(",").map((o) => o.trim()).filter(Boolean) ?? [];
+        if (allowedOrigins.length === 0) {
+          logger.error(
+            { env: "production" },
+            "CORS_ORIGIN não configurado (nem painel admin, nem variável de ambiente) — " +
+              "TODA requisição de navegador será rejeitada pela política de CORS. " +
+              "Defina a lista de origens de produção (ex.: https://app.seudominio.com.br), " +
+              "separadas por vírgula se houver mais de um domínio (ver .env.example).",
+          );
+        }
+      })
+      .catch((err) => logger.error({ err }, "falha ao validar CORS_ORIGIN no boot"));
+  }
+
   const httpServer = app.listen(PORT, HOST, () => {
     logger.info({ port: PORT, host: HOST }, "filitech-api ouvindo");
   });

@@ -105,13 +105,28 @@ async function dispatchUserChannels(input: NotifyTenantInput): Promise<void> {
     prismaUnscoped.notificationPreference.findUnique({
       where: { userId_category: { userId: input.userId, category: input.category as any } },
     }),
-    prismaUnscoped.user.findUnique({ where: { id: input.userId }, select: { email: true, whatsappPhone: true } }),
+    // GAP DE AUDITORIA FECHADO (cross-tenant leak): este `findUnique` usa
+    // `prismaUnscoped` (sem tenant scoping automático), então um `userId` de outro
+    // tenant (ex.: reaproveitado/mismatched por engano no caller) resultaria no envio
+    // de e-mail/WhatsApp/SMS/push para um usuário de OUTRO tenant. Filtra por
+    // `tenantId` diretamente no `where` para garantir que o usuário resolvido
+    // pertence ao mesmo tenant do evento disparado.
+    prismaUnscoped.user.findFirst({
+      where: { id: input.userId, tenantId: input.tenantId },
+      select: { email: true, whatsappPhone: true },
+    }),
     prismaUnscoped.pushDeviceToken.findMany({
       where: { userId: input.userId, revokedAt: null },
       select: { expoPushToken: true },
     }),
   ]);
-  if (!user) return;
+  if (!user) {
+    log.error(
+      { tenantId: input.tenantId, userId: input.userId },
+      "dispatchUserChannels: usuário não encontrado no tenant informado — notificação multicanal abortada (possível cross-tenant mismatch)",
+    );
+    return;
+  }
 
   const channels = {
     email: preference?.email ?? DEFAULT_CHANNELS.email,

@@ -11,9 +11,14 @@ apps/desktop/
   electron/           # processo principal (Node) — compilado via tsc -> dist-electron/
     main.ts             janelas, IPC, orquestração geral
     preload.ts           contextBridge (window.filitech) — único ponto de acesso do renderer ao main
+    erp-preload.ts        preload dedicado da janela do apps/web (ERP) — expõe só
+                          `window.filitech.{apiBaseUrl,sso}`, entregues via IPC síncrono
+                          (`ERP_BOOTSTRAP`), nunca por query string da URL
     backend-manager.ts   spawn/stop do child_process de apps/api (modo HOST)
     config-store.ts      electron-store — config de máquina (modo, rede, host, licença)
     network-utils.ts     ping HTTP/TCP, listagem de IPs locais da LAN
+    validation.ts         schemas zod — todo payload de IPC é validado antes de tocar o config-store
+    license-keys.ts/license-verify.ts  verificação de assinatura RS256 do token offline de licença
     ipc-contract.ts      tipos e nomes de canal IPC compartilhados main/renderer
   src/                # renderer PRÓPRIO deste shell (onboarding/config/dashboard) — bundlado via Vite
     screens/             WelcomeModeSelect, HostNetworkConfig, ClientHostConfig,
@@ -23,11 +28,14 @@ apps/desktop/
 
 A UI de negócio real (PDV, vendas, estoque, financeiro, etc.) **não é reimplementada
 aqui** — é a própria `apps/web`, carregada por `main.ts` em uma segunda `BrowserWindow`
-(`window:open-erp`), recebendo a API base URL via query string (`?apiBaseUrl=...`).
-Isso exigiu uma pequena extensão em `apps/web/src/api/client.ts`
-(`resolveApiBaseUrl()`), que passou a aceitar esse override em runtime antes de cair no
-`VITE_API_BASE_URL` de build — sem quebrar o uso normal do `apps/web` como SPA web puro
-(o parâmetro é opcional e ignorado fora do contexto Electron).
+(`window:open-erp`), usando um preload dedicado (`erp-preload.ts`) que recebe a API base
+URL e a sessão de SSO via um canal IPC síncrono (`ERP_BOOTSTRAP`), lido ANTES de
+qualquer script da página rodar — **nunca via query string da URL** (ver seção
+"Correções de auditoria de segurança" abaixo). Isso exigiu uma pequena extensão em
+`apps/web/src/api/client.ts` (`resolveApiBaseUrl()`), que passou a aceitar esse override
+em runtime (lendo `window.filitech.apiBaseUrl`) antes de cair no `VITE_API_BASE_URL` de
+build — sem quebrar o uso normal do `apps/web` como SPA web puro (a propriedade só
+existe dentro do shell Electron; na web pública o comportamento é inalterado).
 
 ## Dois modos de instalação
 
@@ -87,11 +95,13 @@ sessão, ou backend fora do ar), cai para validação 100% local comparando
 
 **SSO para a janela do ERP:** a mesma sessão (`TenantSessionCache`, shape idêntico ao
 `AuthResponse` de `apps/web/src/api/client.ts`) é repassada para a `BrowserWindow` do
-`apps/web` via `?sso=<base64url JSON>` quando `window:open-erp` é chamado — o usuário
-loga uma única vez no shell desktop e nunca precisa logar de novo na janela do ERP.
-`apps/web/src/api/client.ts` (`consumeSsoFromQuery`) decodifica esse parâmetro no boot,
-grava o token/tenant/user e remove o parâmetro da URL imediatamente (nunca fica visível
-na barra de endereço).
+`apps/web` via o canal IPC síncrono `ERP_BOOTSTRAP` quando `window:open-erp` é chamado —
+o usuário loga uma única vez no shell desktop e nunca precisa logar de novo na janela do
+ERP. `erp-preload.ts` lê esse canal (`ipcRenderer.sendSync`) ANTES de qualquer script da
+página rodar e expõe `window.filitech.sso`; `apps/web/src/api/client.ts`
+(`consumeSsoFromBridge`) lê essa propriedade no boot e grava o token/tenant/user. O
+registro é apagado no main após a primeira leitura de cada janela (uso único) — o token
+nunca passa pela URL, histórico de navegação ou cabeçalho `Referer`.
 
 Fluxo de resolução da API alvo para login/licenciamento/ERP (todas as chamadas):
 1. Modo HOST → backend local (`http://127.0.0.1:<porta>`).
@@ -159,7 +169,62 @@ para o download do binário do Electron). Empacotar para uma arquitetura diferen
 máquina que roda o script (ex. gerar instalador ARM64 numa máquina x64) também não é
 resolvido por este script — exige rodá-lo numa máquina/CI daquela arquitetura.
 
-## Limitações conhecidas deste ambiente sandbox
+## Correções de auditoria de segurança/robustez (30 findings `fa-desktop-*`)
+
+Esta seção documenta, em alto nível, as correções aplicadas a partir da auditoria do
+app Electron. Detalhes linha-a-linha estão nos comentários `CORREÇÃO DE AUDITORIA
+(fa-desktop-<id>)` espalhados pelo código.
+
+- **IPC/config**: o antigo canal genérico `CONFIG_SET` (aceitava `Partial<DesktopConfig>`
+  arbitrário, incluindo `license`/`session`) foi removido; cada campo tem um canal
+  próprio (`CONFIG_SET_INSTALL_MODE`/`_NETWORK`/`_CLIENT_HOST`/`_ONBOARDING_COMPLETE`),
+  todos validados por schema zod (`validation.ts`) e restritos à janela do launcher
+  (`assertTrustedSender`). `license`/`session`/`deviceId` só são gravados pelo próprio
+  main, nunca a partir de payload do renderer.
+- **Segredos em disco**: `databaseUrl`, `session.token` e `license.token` são
+  criptografados em repouso via `safeStorage` (DPAPI no Windows) antes de irem para o
+  `electron-store`; cai para texto plano apenas se `safeStorage` não estiver disponível
+  na máquina (indisponibilidade de DPAPI), caso documentado em comentário no
+  `config-store.ts`.
+- **Bind de rede padrão**: o padrão para instalações novas passou de `0.0.0.0` para
+  `127.0.0.1`; `0.0.0.0` continua disponível na tela de config de rede para quem
+  precisa servir a LAN, agora com um aviso explícito sobre expor a porta sem TLS/sem
+  firewall.
+- **Navegação/janelas**: `webSecurity: true` em ambas as janelas; `will-navigate` e
+  `setWindowOpenHandler` restringem navegação/popups a uma allowlist; downloads vão
+  para diálogo "Salvar como" em vez de navegar embutido.
+- **Licença offline**: o token offline agora é validado criptograficamente (RS256,
+  `license-verify.ts`) — emissor, expiração, `deviceFingerprint` e `tenantId` são
+  conferidos contra o estado local antes de considerar a licença válida; o preload
+  apenas repassa o resultado já validado pelo main (nenhuma lógica de confiança no
+  renderer).
+- **Backend local (modo HOST)**: início/parada agora são serializados (sem condição de
+  corrida entre cliques rápidos), o status "rodando" é confirmado por polling real em
+  `/health` (não mais por parse de linhas de log nem timeout fixo "otimista"), e o
+  processo filho é encerrado via árvore de processos (`taskkill /T /F` no Windows) com
+  espera pela saída real antes de liberar o estado — elimina processos zumbi.
+- **SSRF**: `pingUrl` usa `redirect: "error"` (bloqueia redirecionamento para
+  IP/host não autorizado) e o canal `NETWORK_PING_URL` só aceita origens já presentes na
+  config salva; o teste de conectividade de um host **ainda não salvo** (tela
+  "Configurar PC servidor") usa um canal dedicado (`NETWORK_TEST_CANDIDATE_HOST`),
+  validado por schema estrutural (host/porta), nunca por URL livre.
+- **Auto-update**: `electron-updater` foi integrado (`autoUpdater.checkForUpdatesAndNotify()`,
+  guardado por `app.isPackaged`); o provedor de publicação em `package.json`
+  (`build.publish`) está com uma URL placeholder — **requer configuração real do
+  provedor de distribuição + certificado de assinatura de código antes de uso em
+  produção** (gap conhecido, não bloqueante para esta correção pontual).
+- **TEF/pinpad — gap de escopo conhecido, documentado e não implementado**: a auditoria
+  apontou corretamente que não existe nenhuma ponte TEF/pinpad (nenhum módulo, IPC ou
+  bridge nativa) neste app, apesar de ser um requisito de MVP para o PDV físico.
+  **Esta correção pontual NÃO implementa TEF/pinpad** — é um item de escopo maior que
+  exige um esforço dedicado próprio: bridge nativa para o driver/protocolo oficial do
+  fabricante do pinpad, validação estrita de comandos (nunca aceitar comandos brutos
+  vindos do renderer sem whitelist), timeouts, correlação de transação,
+  idempotência e proteção contra replay. Ver também o marcador em
+  `electron/main.ts` (busque por `fa-desktop-no-tef-pinpad`) e o item correspondente de
+  licenciamento/compliance de PDV físico para planejamento futuro.
+
+
 
 - O download do binário do Electron (~110MB, GitHub Releases) sofria `ECONNRESET`
   repetido via `npm install` normal neste ambiente. Contornado baixando manualmente via

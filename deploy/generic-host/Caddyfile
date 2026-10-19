@@ -2,7 +2,9 @@
 # do docker-compose.yml (APP_DOMAIN / API_DOMAIN, definidas no .env).
 {$APP_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy web:80
+	# Container "web" agora escuta em 8080 (imagem nginx-unprivileged, sem root) —
+	# ver apps/web/Dockerfile (fa-infra-web-dockerfile-no-nonroot-user).
+	reverse_proxy web:8080
 }
 
 {$API_DOMAIN} {

@@ -80,7 +80,7 @@ function CreateConsentDialog({ onClose }: { onClose: () => void }) {
 export function PersonalOpenFinanceConsentsPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const query = useQuery({ queryKey: ["personal-open-finance-consents"], queryFn: () => personalFinanceApi.openFinanceConsents() });
+  const query = useQuery({ queryKey: ["personal-open-finance-consents"], queryFn: () => personalFinanceApi.openFinanceConsents(), staleTime: 60_000 });
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<OpenFinanceConsent | null>(null);
 

@@ -176,9 +176,9 @@ function PayBillDialog({ bill, onClose }: { bill: PersonalBill; onClose: () => v
 }
 
 export function PersonalBillsPage() {
-  const query = useQuery({ queryKey: ["personal-bills"], queryFn: () => personalFinanceApi.bills() });
-  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts() });
-  const categoriesQuery = useQuery({ queryKey: ["personal-categories"], queryFn: () => personalFinanceApi.categories() });
+  const query = useQuery({ queryKey: ["personal-bills"], queryFn: () => personalFinanceApi.bills(), staleTime: 30_000 });
+  const accountsQuery = useQuery({ queryKey: ["personal-accounts"], queryFn: () => personalFinanceApi.accounts(), staleTime: 60_000 });
+  const categoriesQuery = useQuery({ queryKey: ["personal-categories"], queryFn: () => personalFinanceApi.categories(), staleTime: 60_000 });
   const [creating, setCreating] = useState(false);
   const [paying, setPaying] = useState<PersonalBill | null>(null);
 

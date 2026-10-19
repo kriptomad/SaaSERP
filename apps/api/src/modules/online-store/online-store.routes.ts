@@ -10,11 +10,33 @@
 // usado por `public-booking.routes.ts`.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
+import { isTenantStorageKey } from "../../lib/storage-key";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const onlineStoreRouter = Router();
+
+// GAP DE AUDITORIA FECHADO (fa-online-store-missing-rbac): antes deste fix,
+// qualquer usuário autenticado (TECHNICIAN, HOUSEHOLD_MEMBER etc.) conseguia
+// reconfigurar a vitrine pública (slug/cor/logo/entrega) ou alterar pedidos —
+// `requireAuth`/`requireModule` sozinhos só garantem autenticação e contratação
+// do módulo, nunca autorização granular por papel. Mesmo padrão de
+// `hasPermission`/`hasManageUsersPermission` já usado em stock.routes.ts e
+// users.routes.ts: checa override por usuário (`RolePermission`) e, na
+// ausência dele, o default por papel (`RoleDefaultPermission`).
+async function hasPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
+  const [defaultGrant, override] = await Promise.all([
+    prisma.roleDefaultPermission.findUnique({ where: { role_permissionCode: { role: role as any, permissionCode } } }),
+    prisma.rolePermission.findUnique({ where: { userId_permission: { userId, permission: permissionCode } } }),
+  ]);
+  return override ? override.granted : Boolean(defaultGrant);
+}
+
+function forbidden(res: Response, message: string) {
+  return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message } });
+}
 
 const settingsSchema = z.object({
   isActive: z.boolean(),
@@ -33,23 +55,50 @@ const settingsSchema = z.object({
 });
 
 onlineStoreRouter.get("/online-store/settings", requireAuth, requireModule("ONLINE_STORE"), async (req: Request, res: Response) => {
-  const { tenantId } = req.session!;
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "online-store:settings:manage"))) {
+    return forbidden(res, "Seu nível de acesso não permite configurar a loja online.");
+  }
   const settings = await prisma.onlineStoreSettings.findUnique({ where: { tenantId } });
   return res.json({ success: true, data: settings, error: null });
 });
 
 onlineStoreRouter.put("/online-store/settings", requireAuth, requireModule("ONLINE_STORE"), async (req: Request, res: Response) => {
-  const { tenantId } = req.session!;
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "online-store:settings:manage"))) {
+    return forbidden(res, "Seu nível de acesso não permite configurar a loja online.");
+  }
   const parsed = settingsSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsed.error.flatten() } });
   }
 
+  // GAP DE AUDITORIA FECHADO (fa-online-store-logo-storage-key-unvalidated): o
+  // ponteiro de logo vinha do body sem validar o prefixo `tenants/<tenantId>/` —
+  // um tenant podia gravar a chave de um objeto de OUTRO tenant e, na vitrine
+  // pública, gerar uma URL assinada de leitura para um arquivo alheio. Mesma
+  // trava usada em work-orders.routes.ts/car-wash-service.routes.ts.
+  if (parsed.data.logoStorageKey && !isTenantStorageKey(parsed.data.logoStorageKey, tenantId)) {
+    return res.status(400).json({ success: false, data: null, error: { code: "INVALID_STORAGE_KEY", message: "A chave de armazenamento do logo deve pertencer ao tenant autenticado (tenants/<tenantId>/...)." } });
+  }
+
+  // GAP DE AUDITORIA FECHADO (fa-online-store-money-as-number): `deliveryFee`/
+  // `minOrderAmount` chegam do body como `number` (limite do JSON), mas são
+  // convertidos explicitamente para `Prisma.Decimal` ANTES de persistir — mesmo
+  // padrão usado no restante do fluxo de dinheiro deste módulo
+  // (public-online-store.routes.ts) e do resto do sistema (financial/*).
+  const { deliveryFee, minOrderAmount, ...rest } = parsed.data;
+  const data = {
+    ...rest,
+    deliveryFee: deliveryFee != null ? new Prisma.Decimal(deliveryFee) : deliveryFee,
+    minOrderAmount: minOrderAmount != null ? new Prisma.Decimal(minOrderAmount) : minOrderAmount,
+  };
+
   try {
     const settings = await prisma.onlineStoreSettings.upsert({
       where: { tenantId },
-      create: { tenantId, ...parsed.data },
-      update: { ...parsed.data },
+      create: { tenantId, ...data },
+      update: { ...data },
     });
     return res.json({ success: true, data: settings, error: null });
   } catch (err: any) {
@@ -68,7 +117,10 @@ onlineStoreRouter.patch(
   requireAuth,
   requireModule("ONLINE_STORE"),
   async (req: Request, res: Response) => {
-    const { tenantId } = req.session!;
+    const { tenantId, userId, role } = req.session!;
+    if (!(await hasPermission(role, userId, "online-store:settings:manage"))) {
+      return forbidden(res, "Seu nível de acesso não permite configurar a loja online.");
+    }
     const parsed = toggleVisibilitySchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos." } });
@@ -84,11 +136,23 @@ onlineStoreRouter.patch(
   },
 );
 
+const ONLINE_ORDER_STATUSES = ["PENDING", "CONFIRMED", "PREPARING", "OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED"] as const;
+
 onlineStoreRouter.get("/online-store/orders", requireAuth, requireModule("ONLINE_STORE"), async (req: Request, res: Response) => {
-  const { tenantId } = req.session!;
-  const statusFilter = typeof req.query.status === "string" ? req.query.status : undefined;
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "online-store:order:read"))) {
+    return forbidden(res, "Seu nível de acesso não permite consultar os pedidos da loja online.");
+  }
+  // GAP DE AUDITORIA FECHADO (fa-online-store-status-unsafe-cast): `status as any`
+  // aceitava qualquer string sem validação, quebrando com 500 (Prisma
+  // ValidationError) em vez de um 400 claro. Reusa o helper já estabelecido em
+  // prior fix round (query-enum.ts), mesmo padrão de outras rotas com filtro por
+  // enum.
+  const statusParsed = readEnumQuery(res, req.query.status, ONLINE_ORDER_STATUSES, "status");
+  if (!statusParsed.ok) return;
+
   const orders = await prisma.onlineOrder.findMany({
-    where: { tenantId, ...(statusFilter ? { status: statusFilter as any } : {}) },
+    where: { tenantId, ...(statusParsed.value ? { status: statusParsed.value } : {}) },
     include: { items: true },
     orderBy: { createdAt: "desc" },
     take: 200,
@@ -97,7 +161,10 @@ onlineStoreRouter.get("/online-store/orders", requireAuth, requireModule("ONLINE
 });
 
 onlineStoreRouter.get("/online-store/orders/:id", requireAuth, requireModule("ONLINE_STORE"), async (req: Request, res: Response) => {
-  const { tenantId } = req.session!;
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "online-store:order:read"))) {
+    return forbidden(res, "Seu nível de acesso não permite consultar os pedidos da loja online.");
+  }
   const order = await prisma.onlineOrder.findFirst({ where: { id: req.params.id, tenantId }, include: { items: true } });
   if (!order) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Pedido não encontrado." } });
   return res.json({ success: true, data: order, error: null });
@@ -121,7 +188,10 @@ const updateOrderStatusSchema = z.object({
 // PENDING direto para DELIVERED), mesma filosofia de `VALID_TRANSITIONS` já usada
 // em outros fluxos de status do sistema (O.S., Comanda).
 onlineStoreRouter.patch("/online-store/orders/:id/status", requireAuth, requireModule("ONLINE_STORE"), async (req: Request, res: Response) => {
-  const { tenantId } = req.session!;
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "online-store:order:write"))) {
+    return forbidden(res, "Seu nível de acesso não permite alterar o status dos pedidos da loja online.");
+  }
   const parsed = updateOrderStatusSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos." } });
@@ -142,13 +212,31 @@ onlineStoreRouter.patch("/online-store/orders/:id/status", requireAuth, requireM
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Informe o motivo do cancelamento." } });
   }
 
-  const updated = await prisma.onlineOrder.update({
-    where: { id: order.id },
+  // GAP DE AUDITORIA FECHADO (fa-online-store-order-status-race): o
+  // `findFirst` + `update` acima tem uma janela entre ler o status e escrever o
+  // novo — duas requisições concorrentes (ex.: dois atendentes clicando ao
+  // mesmo tempo) podiam ambas passar pela checagem de transição válida com o
+  // MESMO `order.status` antigo e aplicar transições incompatíveis em sequência
+  // (ex.: PREPARING→CANCELLED e, na mesma janela, PREPARING→DELIVERED, uma
+  // sobrescrevendo silenciosamente a outra). `updateMany` com `status: order.status`
+  // no `where` faz da transição uma operação condicional atômica no banco: só
+  // aplica se o status ainda for o mesmo lido; caso contrário, 0 linhas afetadas.
+  const updateResult = await prisma.onlineOrder.updateMany({
+    where: { id: order.id, tenantId, status: order.status as any },
     data: {
       status: parsed.data.status,
       ...(parsed.data.status === "CANCELLED" ? { cancelReason: parsed.data.cancelReason } : {}),
     },
-    include: { items: true },
   });
+  if (updateResult.count === 0) {
+    return res.status(409).json({
+      success: false,
+      data: null,
+      error: { code: "CONCURRENT_STATUS_CHANGE", message: "O status deste pedido mudou nesse meio tempo. Recarregue e tente novamente." },
+    });
+  }
+
+  const updated = await prisma.onlineOrder.findFirst({ where: { id: order.id, tenantId }, include: { items: true } });
   return res.json({ success: true, data: updated, error: null });
 });
+

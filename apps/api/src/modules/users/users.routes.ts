@@ -8,7 +8,7 @@
 // Convenção de resposta (Capítulo 9): envelope { success, data, error }.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { hashPassword } from "../auth/password.service";
 import { setManagerPin, InvalidManagerPinFormatError } from "../auth/manager-pin.service";
@@ -36,17 +36,27 @@ usersRouter.get("/users", requireAuth, async (req: Request, res: Response) => {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite gerenciar usuários." } });
   }
 
-  const [users, seatBilling] = await Promise.all([
+  // Paginação (mesmo padrão de stock.routes.ts/financial/registrations): tenants com
+  // muitos usuários ativos antes retornavam a lista inteira sem limite, arriscando
+  // degradação de performance.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+
+  const [users, total, seatBilling] = await Promise.all([
     prisma.user.findMany({
       where: { tenantId },
       orderBy: { createdAt: "asc" },
       select: { id: true, name: true, email: true, role: true, active: true, createdAt: true },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
     }),
+    prisma.user.count({ where: { tenantId } }),
     calculateSeatBilling(prisma, tenantId),
   ]);
 
   return res.json({
     success: true,
+    meta: { page, pageSize, total },
     data: {
       users,
       seatBilling: {
@@ -89,11 +99,6 @@ usersRouter.post("/users", requireAuth, async (req: Request, res: Response) => {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Apenas um OWNER pode criar outro OWNER." } });
   }
 
-  const existing = await prisma.user.findFirst({ where: { tenantId, email: input.email } });
-  if (existing) {
-    return res.status(409).json({ success: false, data: null, error: { code: "EMAIL_TAKEN", message: "Já existe um usuário com este e-mail neste tenant." } });
-  }
-
   const passwordHash = await hashPassword(input.password);
 
   // Regra de negócio (Capítulo 2.9): a criação NUNCA é bloqueada pelo teto de
@@ -103,10 +108,24 @@ usersRouter.post("/users", requireAuth, async (req: Request, res: Response) => {
   // este usuário específico entrou na faixa paga.
   const seatBillingBefore = await calculateSeatBilling(prisma, tenantId);
 
-  const createdUser = await prisma.user.create({
-    data: { tenantId, name: input.name, email: input.email, passwordHash, role: input.role as any },
-    select: { id: true, name: true, email: true, role: true, active: true, createdAt: true },
-  });
+  // GAP DE AUDITORIA CORRIGIDO (race condition de unicidade de e-mail): um
+  // `findFirst` prévio seguido de `create` deixava uma janela entre a checagem e
+  // a escrita onde duas requisições concorrentes para o mesmo e-mail passavam
+  // ambas pela checagem antes de qualquer uma commitar, criando dois usuários com
+  // o mesmo e-mail no mesmo tenant. Confiamos na constraint única do banco
+  // (`@@unique([tenantId, email])`) e tratamos a violação (P2002) como 409.
+  let createdUser;
+  try {
+    createdUser = await prisma.user.create({
+      data: { tenantId, name: input.name, email: input.email, passwordHash, role: input.role as any },
+      select: { id: true, name: true, email: true, role: true, active: true, createdAt: true },
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return res.status(409).json({ success: false, data: null, error: { code: "EMAIL_TAKEN", message: "Já existe um usuário com este e-mail neste tenant." } });
+    }
+    throw err;
+  }
 
   const seatBillingAfter = await calculateSeatBilling(prisma, tenantId);
   const enteredPaidSeat = seatBillingAfter.extraSeatCount > seatBillingBefore.extraSeatCount;

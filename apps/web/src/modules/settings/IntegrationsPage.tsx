@@ -33,6 +33,8 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DeleteIcon from "@mui/icons-material/Delete";
 import HistoryIcon from "@mui/icons-material/History";
 import { api } from "../../api/client";
+import { errorMessage } from "../../shared/ui/PageLayout";
+import { useToast } from "../../shared/ui/Toast";
 
 interface IntegrationCredentialSummary {
   id: string;
@@ -274,21 +276,29 @@ function ProviderCredentialCard({
 }
 
 function ApiKeysSection() {
+  const toast = useToast();
   const [keys, setKeys] = useState<TenantApiKeySummary[]>([]);
   const [label, setLabel] = useState("");
   const [scopesInput, setScopesInput] = useState("read");
   const [rawKeyDialog, setRawKeyDialog] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const reload = useCallback(() => {
-    api.get<TenantApiKeySummary[]>("/integrations/api-keys").then(setKeys).catch(() => undefined);
+    api
+      .get<TenantApiKeySummary[]>("/integrations/api-keys")
+      .then((data) => {
+        setKeys(data);
+        setLoadError(null);
+      })
+      .catch((error) => setLoadError(errorMessage(error)));
   }, []);
 
   useEffect(reload, [reload]);
 
   async function handleCreate() {
     if (!label.trim()) return;
-    setMessage(null);
+    setCreateError(null);
     try {
       const scopes = scopesInput.split(",").map((s) => s.trim()).filter(Boolean);
       const created = await api.post<TenantApiKeySummary & { rawKey: string }>("/integrations/api-keys", { label, scopes });
@@ -296,13 +306,28 @@ function ApiKeysSection() {
       setLabel("");
       reload();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Falha ao criar chave de API.");
+      setCreateError(errorMessage(error));
     }
   }
 
   async function handleRevoke(id: string) {
-    await api.post(`/integrations/api-keys/${id}/revoke`);
-    reload();
+    try {
+      await api.post(`/integrations/api-keys/${id}/revoke`);
+      toast.success("Chave de API revogada com sucesso.");
+      reload();
+    } catch (error) {
+      toast.error(errorMessage(error));
+    }
+  }
+
+  async function handleCopyRawKey() {
+    if (!rawKeyDialog) return;
+    try {
+      await navigator.clipboard.writeText(rawKeyDialog);
+      toast.success("Chave copiada para a área de transferência.");
+    } catch {
+      toast.error("Não foi possível copiar a chave. Copie manualmente o valor exibido.");
+    }
   }
 
   return (
@@ -323,7 +348,8 @@ function ApiKeysSection() {
         />
         <Button variant="contained" size="small" onClick={handleCreate}>Gerar chave</Button>
       </Stack>
-      {message && <Alert severity="error" sx={{ mt: 2 }}>{message}</Alert>}
+      {loadError && <Alert severity="error" sx={{ mt: 2 }}>{loadError}</Alert>}
+      {createError && <Alert severity="error" sx={{ mt: 2 }}>{createError}</Alert>}
 
       <Stack spacing={1} mt={2}>
         {keys.map((key) => (
@@ -352,10 +378,7 @@ function ApiKeysSection() {
           <TextField fullWidth value={rawKeyDialog ?? ""} InputProps={{ readOnly: true }} />
         </DialogContent>
         <DialogActions>
-          <Button
-            startIcon={<ContentCopyIcon />}
-            onClick={() => rawKeyDialog && navigator.clipboard.writeText(rawKeyDialog)}
-          >
+          <Button startIcon={<ContentCopyIcon />} onClick={handleCopyRawKey}>
             Copiar
           </Button>
           <Button onClick={() => setRawKeyDialog(null)}>Fechar</Button>
@@ -369,22 +392,31 @@ function WebhookEndpointsSection() {
   const [endpoints, setEndpoints] = useState<TenantWebhookEndpointSummary[]>([]);
   const [url, setUrl] = useState("");
   const [eventTypes, setEventTypes] = useState<string[]>([]);
-  const [message, setMessage] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [secretDialog, setSecretDialog] = useState<string | null>(null);
   const [deliveriesDialog, setDeliveriesDialog] = useState<{ endpointId: string; items: WebhookDelivery[] } | null>(null);
+  const [deliveriesError, setDeliveriesError] = useState<string | null>(null);
+  const toast = useToast();
 
   const reload = useCallback(() => {
-    api.get<TenantWebhookEndpointSummary[]>("/integrations/webhook-endpoints").then(setEndpoints).catch(() => undefined);
+    api
+      .get<TenantWebhookEndpointSummary[]>("/integrations/webhook-endpoints")
+      .then((data) => {
+        setEndpoints(data);
+        setLoadError(null);
+      })
+      .catch((error) => setLoadError(errorMessage(error)));
   }, []);
 
   useEffect(reload, [reload]);
 
   async function handleCreate() {
     if (!url.trim() || eventTypes.length === 0) {
-      setMessage("Informe a URL e selecione ao menos um evento.");
+      setCreateError("Informe a URL e selecione ao menos um evento.");
       return;
     }
-    setMessage(null);
+    setCreateError(null);
     try {
       const created = await api.post<TenantWebhookEndpointSummary & { signingSecret: string }>("/integrations/webhook-endpoints", {
         url,
@@ -395,18 +427,39 @@ function WebhookEndpointsSection() {
       setEventTypes([]);
       reload();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Falha ao criar webhook.");
+      setCreateError(errorMessage(error));
     }
   }
 
   async function handleToggleActive(endpoint: TenantWebhookEndpointSummary) {
-    await api.patch(`/integrations/webhook-endpoints/${endpoint.id}`, { active: !endpoint.active });
-    reload();
+    try {
+      await api.patch(`/integrations/webhook-endpoints/${endpoint.id}`, { active: !endpoint.active });
+      toast.success(endpoint.active ? "Webhook desativado." : "Webhook ativado.");
+      reload();
+    } catch (error) {
+      toast.error(errorMessage(error));
+    }
   }
 
   async function handleViewDeliveries(endpointId: string) {
-    const items = await api.get<WebhookDelivery[]>(`/integrations/webhook-endpoints/${endpointId}/deliveries`);
-    setDeliveriesDialog({ endpointId, items });
+    setDeliveriesError(null);
+    try {
+      const items = await api.get<WebhookDelivery[]>(`/integrations/webhook-endpoints/${endpointId}/deliveries`);
+      setDeliveriesDialog({ endpointId, items });
+    } catch (error) {
+      setDeliveriesError(errorMessage(error));
+      setDeliveriesDialog({ endpointId, items: [] });
+    }
+  }
+
+  async function handleCopySecret() {
+    if (!secretDialog) return;
+    try {
+      await navigator.clipboard.writeText(secretDialog);
+      toast.success("Segredo copiado para a área de transferência.");
+    } catch {
+      toast.error("Não foi possível copiar o segredo. Copie manualmente o valor exibido.");
+    }
   }
 
   function toggleEventType(eventType: string) {
@@ -437,7 +490,8 @@ function WebhookEndpointsSection() {
           <Button variant="contained" size="small" onClick={handleCreate}>Criar webhook</Button>
         </Box>
       </Stack>
-      {message && <Alert severity="error" sx={{ mt: 2 }}>{message}</Alert>}
+      {loadError && <Alert severity="error" sx={{ mt: 2 }}>{loadError}</Alert>}
+      {createError && <Alert severity="error" sx={{ mt: 2 }}>{createError}</Alert>}
 
       <Stack spacing={1} mt={2}>
         {endpoints.map((endpoint) => (
@@ -470,10 +524,7 @@ function WebhookEndpointsSection() {
           <TextField fullWidth value={secretDialog ?? ""} InputProps={{ readOnly: true }} />
         </DialogContent>
         <DialogActions>
-          <Button
-            startIcon={<ContentCopyIcon />}
-            onClick={() => secretDialog && navigator.clipboard.writeText(secretDialog)}
-          >
+          <Button startIcon={<ContentCopyIcon />} onClick={handleCopySecret}>
             Copiar
           </Button>
           <Button onClick={() => setSecretDialog(null)}>Fechar</Button>
@@ -483,6 +534,7 @@ function WebhookEndpointsSection() {
       <Dialog open={!!deliveriesDialog} onClose={() => setDeliveriesDialog(null)} maxWidth="sm" fullWidth>
         <DialogTitle>Histórico de entregas</DialogTitle>
         <DialogContent>
+          {deliveriesError && <Alert severity="error" sx={{ mb: 2 }}>{deliveriesError}</Alert>}
           <Stack spacing={1}>
             {deliveriesDialog?.items.map((delivery) => (
               <Stack key={delivery.id} direction="row" justifyContent="space-between">
@@ -491,7 +543,7 @@ function WebhookEndpointsSection() {
                 <Typography variant="caption" color="text.secondary">{new Date(delivery.deliveredAt).toLocaleString("pt-BR")}</Typography>
               </Stack>
             ))}
-            {(!deliveriesDialog || deliveriesDialog.items.length === 0) && (
+            {!deliveriesError && (!deliveriesDialog || deliveriesDialog.items.length === 0) && (
               <Typography variant="body2" color="text.secondary">Nenhuma entrega registrada ainda.</Typography>
             )}
           </Stack>

@@ -12,7 +12,7 @@ import { personalFinanceApi } from "./api";
 export function PersonalNetWorthPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const query = useQuery({ queryKey: ["personal-net-worth"], queryFn: () => personalFinanceApi.netWorthSnapshots() });
+  const query = useQuery({ queryKey: ["personal-net-worth"], queryFn: () => personalFinanceApi.netWorthSnapshots(), staleTime: 60_000 });
 
   const recompute = useMutation({
     mutationFn: () => personalFinanceApi.recomputeNetWorth(),

@@ -37,6 +37,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    # fa-infra-compose-prod-no-resource-limits: sem limites, um job pesado (ex.: backup/
+    # export) poderia consumir CPU/RAM de todo o host e derrubar os demais serviços.
+    mem_limit: 1g
+    cpus: 1.0
 
   redis:
     image: redis:7-alpine
@@ -51,6 +55,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    mem_limit: 512m
+    cpus: 0.5
 
   # Job one-shot: aplica as migrations do Prisma (packages/db/prisma/migrations) e sai.
   # A imagem da API é distroless (sem shell/npx), por isso chamamos o node e a CLI do prisma direto.
@@ -72,6 +78,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    mem_limit: 512m
+    cpus: 1.0
 
   api:
     build:
@@ -98,6 +106,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    mem_limit: 768m
+    cpus: 1.0
 
   # Worker BullMQ (filas WhatsApp, fiscal, relatórios) — mesma imagem, outro entrypoint.
   worker:
@@ -111,6 +121,8 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    mem_limit: 768m
+    cpus: 1.0
 
   web:
     build:
@@ -123,7 +135,20 @@ services:
     depends_on:
       - api
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:8080:80"
+      # Container agora escuta em 8080 (imagem nginx-unprivileged, sem root) —
+      # ver apps/web/Dockerfile (fa-infra-web-dockerfile-no-nonroot-user).
+      - "${BIND_ADDRESS:-127.0.0.1}:8080:8080"
+    # fa-infra-web-container-no-healthcheck: sem isto, o Compose considera o
+    # container "healthy" mesmo com Nginx/assets quebrados (ex.: build falho,
+    # config inválida que ainda deixa o processo de pé).
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: 128m
+    cpus: 0.5
 
   # HTTPS automático (Let's Encrypt) — ativado com `--profile https`.
   caddy:
@@ -144,6 +169,17 @@ services:
     depends_on:
       - web
       - api
+    # fa-infra-caddy-no-healthcheck: detecta localmente se o próprio processo Caddy
+    # está de pé (não cobre TLS/DNS/cert externos — para isso, monitore as URLs
+    # públicas de fora do host com um serviço de uptime externo, ex. UptimeRobot).
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 256m
+    cpus: 0.5
 
 secrets:
   jwt_private_key:
