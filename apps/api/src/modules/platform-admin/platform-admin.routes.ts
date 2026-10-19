@@ -25,9 +25,10 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import crypto from "node:crypto";
-import { prismaUnscoped as prisma } from "@filitech/db";
-import { requirePlatformAdminAuth, requireSuperAdmin } from "./platform-admin-auth.middleware";
+import { prismaUnscoped as prisma, Prisma } from "@filitech/db";
+import { requirePlatformAdminAuth, requireSuperAdmin, requireRole } from "./platform-admin-auth.middleware";
 import { invalidateTenantModuleCache } from "../../middlewares/gatekeeper.middleware";
+import { invalidateImpersonationSessionCache } from "../../middlewares/auth.middleware";
 import { signSessionToken } from "../auth/jwt.service";
 import { webhookDeliveryQueue } from "../../lib/queue";
 import type { WebhookDeliveryJobData } from "../../lib/webhook-dispatch";
@@ -61,7 +62,11 @@ const listTenantsQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(50),
 });
 
-platformAdminRouter.get("/platform-admin/tenants", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+// Lista/detalhe de tenants expõe dados básicos de cadastro (nunca credenciais) —
+// liberado também para SUPPORT_AGENT (precisa disso para atender chamados), mas
+// NÃO para FINANCE_ANALYST (GAP: fa-superadmin-granular-role-authorization —
+// capability-based: FINANCE_ANALYST só enxerga billing via /revenue-dashboard).
+platformAdminRouter.get("/platform-admin/tenants", requirePlatformAdminAuth, requireRole("SUPER_ADMIN", "SUPPORT_AGENT"), async (req: Request, res: Response) => {
   const parsed = listTenantsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -90,7 +95,7 @@ platformAdminRouter.get("/platform-admin/tenants", requirePlatformAdminAuth, asy
   return res.json({ success: true, data: { items: tenants, total, page, pageSize }, error: null });
 });
 
-platformAdminRouter.get("/platform-admin/tenants/:id", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+platformAdminRouter.get("/platform-admin/tenants/:id", requirePlatformAdminAuth, requireRole("SUPER_ADMIN", "SUPPORT_AGENT"), async (req: Request, res: Response) => {
   const tenant = await prisma.tenant.findUnique({ where: { id: req.params.id } });
   if (!tenant) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Tenant não encontrado." } });
@@ -190,7 +195,10 @@ platformAdminRouter.post("/platform-admin/tenants/:tenantId/impersonate", requir
   });
 });
 
-platformAdminRouter.get("/platform-admin/impersonation-sessions", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+// Lista de sessões de impersonation (histórico + ativas) — revela o admin
+// responsável e o tenant afetado em cada sessão; dado sensível o suficiente para
+// ficar restrito a SUPER_ADMIN (GAP: fa-superadmin-granular-role-authorization).
+platformAdminRouter.get("/platform-admin/impersonation-sessions", requirePlatformAdminAuth, requireRole("SUPER_ADMIN"), async (req: Request, res: Response) => {
   const { tenantId } = req.query as { tenantId?: string };
   const sessions = await prisma.impersonationSession.findMany({
     where: { ...(tenantId ? { tenantId } : {}) },
@@ -209,8 +217,48 @@ platformAdminRouter.post("/platform-admin/impersonation-sessions/:id/end", requi
   if (!session) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Sessão de impersonation não encontrada." } });
   }
-  const updated = await prisma.impersonationSession.update({ where: { id: session.id }, data: { endedAt: new Date() } });
-  await writeAuditLog(req, "IMPERSONATION_ENDED", "Tenant", session.tenantId, { impersonationSessionId: session.id });
+  // GAP DE AUDITORIA FECHADO (fa-superadmin-impersonation-end-no-ownership-check):
+  // qualquer papel autenticado do painel (inclusive SUPPORT_AGENT) conseguia
+  // encerrar a sessão de impersonation de QUALQUER OUTRO admin, sem checagem de
+  // dono nem de papel. Agora só o próprio admin que abriu a sessão, ou um
+  // SUPER_ADMIN (encerramento administrativo de terceiros), pode encerrá-la —
+  // qualquer outra tentativa é auditada como possível abuso antes de ser negada.
+  const isOwner = session.platformAdminUserId === req.platformAdminSession!.platformAdminUserId;
+  const isSuperAdmin = req.platformAdminSession!.role === "SUPER_ADMIN";
+  if (!isOwner && !isSuperAdmin) {
+    await writeAuditLog(req, "IMPERSONATION_END_DENIED_NOT_OWNER", "ImpersonationSession", session.id, {
+      impersonationSessionId: session.id,
+      tenantId: session.tenantId,
+      ownerPlatformAdminUserId: session.platformAdminUserId,
+      requesterPlatformAdminUserId: req.platformAdminSession!.platformAdminUserId,
+      requesterRole: req.platformAdminSession!.role,
+    });
+    return res.status(403).json({
+      success: false,
+      data: null,
+      error: { code: "FORBIDDEN", message: "Apenas o admin que iniciou esta sessão ou um SUPER_ADMIN podem encerrá-la." },
+    });
+  }
+  // GAP DE AUDITORIA FECHADO (fa-superadmin-nontransactional-audit): o encerramento
+  // da sessão e o registro de auditoria eram duas escritas separadas — uma falha
+  // na segunda deixava a sessão encerrada sem NENHUMA trilha de quem/quando/por quê.
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.impersonationSession.update({ where: { id: session.id }, data: { endedAt: new Date() } });
+    await tx.auditLog.create({
+      data: {
+        platformAdminUserId: req.platformAdminSession!.platformAdminUserId,
+        action: "IMPERSONATION_ENDED",
+        targetType: "Tenant",
+        targetId: session.tenantId,
+        metadata: { impersonationSessionId: session.id, endedByOwner: isOwner } as any,
+      },
+    });
+    return result;
+  });
+  // Efeito colateral externo ao Postgres (Redis) — só depois que a transação confirma,
+  // para que a revogação seja refletida imediatamente no middleware de revalidação
+  // de impersonation (ver auth.middleware.ts) em vez de esperar o TTL do cache.
+  await invalidateImpersonationSessionCache(session.id);
   return res.json({ success: true, data: updated, error: null });
 });
 
@@ -225,56 +273,64 @@ platformAdminRouter.post("/platform-admin/impersonation-sessions/:id/end", requi
 // inline abaixo) — adicionados após auditoria apontar a ausência desses dois.
 // ─────────────────────────────────────────────────────────────────────────
 
-platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
-  const subscriptions = await prisma.subscription.findMany({
-    include: { plan: { select: { id: true, code: true, label: true, basePrice: true, audience: true } } },
-  });
-
-  const mrrByPlan = new Map<string, { planCode: string; planLabel: string; activeCount: number; mrr: number }>();
-  let totalMrr = 0;
-  const countByStatus: Record<string, number> = { TRIAL: 0, ACTIVE: 0, PAST_DUE: 0, SUSPENDED: 0, CANCELLED: 0 };
-  const activeTenantIds: string[] = [];
-
-  for (const sub of subscriptions) {
-    countByStatus[sub.status] = (countByStatus[sub.status] ?? 0) + 1;
-    if (sub.status !== "ACTIVE") continue;
-    activeTenantIds.push(sub.tenantId);
-    const planPrice = Number(sub.plan.basePrice);
-    totalMrr += planPrice;
-    const bucket = mrrByPlan.get(sub.plan.id) ?? { planCode: sub.plan.code, planLabel: sub.plan.label, activeCount: 0, mrr: 0 };
-    bucket.activeCount += 1;
-    bucket.mrr += planPrice;
-    mrrByPlan.set(sub.plan.id, bucket);
-  }
-
-  // CORREÇÃO DE AUDITORIA (admin-panel audit round): o dashboard só somava o
-  // `basePrice` do plano, ignorando por completo a receita de módulos add-on
-  // contratados à la carte (Capítulo 2.9/13.3) — subestimava o MRR real sempre
-  // que um tenant tinha módulos pagos ativos além do plano. Soma agora o MRR de
-  // cada módulo ativo (`TenantModule.active = true`) para tenants com assinatura
-  // ACTIVE, agrupado por módulo.
-  const activeModuleGrants = activeTenantIds.length
-    ? await prisma.tenantModule.findMany({
-        where: { tenantId: { in: activeTenantIds }, active: true },
-        include: { module: { select: { code: true, label: true, monthlyPrice: true } } },
-      })
-    : [];
-  const mrrByModule = new Map<string, { moduleCode: string; moduleLabel: string; activeTenantCount: number; mrr: number }>();
-  let totalModuleMrr = 0;
-  for (const grant of activeModuleGrants) {
-    const price = Number(grant.module.monthlyPrice);
-    totalModuleMrr += price;
-    const bucket = mrrByModule.get(grant.module.code) ?? { moduleCode: grant.module.code, moduleLabel: grant.module.label, activeTenantCount: 0, mrr: 0 };
-    bucket.activeTenantCount += 1;
-    bucket.mrr += price;
-    mrrByModule.set(grant.module.code, bucket);
-  }
-  totalMrr += totalModuleMrr;
-
-  // Churn do mês corrente: assinaturas canceladas cujo `cancelRequestedAt` caiu
-  // dentro do mês atual — aproximação real (não estimada) de churn mensal.
+// CORREÇÃO DE AUDITORIA (fa-perf-platformadmin-subscriptions-unbounded +
+// fa-perf-platformadmin-select-excessive): a versão anterior carregava TODAS as
+// `Subscription` (sem where/take, com o relation `plan` inteiro via `include`) e
+// somava tudo em memória Node — cresce sem limite junto com a base de tenants.
+// Toda métrica abaixo agora é agregada no próprio Postgres (`groupBy`/`count`/
+// `$queryRaw` com `SUM`/`COUNT` agrupado), trazendo para o processo apenas uma
+// linha por status/plano/módulo (dezenas, nunca milhares de linhas de
+// `Subscription`), com select implícito trimado às colunas somadas/agrupadas.
+platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdminAuth, requireRole("SUPER_ADMIN", "FINANCE_ANALYST"), async (_req: Request, res: Response) => {
   const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-  const churnedThisMonth = subscriptions.filter((s) => s.status === "CANCELLED" && s.cancelRequestedAt && s.cancelRequestedAt >= startOfMonth).length;
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+
+  const [statusCounts, totalSubscriptions, activeCountTotal, churnedThisMonth] = await Promise.all([
+    prisma.subscription.groupBy({ by: ["status"], _count: { _all: true } }),
+    prisma.subscription.count(),
+    prisma.subscription.count({ where: { status: "ACTIVE" } }),
+    // Churn do mês corrente: assinaturas canceladas cujo `cancelRequestedAt` caiu
+    // dentro do mês atual — aproximação real (não estimada) de churn mensal.
+    prisma.subscription.count({ where: { status: "CANCELLED", cancelRequestedAt: { gte: startOfMonth } } }),
+  ]);
+
+  const countByStatus: Record<string, number> = { TRIAL: 0, ACTIVE: 0, PAST_DUE: 0, SUSPENDED: 0, CANCELLED: 0 };
+  for (const row of statusCounts) {
+    countByStatus[row.status] = row._count._all;
+  }
+
+  // MRR por plano — soma o `basePrice` do plano apenas das assinaturas ACTIVE,
+  // agrupado por plano diretamente no banco (nunca linha a linha em JS).
+  const byPlanRaw = await prisma.$queryRaw<Array<{ planCode: string; planLabel: string; activeCount: bigint; mrr: number }>>(
+    Prisma.sql`
+      SELECT p.code AS "planCode", p.label AS "planLabel", COUNT(*)::bigint AS "activeCount", SUM(p."basePrice")::float8 AS "mrr"
+      FROM subscriptions s
+      JOIN plans p ON p.id = s."planId"
+      WHERE s.status = 'ACTIVE'
+      GROUP BY p.code, p.label
+    `,
+  );
+  const byPlan = byPlanRaw.map((r) => ({ planCode: r.planCode, planLabel: r.planLabel, activeCount: Number(r.activeCount), mrr: r.mrr }));
+  const totalPlanMrr = byPlan.reduce((sum, bucket) => sum + bucket.mrr, 0);
+
+  // CORREÇÃO DE AUDITORIA (admin-panel audit round, preservada): o dashboard não
+  // pode ignorar a receita de módulos add-on contratados à la carte (Capítulo
+  // 2.9/13.3) — soma o MRR de cada módulo ativo (`TenantModule.active = true`)
+  // para tenants com assinatura ACTIVE, agrupado por módulo, também via SQL.
+  const byModuleRaw = await prisma.$queryRaw<Array<{ moduleCode: string; moduleLabel: string; activeTenantCount: bigint; mrr: number }>>(
+    Prisma.sql`
+      SELECT m.code AS "moduleCode", m.label AS "moduleLabel", COUNT(*)::bigint AS "activeTenantCount", SUM(m."monthlyPrice")::float8 AS "mrr"
+      FROM tenant_modules tm
+      JOIN modules m ON m.code = tm."moduleCode"
+      JOIN subscriptions s ON s."tenantId" = tm."tenantId" AND s.status = 'ACTIVE'
+      WHERE tm.active = true
+      GROUP BY m.code, m.label
+    `,
+  );
+  const byModule = byModuleRaw.map((r) => ({ moduleCode: r.moduleCode, moduleLabel: r.moduleLabel, activeTenantCount: Number(r.activeTenantCount), mrr: r.mrr }));
+  const totalModuleMrr = byModule.reduce((sum, bucket) => sum + bucket.mrr, 0);
+
+  const totalMrr = totalPlanMrr + totalModuleMrr;
 
   // CORREÇÃO DE AUDITORIA: LTV e projeção de 3 meses eram pedidos no round de
   // auditoria do painel admin e não existiam. Nunca hardcoded — calculados a
@@ -288,17 +344,22 @@ platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdmi
   //     nos últimos 3 meses (assinaturas hoje ACTIVE cujo primeiro pagamento
   //     — `firstChargedAt` — caiu nos últimos 90 dias), uma extrapolação linear
   //     simples e auditável, nunca um número de marketing.
-  const activeCountTotal = activeTenantIds.length;
   const monthlyChurnRate = activeCountTotal > 0 ? churnedThisMonth / (activeCountTotal + churnedThisMonth) : 0;
-  const ltvByPlan = Array.from(mrrByPlan.values()).map((bucket) => {
+  const ltvByPlan = byPlan.map((bucket) => {
     const arpu = bucket.activeCount > 0 ? bucket.mrr / bucket.activeCount : 0;
     const ltv = monthlyChurnRate > 0 ? arpu / monthlyChurnRate : null; // null = sem churn observado ainda, LTV indefinido (não infinito fictício)
     return { planCode: bucket.planCode, planLabel: bucket.planLabel, arpu, ltv };
   });
 
-  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-  const newlyChargedSubs = subscriptions.filter((s) => s.status === "ACTIVE" && s.firstChargedAt && s.firstChargedAt >= ninetyDaysAgo);
-  const netNewMrrLast3Months = newlyChargedSubs.reduce((sum, s) => sum + Number(s.plan.basePrice), 0);
+  const netNewMrrRaw = await prisma.$queryRaw<Array<{ sum: number | null }>>(
+    Prisma.sql`
+      SELECT COALESCE(SUM(p."basePrice"), 0)::float8 AS "sum"
+      FROM subscriptions s
+      JOIN plans p ON p.id = s."planId"
+      WHERE s.status = 'ACTIVE' AND s."firstChargedAt" >= ${ninetyDaysAgo}
+    `,
+  );
+  const netNewMrrLast3Months = netNewMrrRaw[0]?.sum ?? 0;
   const avgMonthlyNetNewMrr = netNewMrrLast3Months / 3;
   const projectedMrrIn3Months = totalMrr + avgMonthlyNetNewMrr * 3;
 
@@ -308,14 +369,14 @@ platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdmi
       totalMrr,
       arr: totalMrr * 12,
       countByStatus,
-      byPlan: Array.from(mrrByPlan.values()),
-      byModule: Array.from(mrrByModule.values()),
+      byPlan,
+      byModule,
       totalModuleMrr,
       ltvByPlan,
       projectedMrrIn3Months,
       avgMonthlyNetNewMrr,
       churnedThisMonth,
-      totalSubscriptions: subscriptions.length,
+      totalSubscriptions,
     },
     error: null,
   });
@@ -333,7 +394,9 @@ platformAdminRouter.get("/platform-admin/revenue-dashboard", requirePlatformAdmi
 // append-only de ações administrativas sensíveis, não um log estruturado de
 // aplicação com nível de severidade) — não adicionados por não existir dado real
 // para filtrar, nunca um filtro decorativo sem efeito.
-platformAdminRouter.get("/platform-admin/audit-logs", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+// Audit log completo (quem fez o quê na plataforma inteira) é um dos dados mais
+// sensíveis do painel — restrito a SUPER_ADMIN (GAP: fa-superadmin-granular-role-authorization).
+platformAdminRouter.get("/platform-admin/audit-logs", requirePlatformAdminAuth, requireRole("SUPER_ADMIN"), async (req: Request, res: Response) => {
   const { targetType, targetId, action, platformAdminUserId, from, to } = req.query as {
     targetType?: string;
     targetId?: string;
@@ -362,8 +425,9 @@ platformAdminRouter.get("/platform-admin/audit-logs", requirePlatformAdminAuth, 
 });
 
 // Lista enxuta de admins da plataforma, usada só para popular o filtro "admin
-// responsável" do audit log — nunca expõe hash de senha/segredo TOTP.
-platformAdminRouter.get("/platform-admin/admin-users", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
+// responsável" do audit log — este em si é restrito a SUPER_ADMIN (não expõe
+// hash de senha/segredo TOTP, mas segue o mesmo papel do audit log que alimenta).
+platformAdminRouter.get("/platform-admin/admin-users", requirePlatformAdminAuth, requireRole("SUPER_ADMIN"), async (_req: Request, res: Response) => {
   const admins = await prisma.platformAdminUser.findMany({
     select: { id: true, name: true, email: true, role: true, active: true },
     orderBy: { name: "asc" },
@@ -382,7 +446,7 @@ platformAdminRouter.get("/platform-admin/admin-users", requirePlatformAdminAuth,
 // uma mudança de layout da SEFAZ ou expiração em lote de tokens antes que o lojista
 // perceba no caixa. Reaproveita 100% os dados já gravados por runIntegrationTest
 // (Capítulo 20.1) — nenhuma chamada de rede nova é feita aqui.
-platformAdminRouter.get("/platform-admin/integrations/summary", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
+platformAdminRouter.get("/platform-admin/integrations/summary", requirePlatformAdminAuth, requireRole("SUPER_ADMIN"), async (_req: Request, res: Response) => {
   const credentials = await prisma.integrationCredential.findMany({
     select: { id: true, tenantId: true, provider: true, active: true, lastTestedAt: true, lastTestSuccess: true },
     // GAP DE AUDITORIA FECHADO (Rodada 12): sem teto, crescimento da base de
@@ -511,7 +575,7 @@ platformAdminRouter.patch("/platform-admin/feature-flags/:id", requirePlatformAd
 // SUPPORT TICKETS / HELPDESK (Capítulo 15.3)
 // ─────────────────────────────────────────────────────────────────────────
 
-platformAdminRouter.get("/platform-admin/support-tickets", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+platformAdminRouter.get("/platform-admin/support-tickets", requirePlatformAdminAuth, requireRole("SUPER_ADMIN", "SUPPORT_AGENT"), async (req: Request, res: Response) => {
   const { assignedToMe } = req.query as { assignedToMe?: string };
   const statusParsed = readEnumQuery(res, req.query.status, ["OPEN", "IN_PROGRESS", "WAITING_CUSTOMER", "RESOLVED", "CLOSED"] as const, "status");
   if (!statusParsed.ok) return;
@@ -531,7 +595,7 @@ platformAdminRouter.get("/platform-admin/support-tickets", requirePlatformAdminA
   return res.json({ success: true, data: tickets, error: null });
 });
 
-platformAdminRouter.get("/platform-admin/support-tickets/:id", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+platformAdminRouter.get("/platform-admin/support-tickets/:id", requirePlatformAdminAuth, requireRole("SUPER_ADMIN", "SUPPORT_AGENT"), async (req: Request, res: Response) => {
   const ticket = await prisma.supportTicket.findUnique({
     where: { id: req.params.id },
     include: { messages: { orderBy: { createdAt: "asc" } } },
@@ -548,7 +612,7 @@ const patchTicketSchema = z.object({
   priority: z.enum(["LOW", "NORMAL", "HIGH", "URGENT"]).optional(),
 });
 
-platformAdminRouter.patch("/platform-admin/support-tickets/:id", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+platformAdminRouter.patch("/platform-admin/support-tickets/:id", requirePlatformAdminAuth, requireRole("SUPER_ADMIN", "SUPPORT_AGENT"), async (req: Request, res: Response) => {
   const parsed = patchTicketSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -575,7 +639,7 @@ platformAdminRouter.patch("/platform-admin/support-tickets/:id", requirePlatform
 
 const addTicketMessageSchema = z.object({ body: z.string().min(1), attachmentUrls: z.array(z.string()).default([]) });
 
-platformAdminRouter.post("/platform-admin/support-tickets/:id/messages", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+platformAdminRouter.post("/platform-admin/support-tickets/:id/messages", requirePlatformAdminAuth, requireRole("SUPER_ADMIN", "SUPPORT_AGENT"), async (req: Request, res: Response) => {
   const parsed = addTicketMessageSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
@@ -603,7 +667,9 @@ platformAdminRouter.post("/platform-admin/support-tickets/:id/messages", require
 // OVERSIGHT DE API KEYS E WEBHOOKS DOS TENANTS (Capítulo 15.4)
 // ─────────────────────────────────────────────────────────────────────────
 
-platformAdminRouter.get("/platform-admin/tenants/:tenantId/api-keys", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+// Oversight de API keys/webhooks de tenants expõe metadados de credenciais —
+// restrito a SUPER_ADMIN (GAP: fa-superadmin-granular-role-authorization).
+platformAdminRouter.get("/platform-admin/tenants/:tenantId/api-keys", requirePlatformAdminAuth, requireRole("SUPER_ADMIN"), async (req: Request, res: Response) => {
   const keys = await prisma.tenantApiKey.findMany({ where: { tenantId: req.params.tenantId }, orderBy: { createdAt: "desc" }, take: 500 });
   return res.json({ success: true, data: keys, error: null });
 });
@@ -618,12 +684,12 @@ platformAdminRouter.post("/platform-admin/tenant-api-keys/:id/revoke", requirePl
   return res.json({ success: true, data: updated, error: null });
 });
 
-platformAdminRouter.get("/platform-admin/tenants/:tenantId/webhook-endpoints", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+platformAdminRouter.get("/platform-admin/tenants/:tenantId/webhook-endpoints", requirePlatformAdminAuth, requireRole("SUPER_ADMIN"), async (req: Request, res: Response) => {
   const endpoints = await prisma.tenantWebhookEndpoint.findMany({ where: { tenantId: req.params.tenantId }, orderBy: { createdAt: "desc" }, take: 200 });
   return res.json({ success: true, data: endpoints, error: null });
 });
 
-platformAdminRouter.get("/platform-admin/webhook-endpoints/:id/deliveries", requirePlatformAdminAuth, async (req: Request, res: Response) => {
+platformAdminRouter.get("/platform-admin/webhook-endpoints/:id/deliveries", requirePlatformAdminAuth, requireRole("SUPER_ADMIN"), async (req: Request, res: Response) => {
   const deliveries = await prisma.webhookDelivery.findMany({
     where: { endpointId: req.params.id },
     orderBy: { deliveredAt: "desc" },

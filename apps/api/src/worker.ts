@@ -24,6 +24,8 @@ import { startAccountingRecurringTasksWorker, scheduleAccountingRecurringTasksJo
 import { startFetchIncomingNfeWorker, scheduleFetchIncomingNfeJob } from "./workers/fetch-incoming-nfe.worker";
 import { startReconcileStuckFiscalDocumentsWorker, scheduleReconcileStuckFiscalDocumentsJob } from "./workers/reconcile-stuck-fiscal-documents.worker";
 import { startExpireStalePendingCheckoutsWorker, scheduleExpireStalePendingCheckoutsJob } from "./workers/expire-stale-pending-checkouts.worker";
+import { startAccountingDocumentGenerationWorker } from "./workers/accounting-document-generation.worker";
+import { startReportExportGenerationWorker } from "./workers/report-export-generation.worker";
 
 async function main() {
   const log = createModuleLogger("worker");
@@ -61,8 +63,12 @@ async function main() {
   await scheduleReconcileStuckFiscalDocumentsJob();
   const expireStalePendingCheckoutsWorker = startExpireStalePendingCheckoutsWorker();
   await scheduleExpireStalePendingCheckoutsJob();
+  // fa-perf-accounting-doc-generation-inline / fa-perf-report-export-inline — jobs
+  // sob demanda (não repetíveis), mesmo padrão dos demais acima.
+  const accountingDocumentGenerationWorker = startAccountingDocumentGenerationWorker();
+  const reportExportGenerationWorker = startReportExportGenerationWorker();
 
-  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker, fetchIncomingNfeWorker]) {
+  for (const worker of [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker, fetchIncomingNfeWorker, accountingDocumentGenerationWorker, reportExportGenerationWorker]) {
     worker.on("completed", (job) => {
       log.info({ queue: job.queueName, jobId: job.id, result: job.returnvalue }, "job concluído");
     });
@@ -74,7 +80,7 @@ async function main() {
 
   log.info("processo de filas BullMQ iniciado");
 
-  const allWorkers = [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker, fetchIncomingNfeWorker, reconcileStuckFiscalDocumentsWorker, expireStalePendingCheckoutsWorker];
+  const allWorkers = [suspendOverdueTenantsWorker, fiscalEmissionWorker, whatsappNotificationsWorker, smsNotificationsWorker, pluggySyncWorker, expireLoyaltyPointsWorker, enforceScheduledCancellationsWorker, webhookDeliveryWorker, personalRecurrenceGenerationWorker, personalBillRemindersWorker, dataExportGenerationWorker, dataImportValidationWorker, dataImportExecutionWorker, encryptedDatabaseBackupWorker, scheduledReportGenerationWorker, personalInvestmentQuotesWorker, accountingRecurringTasksWorker, fetchIncomingNfeWorker, reconcileStuckFiscalDocumentsWorker, expireStalePendingCheckoutsWorker, accountingDocumentGenerationWorker, reportExportGenerationWorker];
 
   // GAP DE AUDITORIA FECHADO: sem handler de SIGTERM, um rolling deploy do
   // processo de workers mataria o processo com jobs BullMQ em andamento (ex.:

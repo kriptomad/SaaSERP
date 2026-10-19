@@ -27,6 +27,7 @@ import {
   WorkOrderNotFoundError,
   WorkOrderNotReadyForDeliveryError,
   WorkOrderHasNoBillableItemsError,
+  WorkOrderChecklistIncompleteError,
 } from "./bill-and-deliver-work-order.service";
 import { enqueueFiscalEmission } from "../fiscal/queues/fiscal-emission.queue";
 import { notifyTenant } from "../notifications/notify.service";
@@ -393,11 +394,61 @@ workOrdersRouter.post("/work-orders/budget-approval/:token", async (req: Request
   }
 });
 
-const addChecklistSchema = z.object({
-  stage: z.enum(["ENTRY", "DIAGNOSIS", "DELIVERY"]),
-  items: z.record(z.any()),
-  clientSignatureUrl: z.string().url().nullable().optional(),
+// CORREÇÃO DE AUDITORIA (fa-workorder-checklist-no-schema): `items` era
+// `z.record(z.any())` — qualquer objeto, inclusive `{}` vazio, era aceito como
+// checklist "preenchido". Cada etapa (ENTRY/DIAGNOSIS/DELIVERY) agora tem seu
+// próprio schema com campos obrigatórios, refletindo o que de fato precisa ser
+// conferido naquela etapa do ciclo de vida da O.S. (Capítulo 4.2). A etapa
+// DELIVERY também exige `clientSignatureUrl` — é o checklist assinado pelo
+// cliente na retirada, confirmando o laudo/teste final; sem assinatura, não há
+// prova de aceite para liberar a entrega/faturamento (ver billAndDeliverWorkOrder).
+const entryChecklistItemsSchema = z.object({
+  physicalConditionNotes: z.string().trim().min(3, "Descreva o estado físico do equipamento recebido."),
+  accessoriesReceived: z.string().trim().min(1, "Liste os acessórios recebidos junto com o equipamento (ou 'nenhum')."),
+  hasVisibleDamage: z.boolean(),
+  powersOn: z.boolean(),
 });
+const diagnosisChecklistItemsSchema = z.object({
+  problemConfirmed: z.boolean(),
+  diagnosisNotes: z.string().trim().min(3, "Descreva o diagnóstico técnico encontrado."),
+  repairNeeded: z.boolean(),
+});
+const deliveryChecklistItemsSchema = z.object({
+  functionalTestPassed: z.boolean(),
+  accessoriesReturned: z.boolean(),
+  clientBriefedOnWarranty: z.boolean(),
+});
+
+const checklistStageItemsSchemaByStage = {
+  ENTRY: entryChecklistItemsSchema,
+  DIAGNOSIS: diagnosisChecklistItemsSchema,
+  DELIVERY: deliveryChecklistItemsSchema,
+} as const;
+
+const addChecklistSchema = z
+  .object({
+    stage: z.enum(["ENTRY", "DIAGNOSIS", "DELIVERY"]),
+    items: z.record(z.any()),
+    clientSignatureUrl: z.string().url().nullable().optional(),
+  })
+  .superRefine((data, ctx) => {
+    const stageSchema = checklistStageItemsSchemaByStage[data.stage];
+    const result = stageSchema.safeParse(data.items);
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        ctx.addIssue({ ...issue, path: ["items", ...issue.path] });
+      }
+    }
+    // Checklist de entrega é o que materializa o aceite do cliente na retirada —
+    // sem assinatura, não há registro de que o cliente conferiu o equipamento.
+    if (data.stage === "DELIVERY" && !data.clientSignatureUrl) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Checklist de entrega exige a assinatura do cliente (clientSignatureUrl).",
+        path: ["clientSignatureUrl"],
+      });
+    }
+  });
 
 workOrdersRouter.post("/work-orders/:id/checklist", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
@@ -529,6 +580,9 @@ workOrdersRouter.post("/work-orders/:id/deliver", requireAuth, requireModule("WO
     }
     if (err instanceof WorkOrderHasNoBillableItemsError) {
       return res.status(409).json({ success: false, data: null, error: { code: "NO_BILLABLE_ITEMS", message: err.message } });
+    }
+    if (err instanceof WorkOrderChecklistIncompleteError) {
+      return res.status(409).json({ success: false, data: null, error: { code: "CHECKLIST_INCOMPLETE", message: err.message } });
     }
     throw err;
   }

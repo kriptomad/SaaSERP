@@ -50,14 +50,30 @@ supportTicketsRouter.post("/support-tickets", requireAuth, async (req: Request, 
 
 // GET /support-tickets — lista os chamados do próprio tenant (auto-isolado pela
 // extensão — ver cabeçalho).
+// CORREÇÃO DE AUDITORIA (fa-perf-support-tickets-no-pagination): `findMany` sem
+// skip/take/select retornava TODOS os chamados do tenant por completo — mesmo
+// padrão page/pageSize de users.routes.ts/stock.routes.ts, com select trimado às
+// colunas usadas pela listagem (nunca o corpo das mensagens, que só vem no detalhe).
 supportTicketsRouter.get("/support-tickets", requireAuth, async (req: Request, res: Response) => {
   const statusParsed = readEnumQuery(res, req.query.status, ["OPEN", "IN_PROGRESS", "WAITING_CUSTOMER", "RESOLVED", "CLOSED"] as const, "status");
   if (!statusParsed.ok) return;
-  const tickets = await prisma.supportTicket.findMany({
-    where: { ...(statusParsed.value ? { status: statusParsed.value } : {}) },
-    orderBy: { createdAt: "desc" },
-  });
-  return res.json({ success: true, data: tickets, error: null });
+
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { ...(statusParsed.value ? { status: statusParsed.value } : {}) };
+
+  const [tickets, total] = await Promise.all([
+    prisma.supportTicket.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      select: { id: true, subject: true, category: true, priority: true, status: true, openedByUserId: true, assignedToPlatformAdminUserId: true, createdAt: true, resolvedAt: true },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.supportTicket.count({ where }),
+  ]);
+
+  return res.json({ success: true, meta: { page, pageSize, total }, data: tickets, error: null });
 });
 
 async function findOwnTicketOrRespond(req: Request, res: Response) {

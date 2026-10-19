@@ -25,6 +25,7 @@ import {
   Typography,
 } from "@mui/material";
 import { usePlatformAdminAuth } from "./PlatformAdminAuthContext";
+import { PlatformAdminConfirmDialog } from "./PlatformAdminConfirmDialog";
 import { marketingAdminApi, DiscountCoupon, DiscountCouponInput, Referral } from "./marketing.api";
 
 const REFERRAL_STATUS_COLOR: Record<Referral["status"], "success" | "warning" | "default"> = {
@@ -189,6 +190,8 @@ function CouponForm({ onCreated }: { onCreated: (coupon: DiscountCoupon) => void
 function CouponsSection({ canEdit }: { canEdit: boolean }) {
   const [coupons, setCoupons] = useState<DiscountCoupon[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingToggle, setPendingToggle] = useState<DiscountCoupon | null>(null);
+  const [toggling, setToggling] = useState(false);
 
   async function reload() {
     try {
@@ -202,12 +205,17 @@ function CouponsSection({ canEdit }: { canEdit: boolean }) {
     void reload();
   }, []);
 
-  async function toggleActive(coupon: DiscountCoupon) {
+  async function confirmToggleActive() {
+    if (!pendingToggle) return;
+    setToggling(true);
     try {
-      const updated = await marketingAdminApi.updateCoupon(coupon.id, { active: !coupon.active });
+      const updated = await marketingAdminApi.updateCoupon(pendingToggle.id, { active: !pendingToggle.active });
       setCoupons((prev) => prev?.map((c) => (c.id === updated.id ? updated : c)) ?? null);
+      setPendingToggle(null);
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setToggling(false);
     }
   }
 
@@ -259,7 +267,7 @@ function CouponsSection({ canEdit }: { canEdit: boolean }) {
                   </TableCell>
                   {canEdit && (
                     <TableCell align="right">
-                      <Button size="small" onClick={() => toggleActive(coupon)}>
+                      <Button size="small" onClick={() => setPendingToggle(coupon)}>
                         {coupon.active ? "Desativar" : "Ativar"}
                       </Button>
                     </TableCell>
@@ -275,6 +283,26 @@ function CouponsSection({ canEdit }: { canEdit: boolean }) {
           </Table>
         </TableContainer>
       )}
+      <PlatformAdminConfirmDialog
+        open={pendingToggle != null}
+        title={pendingToggle?.active ? "Desativar cupom?" : "Ativar cupom?"}
+        description={
+          pendingToggle?.active
+            ? "O cupom deixa de poder ser resgatado por novos tenants imediatamente. Resgates já aplicados não são revertidos."
+            : "O cupom volta a ficar disponível para resgate imediatamente."
+        }
+        impact={pendingToggle ? [
+          { label: "Código", value: pendingToggle.code },
+          { label: "Desconto", value: pendingToggle.discountType === "PERCENTAGE" ? `${pendingToggle.discountValue}%` : `R$ ${pendingToggle.discountValue}` },
+          { label: "Resgates já aplicados", value: String(pendingToggle.redemptionCount) },
+          { label: "Novo estado", value: pendingToggle.active ? "Inativo" : "Ativo" },
+        ] : []}
+        confirmLabel={pendingToggle?.active ? "Desativar" : "Ativar"}
+        danger={pendingToggle?.active}
+        busy={toggling}
+        onConfirm={confirmToggleActive}
+        onClose={() => setPendingToggle(null)}
+      />
     </Box>
   );
 }
@@ -282,6 +310,8 @@ function CouponsSection({ canEdit }: { canEdit: boolean }) {
 function ReferralsSection({ canEdit }: { canEdit: boolean }) {
   const [referrals, setReferrals] = useState<Referral[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<{ type: "convert" | "reward"; referral: Referral } | null>(null);
+  const [acting, setActing] = useState(false);
 
   async function reload() {
     try {
@@ -295,21 +325,20 @@ function ReferralsSection({ canEdit }: { canEdit: boolean }) {
     void reload();
   }, []);
 
-  async function handleConvert(id: string) {
+  async function confirmPendingAction() {
+    if (!pendingAction) return;
+    setActing(true);
     try {
-      const updated = await marketingAdminApi.convertReferral(id);
-      setReferrals((prev) => prev?.map((r) => (r.id === id ? updated : r)) ?? null);
+      const updated =
+        pendingAction.type === "convert"
+          ? await marketingAdminApi.convertReferral(pendingAction.referral.id)
+          : await marketingAdminApi.applyReferralReward(pendingAction.referral.id);
+      setReferrals((prev) => prev?.map((r) => (r.id === updated.id ? updated : r)) ?? null);
+      setPendingAction(null);
     } catch (err) {
       setError((err as Error).message);
-    }
-  }
-
-  async function handleReward(id: string) {
-    try {
-      const updated = await marketingAdminApi.applyReferralReward(id);
-      setReferrals((prev) => prev?.map((r) => (r.id === id ? updated : r)) ?? null);
-    } catch (err) {
-      setError((err as Error).message);
+    } finally {
+      setActing(false);
     }
   }
 
@@ -349,12 +378,12 @@ function ReferralsSection({ canEdit }: { canEdit: boolean }) {
                   {canEdit && (
                     <TableCell align="right">
                       {referral.status === "PENDING" && (
-                        <Button size="small" onClick={() => handleConvert(referral.id)}>
+                        <Button size="small" onClick={() => setPendingAction({ type: "convert", referral })}>
                           Marcar convertida
                         </Button>
                       )}
                       {referral.status === "CONVERTED" && !referral.rewardAppliedAt && (
-                        <Button size="small" onClick={() => handleReward(referral.id)}>
+                        <Button size="small" onClick={() => setPendingAction({ type: "reward", referral })}>
                           Aplicar recompensa
                         </Button>
                       )}
@@ -371,6 +400,26 @@ function ReferralsSection({ canEdit }: { canEdit: boolean }) {
           </Table>
         </TableContainer>
       )}
+      <PlatformAdminConfirmDialog
+        open={pendingAction != null}
+        title={pendingAction?.type === "convert" ? "Marcar indicação como convertida?" : "Aplicar recompensa de indicação?"}
+        description={
+          pendingAction?.type === "convert"
+            ? "Confirma que o tenant indicado efetivamente assinou um plano pago? Esta ação atesta a conversão e habilita a aplicação da recompensa financeira em seguida."
+            : "Isto aplica crédito de assinatura ao indicador e desconto no primeiro ciclo ao indicado — impacto financeiro real e irreversível em billing."
+        }
+        impact={pendingAction ? [
+          { label: "Indicado por", value: `${pendingAction.referral.referralCode.tenant.tradeName} (${pendingAction.referral.referralCode.code})` },
+          { label: "Tenant indicado", value: pendingAction.referral.referredTenant?.tradeName ?? "—" },
+          { label: "Status atual", value: pendingAction.referral.status },
+        ] : []}
+        confirmLabel={pendingAction?.type === "convert" ? "Marcar convertida" : "Aplicar recompensa"}
+        requireReason={pendingAction?.type === "reward"}
+        danger={pendingAction?.type === "reward"}
+        busy={acting}
+        onConfirm={confirmPendingAction}
+        onClose={() => setPendingAction(null)}
+      />
     </Box>
   );
 }

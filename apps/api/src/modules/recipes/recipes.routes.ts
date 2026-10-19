@@ -13,12 +13,14 @@
 // código de permissão não documentado em nenhum outro lugar do sistema.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { Prisma, prisma } from "@filitech/db";
+import { Prisma, prisma, TenantScopedTransactionClient } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { produceRecipeBatch, MissingIngredientStockError, InvalidLossQuantityError } from "../../services/production/produce-recipe-batch.service";
 
 export const recipesRouter = Router();
+
+class RecipeCycleError extends Error {}
 
 async function hasPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
   const [defaultGrant, override] = await Promise.all([
@@ -44,15 +46,67 @@ recipesRouter.get("/products/:productId/recipe", requireAuth, requireModule("REC
   return res.json({ success: true, data: recipe, error: null });
 });
 
+// CORREÇÃO DE AUDITORIA (fa-bom-quantity-precision-unvalidated): `yieldQuantity` é
+// persistido em `Decimal(12,3)` e `quantityPerYield` em `Decimal(12,4)` — um valor
+// com mais casas decimais do que a coluna suporta era silenciosamente arredondado
+// pelo Postgres, divergindo do número exibido/confirmado pelo usuário no formulário.
+// Valida a escala máxima explicitamente ANTES de persistir, em vez de confiar no
+// truncamento silencioso do banco.
+function hasValidDecimalScale(value: number, maxDecimalPlaces: number, maxIntegerDigits = 8): boolean {
+  if (!Number.isFinite(value)) return false;
+  const [integerPart, decimalPart = ""] = Math.abs(value).toString().split(".");
+  if (integerPart.replace(/^0+/, "").length > maxIntegerDigits) return false;
+  return decimalPart.length <= maxDecimalPlaces;
+}
+
 const upsertRecipeSchema = z.object({
-  yieldQuantity: z.number().positive(),
+  yieldQuantity: z.number().positive().refine((v) => hasValidDecimalScale(v, 3), {
+    message: "Rendimento (yieldQuantity) suporta no máximo 3 casas decimais (escala do banco: Decimal(12,3)).",
+  }),
   items: z.array(
     z.object({
       ingredientId: z.string().uuid(),
-      quantityPerYield: z.number().positive(),
+      quantityPerYield: z.number().positive().refine((v) => hasValidDecimalScale(v, 4), {
+        message: "Quantidade por rendimento (quantityPerYield) suporta no máximo 4 casas decimais (escala do banco: Decimal(12,4)).",
+      }),
     }),
   ).min(1),
 });
+
+// CORREÇÃO DE AUDITORIA (fa-recipe-self-reference): detecta ciclo indireto entre
+// fichas técnicas — ex.: produto A usa B como insumo, e B (ou algo que B usa
+// transitivamente) usa A como insumo. Percorre o grafo de `Recipe.productId` →
+// `RecipeItem.ingredientId` em largura, a partir dos insumos candidatos, até
+// encontrar `productId` (ciclo) ou esgotar o grafo (sem ciclo). `visited` limita a
+// travessia ao número finito de produtos do tenant, nunca entra em loop infinito
+// mesmo que já exista algum ciclo pré-existente alheio a esta edição.
+async function wouldCreateRecipeCycle(
+  tx: TenantScopedTransactionClient,
+  tenantId: string,
+  productId: string,
+  ingredientIds: string[],
+): Promise<boolean> {
+  const visited = new Set<string>();
+  let frontier = [...new Set(ingredientIds)];
+  while (frontier.length > 0) {
+    if (frontier.includes(productId)) return true;
+    const unvisited = frontier.filter((id) => !visited.has(id));
+    unvisited.forEach((id) => visited.add(id));
+    if (unvisited.length === 0) break;
+    const recipes = await tx.recipe.findMany({
+      where: { tenantId, productId: { in: unvisited } },
+      include: { items: { select: { ingredientId: true } } },
+    });
+    const next = new Set<string>();
+    for (const recipe of recipes) {
+      for (const item of recipe.items) {
+        if (!visited.has(item.ingredientId)) next.add(item.ingredientId);
+      }
+    }
+    frontier = [...next];
+  }
+  return false;
+}
 
 /**
  * Substitui a ficha técnica inteira do produto (upsert + replace de itens).
@@ -84,27 +138,55 @@ recipesRouter.put("/products/:productId/recipe", requireAuth, requireModule("REC
     return res.status(400).json({ success: false, data: null, error: { code: "INVALID_INGREDIENT", message: "Um ou mais insumos informados não existem neste tenant." } });
   }
 
-  const recipe = await prisma.$transaction(async (tx) => {
-    const upserted = await tx.recipe.upsert({
-      where: { productId: product.id },
-      create: { tenantId, productId: product.id, yieldQuantity: input.yieldQuantity },
-      update: { yieldQuantity: input.yieldQuantity },
+  // CORREÇÃO DE AUDITORIA (fa-recipe-self-reference): produto não pode ser insumo
+  // de si mesmo — corromperia a matemática de baixa de estoque na produção
+  // (decrementaria e incrementaria o mesmo `Product.stockQuantity` na mesma
+  // transação, ou pior, dividiria por um `yieldQuantity` que depende de si mesmo).
+  if (ingredientIds.includes(product.id)) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: { code: "RECIPE_SELF_REFERENCE", message: "Um produto não pode ser cadastrado como insumo da própria ficha técnica." },
+    });
+  }
+
+  try {
+    const recipe = await prisma.$transaction(async (tx) => {
+      // CORREÇÃO DE AUDITORIA (fa-recipe-self-reference): ciclo indireto (A usa B,
+      // B usa A — direta ou transitivamente) é tão destrutivo quanto a auto-referência
+      // direta para a baixa de estoque da produção; detectado antes de persistir.
+      if (await wouldCreateRecipeCycle(tx, tenantId, product.id, ingredientIds)) {
+        throw new RecipeCycleError(
+          "Esta combinação de insumos criaria um ciclo entre fichas técnicas (ex.: um insumo depende, direta ou indiretamente, deste próprio produto).",
+        );
+      }
+
+      const upserted = await tx.recipe.upsert({
+        where: { productId: product.id },
+        create: { tenantId, productId: product.id, yieldQuantity: input.yieldQuantity },
+        update: { yieldQuantity: input.yieldQuantity },
+      });
+
+      await tx.recipeItem.deleteMany({ where: { recipeId: upserted.id } });
+      await tx.recipeItem.createMany({
+        data: input.items.map((item) => ({
+          tenantId,
+          recipeId: upserted.id,
+          ingredientId: item.ingredientId,
+          quantityPerYield: item.quantityPerYield,
+        })),
+      });
+
+      return tx.recipe.findUniqueOrThrow({ where: { id: upserted.id }, include: { items: { include: { ingredient: true } } } });
     });
 
-    await tx.recipeItem.deleteMany({ where: { recipeId: upserted.id } });
-    await tx.recipeItem.createMany({
-      data: input.items.map((item) => ({
-        tenantId,
-        recipeId: upserted.id,
-        ingredientId: item.ingredientId,
-        quantityPerYield: item.quantityPerYield,
-      })),
-    });
-
-    return tx.recipe.findUniqueOrThrow({ where: { id: upserted.id }, include: { items: { include: { ingredient: true } } } });
-  });
-
-  return res.json({ success: true, data: recipe, error: null });
+    return res.json({ success: true, data: recipe, error: null });
+  } catch (error) {
+    if (error instanceof RecipeCycleError) {
+      return res.status(409).json({ success: false, data: null, error: { code: "RECIPE_CYCLE", message: error.message } });
+    }
+    throw error;
+  }
 });
 
 recipesRouter.get("/production-batches", requireAuth, requireModule("RECIPE_BOM"), async (req: Request, res: Response) => {

@@ -145,3 +145,30 @@ export async function assertAccountingAccess(accountingFirmTenantId: string, cli
     data: { engagementId: engagement.id, eventType: "CROSS_TENANT_ACCESS" },
   });
 }
+
+/**
+ * Variante em lote de `assertAccountingAccess()` (fa-perf-accounting-access-n-plus-1):
+ * revalida, em uma única query, quais `clientTenantId` de uma lista possuem vínculo
+ * ATIVO com `accountingFirmTenantId` — usada por listagens (ex.:
+ * `GET /accounting-firm-portfolio`) que antes chamavam `assertAccountingAccess()`
+ * individualmente por item dentro de um `Promise.all` (até ~2 queries extras por
+ * engagement: 1 `findFirst` + 1 `create` de auditoria). Mantém a mesma garantia de
+ * auditoria (`CROSS_TENANT_ACCESS`), apenas gravada via `createMany` em um único
+ * round-trip ao banco. Retorna o `Set` de `clientTenantId` autorizados.
+ */
+export async function assertAccountingAccessBatch(accountingFirmTenantId: string, clientTenantIds: string[]): Promise<Set<string>> {
+  if (clientTenantIds.length === 0) return new Set();
+
+  const engagements = await prismaUnscoped.accountingEngagement.findMany({
+    where: { accountingFirmTenantId, clientTenantId: { in: clientTenantIds }, status: "ACTIVE" },
+    select: { id: true, clientTenantId: true },
+  });
+
+  if (engagements.length > 0) {
+    await prismaUnscoped.accountingEngagementAuditEvent.createMany({
+      data: engagements.map((engagement) => ({ engagementId: engagement.id, eventType: "CROSS_TENANT_ACCESS" as const })),
+    });
+  }
+
+  return new Set(engagements.map((engagement) => engagement.clientTenantId));
+}

@@ -5,6 +5,7 @@
 import { Request, Response, NextFunction } from "express";
 import { prisma } from "@filitech/db";
 import { redis } from "../lib/redis";
+import { hasPermission as hasCachedPermission } from "../lib/permission-cache";
 
 interface GatekeeperOptions {
   moduleCode: string;
@@ -106,18 +107,6 @@ function unauthenticated(res: Response) {
   });
 }
 
-async function checkPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
-  const [defaultGrant, override] = await Promise.all([
-    prisma.roleDefaultPermission.findUnique({
-      where: { role_permissionCode: { role: role as any, permissionCode } },
-    }),
-    prisma.rolePermission.findUnique({
-      where: { userId_permission: { userId, permission: permissionCode } },
-    }),
-  ]);
-  return override ? override.granted : Boolean(defaultGrant);
-}
-
 export function gatekeeper(options: GatekeeperOptions) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const session = req.session;
@@ -131,7 +120,9 @@ export function gatekeeper(options: GatekeeperOptions) {
     }
 
     if (options.requiredPermission) {
-      const isGranted = await checkPermission(session.role, session.userId, options.requiredPermission);
+      // CORREÇÃO DE AUDITORIA (fa-perf-permission-check-no-cache): checagem local
+      // substituída pela versão compartilhada com cache Redis de 60s.
+      const isGranted = await hasCachedPermission(session.tenantId, session.role, session.userId, options.requiredPermission);
       if (!isGranted) {
         return res.status(403).json({
           success: false,

@@ -17,32 +17,29 @@ import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { isTenantStorageKey } from "../../lib/storage-key";
+import { hasPermission } from "../../lib/permission-cache";
 
 export const carWashServiceRouter = Router();
 
-async function hasPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
-  const [defaultGrant, override] = await Promise.all([
-    prisma.roleDefaultPermission.findUnique({ where: { role_permissionCode: { role: role as any, permissionCode } } }),
-    prisma.rolePermission.findUnique({ where: { userId_permission: { userId, permission: permissionCode } } }),
-  ]);
-  return override ? override.granted : Boolean(defaultGrant);
-}
+// CORREÇÃO DE AUDITORIA (fa-perf-permission-check-no-cache): `hasPermission()` local
+// substituída pela versão compartilhada com cache Redis de 60s
+// (`lib/permission-cache.ts`).
 
 function fail(res: Response, status: number, code: string, message: string) {
   return res.status(status).json({ success: false, data: null, error: { code, message } });
 }
 
 async function requireWrite(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "car-wash:checklist:write"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "car-wash:checklist:write"))) {
     fail(res, 403, "FORBIDDEN", "Seu nível de acesso não permite registrar checklist do lava-rápido.");
     return false;
   }
   return true;
 }
 async function requireRead(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "car-wash:checklist:read"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "car-wash:checklist:read"))) {
     fail(res, 403, "FORBIDDEN", "Seu nível de acesso não permite consultar checklist do lava-rápido.");
     return false;
   }

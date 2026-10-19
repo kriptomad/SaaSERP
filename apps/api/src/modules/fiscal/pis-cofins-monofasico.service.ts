@@ -6,6 +6,12 @@
 // alíquota zero na revenda — nunca tributada duas vezes.
 import { Prisma } from "@filitech/db";
 
+// fa-fiscal-tax-literal-float-percentages: construídas a partir de STRING (nunca
+// de literal float) para evitar o arredondamento IEEE-754 intermediário que
+// `Prisma.Decimal.mul(0.0365)` sofreria ao converter o literal JS para Decimal.
+const PIS_COFINS_CUMULATIVO_ALIQUOTA = new Prisma.Decimal("0.0365"); // Lucro Presumido: 0,65% PIS + 3,00% COFINS
+const PIS_COFINS_NAO_CUMULATIVO_ALIQUOTA = new Prisma.Decimal("0.0925"); // Lucro Real: 1,65% PIS + 7,60% COFINS
+
 interface PisCofinsRuleLike {
   pisCofinsRegime: "ISENTO_SIMPLES" | "CUMULATIVO" | "NAO_CUMULATIVO" | "MONOFASICO_CONCENTRADO" | "MONOFASICO_ALIQUOTA_ZERO";
   pisAliquotaConcentrada: Prisma.Decimal | null;
@@ -30,9 +36,9 @@ export function resolvePisCofinsForSale(rule: PisCofinsRuleLike, grossAmount: Pr
         segregatedAsMonofasico: false,
       };
     case "CUMULATIVO": // Lucro Presumido — 0,65% PIS + 3,00% COFINS = 3,65% sobre a receita bruta, sem direito a crédito
-      return { amount: grossAmount.mul(0.0365), segregatedAsMonofasico: false };
+      return { amount: grossAmount.mul(PIS_COFINS_CUMULATIVO_ALIQUOTA), segregatedAsMonofasico: false };
     case "NAO_CUMULATIVO": // Lucro Real — 1,65% PIS + 7,60% COFINS = 9,25%, com direito a crédito sobre insumos (crédito apurado à parte, Capítulo 17.1)
-      return { amount: grossAmount.mul(0.0925), segregatedAsMonofasico: false };
+      return { amount: grossAmount.mul(PIS_COFINS_NAO_CUMULATIVO_ALIQUOTA), segregatedAsMonofasico: false };
     default: // ISENTO_SIMPLES — embutido no DAS, não destacado nesta venda
       return { amount: new Prisma.Decimal(0), segregatedAsMonofasico: false };
   }

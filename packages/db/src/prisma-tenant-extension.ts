@@ -35,7 +35,7 @@ export const TENANT_SCOPED_MODELS = new Set([
   // Modelos financeiros (Capítulo 17):
   "ChartOfAccount", "CostCenter", "BankAccount", "BankTransaction", "PaymentCharge",
   // Modelos de relatórios/BI (Capítulo 18):
-  "ReportDefinition", "ScheduledReport", "DashboardLayout",
+  "ReportDefinition", "ScheduledReport", "DashboardLayout", "ReportExportJob",
   // Modelos do painel global ligados a um tenant de origem (Capítulo 15) — observação:
   // mesmo sendo consultados/administrados a partir do painel de plataforma, continuam
   // possuindo tenantId e por isso permanecem nesta lista; o painel global, ao precisar

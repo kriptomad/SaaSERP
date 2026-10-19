@@ -13,6 +13,12 @@ import { calculateDifal } from "./difal-calculator.service";
 import { calculateUsedVehicleIcms, UsedVehicleTaxRuleMissingError } from "./used-vehicle-icms.service";
 import { resolveCfop } from "./cfop-resolver.service";
 
+// fa-fiscal-tax-literal-float-percentages: alíquotas nominais de PIS/COFINS
+// construídas a partir de STRING (nunca de literal float) — ver comentário de uso
+// abaixo para o porquê.
+const PIS_COFINS_NAO_CUMULATIVO_ALIQUOTA = new Prisma.Decimal("0.0925"); // Lucro Real: 1,65% PIS + 7,6% COFINS
+const PIS_COFINS_CUMULATIVO_ALIQUOTA = new Prisma.Decimal("0.0365"); // Lucro Presumido: 0,65% PIS + 3% COFINS
+
 export interface TaxCalculationInput {
   tenantId: string;
   ncm: string;
@@ -151,10 +157,18 @@ export async function calculateTax(
       // de créditos exigiria um módulo de apuração de créditos de PIS/COFINS
       // não-cumulativo próprio, fora do escopo deste pacote (ver observação no
       // Capítulo 21.6 do bible).
+      // CORREÇÃO (fa-fiscal-tax-literal-float-percentages): alíquotas fiscais eram
+      // literais float (`0.0925`, `0.0365`) — IEEE-754 não representa essas frações
+      // decimais exatamente (ex.: 0.0925 em binário tem dízima periódica), então
+      // `Prisma.Decimal.mul(0.0925)` converte o literal float para Decimal ANTES de
+      // multiplicar, herdando o arredondamento de ponto flutuante do próprio
+      // literal JS. Usar `new Prisma.Decimal("0.0925")` (a partir de STRING) evita
+      // essa conversão intermediária e garante que a alíquota usada no cálculo
+      // seja exatamente 9,25%/3,65%, nunca um vizinho de ponto flutuante.
       tenant.taxRegime === "LUCRO_REAL"
-        ? input.grossAmount.mul(0.0925)
+        ? input.grossAmount.mul(PIS_COFINS_NAO_CUMULATIVO_ALIQUOTA)
         : tenant.taxRegime === "LUCRO_PRESUMIDO"
-          ? input.grossAmount.mul(0.0365)
+          ? input.grossAmount.mul(PIS_COFINS_CUMULATIVO_ALIQUOTA)
           : new Prisma.Decimal(0), // SIMPLES_NACIONAL/MEI: já embutido no DAS, nunca destacado à parte
     ibsAmount: input.grossAmount.mul((rule.ibsAliquota ?? new Prisma.Decimal(0)).div(100)),
     cbsAmount: input.grossAmount.mul((rule.cbsAliquota ?? new Prisma.Decimal(0)).div(100)),

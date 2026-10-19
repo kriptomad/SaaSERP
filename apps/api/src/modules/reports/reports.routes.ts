@@ -30,23 +30,22 @@ import { executeReportDefinition, InvalidReportFieldError, ReportFilterCondition
 import { DATASET_REGISTRY } from "./dataset-registry";
 import { buildAbcCurveReport, buildVariantAbcCurveReport } from "./abc-curve-report.service";
 import { buildCollectionTurnoverReport } from "./collection-turnover-report.service";
-import { buildReportPdf, buildReportXlsx } from "./report-export.service";
-import { reportGenerationQueue } from "../../lib/queue";
+import { reportGenerationQueue, reportExportGenerationQueue } from "../../lib/queue";
 import type { ScheduledReportJobData } from "../../workers/scheduled-report-generation.worker";
+import type { ReportExportGenerationJobData } from "../../workers/report-export-generation.worker";
+import { presignObjectDownload } from "../../lib/object-storage";
+import { hasPermission } from "../../lib/permission-cache";
 
 export const reportsRouter = Router();
 
-async function hasPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
-  const [defaultGrant, override] = await Promise.all([
-    prisma.roleDefaultPermission.findUnique({ where: { role_permissionCode: { role: role as any, permissionCode } } }),
-    prisma.rolePermission.findUnique({ where: { userId_permission: { userId, permission: permissionCode } } }),
-  ]);
-  return override ? override.granted : Boolean(defaultGrant);
-}
+// CORREÇÃO DE AUDITORIA (fa-perf-permission-check-no-cache): `hasPermission()` local
+// (2 `findUnique` por chamada) foi substituída pela versão compartilhada com cache
+// Redis de 60s (`lib/permission-cache.ts`) — mesma assinatura de regra de negócio,
+// agora recebendo `tenantId` explicitamente (namespace do cache).
 
 async function requireRead(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "reports:*:read"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "reports:*:read"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar relatórios." } });
     return false;
   }
@@ -54,8 +53,8 @@ async function requireRead(req: Request, res: Response): Promise<boolean> {
 }
 
 async function requireWrite(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "reports:*:write"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "reports:*:write"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite criar/editar relatórios." } });
     return false;
   }
@@ -227,14 +226,18 @@ reportsRouter.get("/report-definitions/:id/execute", requireAuth, async (req: Re
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// EXPORTAÇÃO PDF/XLSX (Capítulo 18.2) — gera o arquivo em memória a partir das
-// mesmas linhas de /execute, nunca duplica a lógica de consulta/agregação.
+// EXPORTAÇÃO PDF/XLSX (Capítulo 18.2/18.3) — assíncrona via BullMQ
+// (fa-perf-report-export-inline): a query/agregação completa + geração do
+// arquivo nunca mais roda dentro do processo HTTP; o worker
+// `workers/report-export-generation.worker.ts` faz o trabalho pesado e
+// persiste o resultado em `ReportExportJob` (mesmo padrão de infraestrutura de
+// `workers/data-export-generation.worker.ts`/`data-export.routes.ts`).
 // ─────────────────────────────────────────────────────────────────────────
 
 reportsRouter.get("/report-definitions/:id/export", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
-  const { tenantId } = req.session!;
-  const format = req.query.format === "pdf" ? "pdf" : req.query.format === "xlsx" ? "xlsx" : null;
+  const { tenantId, userId } = req.session!;
+  const format = req.query.format === "pdf" ? "PDF" : req.query.format === "xlsx" ? "XLSX" : null;
   if (!format) {
     return res.status(400).json({ success: false, data: null, error: { code: "INVALID_FORMAT", message: "Use ?format=pdf ou ?format=xlsx." } });
   }
@@ -242,30 +245,43 @@ reportsRouter.get("/report-definitions/:id/export", requireAuth, async (req: Req
   if (!definition) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Definição de relatório não encontrada." } });
   }
-  try {
-    const rows = await executeReportDefinition(prisma, tenantId, {
-      datasetKey: definition.datasetKey,
-      dimensions: definition.dimensions as string[],
-      metrics: definition.metrics as string[],
-      filters: definition.filters as unknown as ReportFilterCondition[],
-    });
-    const safeFileName = definition.name.replace(/[^a-zA-Z0-9-_]+/g, "_").slice(0, 60) || "relatorio";
-    if (format === "xlsx") {
-      const buffer = await buildReportXlsx(definition.name, rows as Record<string, unknown>[]);
-      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-      res.setHeader("Content-Disposition", `attachment; filename="${safeFileName}.xlsx"`);
-      return res.send(buffer);
-    }
-    const buffer = await buildReportPdf(definition.name, rows as Record<string, unknown>[]);
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${safeFileName}.pdf"`);
-    return res.send(buffer);
-  } catch (err) {
-    if (err instanceof InvalidReportFieldError) {
-      return res.status(400).json({ success: false, data: null, error: { code: "INVALID_REPORT_FIELD", message: err.message } });
-    }
-    throw err;
+
+  const exportJob = await prisma.reportExportJob.create({
+    data: { tenantId, reportDefinitionId: definition.id, requestedByUserId: userId, format, status: "QUEUED" },
+  });
+
+  const jobData: ReportExportGenerationJobData = { jobId: exportJob.id, tenantId, reportDefinitionId: definition.id, format };
+  await reportExportGenerationQueue.add("generate-report-export", jobData, {
+    attempts: 1, // geração não é idempotente de forma segura para retry automático — falha vira status FAILED
+    removeOnComplete: true,
+    removeOnFail: true,
+  });
+
+  return res.status(202).json({ success: true, data: exportJob, error: null });
+});
+
+reportsRouter.get("/report-export-jobs/:id", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requireRead(req, res))) return;
+  const { tenantId } = req.session!;
+  const job = await prisma.reportExportJob.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!job) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Job de exportação não encontrado." } });
   }
+  return res.json({ success: true, data: job, error: null });
+});
+
+reportsRouter.get("/report-export-jobs/:id/download", requireAuth, async (req: Request, res: Response) => {
+  if (!(await requireRead(req, res))) return;
+  const { tenantId } = req.session!;
+  const job = await prisma.reportExportJob.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!job) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Job de exportação não encontrado." } });
+  }
+  if (job.status !== "COMPLETED" || !job.resultStorageKey) {
+    return res.status(409).json({ success: false, data: null, error: { code: "EXPORT_NOT_READY", message: `Exportação ainda não concluída (status atual: ${job.status}).` } });
+  }
+  const result = await presignObjectDownload(tenantId, job.resultStorageKey);
+  return res.json({ success: true, data: result, error: null });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

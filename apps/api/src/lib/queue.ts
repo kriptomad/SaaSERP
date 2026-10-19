@@ -128,6 +128,23 @@ export const QUEUE_NAMES = {
   // provedor podia deixar a linha PENDING_CHECKOUT (e o cupom nela aplicado)
   // órfã para sempre, sem nenhuma rede de segurança.
   EXPIRE_STALE_PENDING_CHECKOUTS: "expire-stale-pending-checkouts",
+  // Capítulo 21.18.5/21.18.10/21.18.11 — geração sob demanda de documentos fiscais
+  // oficiais (ECD/DEFIS/ECF/EFD-Reinf/DCTFWeb/Informe de Rendimentos do Sócio),
+  // consumida por `workers/accounting-document-generation.worker.ts`. GAP DE
+  // AUDITORIA FECHADO (fa-perf-accounting-doc-generation-inline): a geração
+  // (incluindo upload R2) rodava síncrona dentro de `POST
+  // /official-tax-documents/generate`, arriscando timeout/alto consumo de memória do
+  // processo HTTP para documentos grandes. Job sob demanda (não repetível),
+  // enfileirado pela mesma rota.
+  ACCOUNTING_DOCUMENT_GENERATION: "accounting-document-generation",
+  // Capítulo 18.3 — exportação sob demanda de um `ReportDefinition` para PDF/XLSX
+  // (`GET /report-definitions/:id/export`), consumida por
+  // `workers/report-export-generation.worker.ts`. GAP DE AUDITORIA FECHADO
+  // (fa-perf-report-export-inline): a query/agregação completa + geração de
+  // PDF/XLSX rodava síncrona dentro do processo HTTP, arriscando bloqueio do event
+  // loop/alto consumo de memória sob carga. Job sob demanda, status/arquivo
+  // persistidos em `ReportExportJob`.
+  REPORT_EXPORT_GENERATION: "report-export-generation",
 } as const;
 
 export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
@@ -197,5 +214,13 @@ export const reconcileStuckFiscalDocumentsQueue = new Queue(QUEUE_NAMES.RECONCIL
 });
 
 export const expireStalePendingCheckoutsQueue = new Queue(QUEUE_NAMES.EXPIRE_STALE_PENDING_CHECKOUTS, {
+  connection: queueRedisConnection,
+});
+
+export const accountingDocumentGenerationQueue = new Queue(QUEUE_NAMES.ACCOUNTING_DOCUMENT_GENERATION, {
+  connection: queueRedisConnection,
+});
+
+export const reportExportGenerationQueue = new Queue(QUEUE_NAMES.REPORT_EXPORT_GENERATION, {
   connection: queueRedisConnection,
 });

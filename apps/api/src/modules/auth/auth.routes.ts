@@ -9,7 +9,7 @@ import { prismaUnscoped } from "@filitech/db";
 import { hashPassword, verifyPassword } from "./password.service";
 import { signSessionToken } from "./jwt.service";
 import { enforceRateLimit, resetRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
-import { authMiddleware, requireAuth } from "../../middlewares/auth.middleware";
+import { authMiddleware, requireAuth, invalidateImpersonationSessionCache } from "../../middlewares/auth.middleware";
 import { isValidCnpj } from "../../lib/br-documents";
 import { validatePasswordPolicy } from "../../lib/password-policy";
 import { sendPlatformEmail } from "../../lib/platform-email";
@@ -346,5 +346,9 @@ authRouter.post("/impersonation/end", authMiddleware, requireAuth, async (req, r
     where: { id: sessionId, endedAt: null },
     data: { endedAt: new Date() },
   });
+  // Reflete a revogação imediatamente no cache de curto TTL usado pelo
+  // middleware de revalidação (ver auth.middleware.ts), em vez de deixar o token
+  // continuar válido por até o TTL do cache expirar sozinho.
+  await invalidateImpersonationSessionCache(sessionId);
   return res.json({ success: true, data: { ended: true }, error: null });
 });

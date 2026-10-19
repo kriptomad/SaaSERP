@@ -129,16 +129,32 @@ marketingAdminRouter.patch("/platform-admin/discount-coupons/:id", requirePlatfo
   return res.json({ success: true, data: updated, error: null });
 });
 
-// Cupom já resgatado tem histórico financeiro: só desativa. Sem uso, pode ser removido de verdade.
+// GAP DE AUDITORIA FECHADO (fa-superadmin-nontransactional-audit): delete físico do
+// cupom + writeAuditLog eram duas escritas separadas — se a segunda falhasse, o
+// cupom já tinha sumido do banco sem NENHUM rastro de quem/quando excluiu. Também
+// trocado hard delete por soft-delete (`active = false`, campo já existente no
+// schema) — nunca removemos fisicamente o registro de um cupom que pode ter sido
+// usado em relatórios/analytics mesmo sem resgates; apenas desativa de verdade.
 marketingAdminRouter.delete("/platform-admin/discount-coupons/:id", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
   const current = await prisma.discountCoupon.findUnique({ where: { id: req.params.id } });
   if (!current) return err(res, 404, "NOT_FOUND", "Cupom não encontrado.");
   if (current.redemptionCount > 0) {
     return err(res, 409, "COUPON_ALREADY_REDEEMED", "Cupom já foi resgatado; desative-o (PATCH active=false) em vez de excluir.");
   }
-  await prisma.discountCoupon.delete({ where: { id: current.id } });
-  await writeAuditLog(req, "DISCOUNT_COUPON_DELETED", "DiscountCoupon", current.id, { code: current.code });
-  return res.json({ success: true, data: { id: current.id }, error: null });
+  const deactivated = await prisma.$transaction(async (tx) => {
+    const result = await tx.discountCoupon.update({ where: { id: current.id }, data: { active: false } });
+    await tx.auditLog.create({
+      data: {
+        platformAdminUserId: req.platformAdminSession!.platformAdminUserId,
+        action: "DISCOUNT_COUPON_DELETED",
+        targetType: "DiscountCoupon",
+        targetId: current.id,
+        metadata: { code: current.code, softDelete: true } as any,
+      },
+    });
+    return result;
+  });
+  return res.json({ success: true, data: { id: deactivated.id }, error: null });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ import "express-async-errors";
 import cors from "cors";
 import helmet from "helmet";
 import { logger } from "./lib/logger";
-import { authMiddleware, requireAuth } from "./middlewares/auth.middleware";
+import { authMiddleware, requireAuth, impersonationAuditMiddleware } from "./middlewares/auth.middleware";
 import { tenantContextMiddleware } from "./middlewares/tenant-context.middleware";
 import { tenantLockoutMiddleware } from "./middlewares/tenant-lockout.middleware";
 import { authRouter } from "./modules/auth/auth.routes";
@@ -226,6 +226,10 @@ app.use(databaseBackupsRouter);
 app.use(authMiddleware);
 app.use(tenantContextMiddleware);
 app.use(tenantLockoutMiddleware);
+// GAP DE AUDITORIA FECHADO (fa-superadmin-impersonation-actions-not-audited): hook
+// central que grava em AuditLog toda mutação feita sob impersonation — precisa vir
+// depois de authMiddleware (que popula req.session.impersonation).
+app.use(impersonationAuditMiddleware);
 
 // multiFilialRouter e supportTicketsRouter usam apenas requireAuth (sessão de
 // tenant), então precisam vir DEPOIS da cadeia acima — caso contrário chegam sem

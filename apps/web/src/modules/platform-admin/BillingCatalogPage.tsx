@@ -26,6 +26,7 @@ import {
   MenuItem,
 } from "@mui/material";
 import { usePlatformAdminAuth } from "./PlatformAdminAuthContext";
+import { PlatformAdminConfirmDialog } from "./PlatformAdminConfirmDialog";
 import {
   listPlans,
   createPlan,
@@ -99,6 +100,8 @@ function PlansSection() {
   const canEdit = admin?.role === "SUPER_ADMIN";
   const [plans, setPlans] = useState<PlanSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingToggle, setPendingToggle] = useState<PlanSummary | null>(null);
+  const [toggling, setToggling] = useState(false);
 
   useEffect(() => {
     listPlans().then(setPlans).catch((err) => setError((err as Error).message));
@@ -108,11 +111,16 @@ function PlansSection() {
     setPlans((prev) => prev?.map((p) => (p.id === updated.id ? updated : p)) ?? null);
   }
 
-  async function toggleActive(plan: PlanSummary) {
+  async function confirmToggleActive() {
+    if (!pendingToggle) return;
+    setToggling(true);
     try {
-      applyUpdated(await updatePlan(plan.id, { active: !plan.active }));
+      applyUpdated(await updatePlan(pendingToggle.id, { active: !pendingToggle.active }));
+      setPendingToggle(null);
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setToggling(false);
     }
   }
 
@@ -143,13 +151,33 @@ function PlansSection() {
                 <TableCell>{plan.audience}</TableCell>
                 <TableCell align="right">{plan.includedUserSeats ?? "—"}</TableCell>
                 <TableCell align="right">{plan.extraUserSeatPrice !== null ? money(plan.extraUserSeatPrice) : "—"}</TableCell>
-                <TableCell><Switch size="small" checked={plan.active} disabled={!canEdit} onChange={() => toggleActive(plan)} /></TableCell>
+                <TableCell><Switch size="small" checked={plan.active} disabled={!canEdit} onChange={() => setPendingToggle(plan)} /></TableCell>
               </TableRow>
             ))}
             {plans && plans.length === 0 && <TableRow><TableCell colSpan={7}>Nenhum plano cadastrado.</TableCell></TableRow>}
           </TableBody>
         </Table>
       </TableContainer>
+      <PlatformAdminConfirmDialog
+        open={pendingToggle != null}
+        title={pendingToggle?.active ? "Desativar plano?" : "Ativar plano?"}
+        description={
+          pendingToggle?.active
+            ? "Tenants em assinaturas ACTIVE neste plano continuam cobrados normalmente, mas o plano deixa de poder ser contratado por novos tenants."
+            : "O plano volta a ficar disponível para contratação por novos tenants imediatamente."
+        }
+        impact={pendingToggle ? [
+          { label: "Plano", value: `${pendingToggle.code} — ${pendingToggle.label}` },
+          { label: "Estado atual", value: pendingToggle.active ? "Ativo" : "Inativo" },
+          { label: "Novo estado", value: pendingToggle.active ? "Inativo" : "Ativo" },
+          { label: "Preço base", value: money(pendingToggle.basePrice) },
+        ] : []}
+        confirmLabel={pendingToggle?.active ? "Desativar" : "Ativar"}
+        danger={pendingToggle?.active}
+        busy={toggling}
+        onConfirm={confirmToggleActive}
+        onClose={() => setPendingToggle(null)}
+      />
     </Box>
   );
 }
@@ -199,6 +227,8 @@ function ModulesSection() {
   const canEdit = admin?.role === "SUPER_ADMIN";
   const [modules, setModules] = useState<BillingModuleSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingToggle, setPendingToggle] = useState<BillingModuleSummary | null>(null);
+  const [toggling, setToggling] = useState(false);
 
   useEffect(() => {
     listBillingModules().then(setModules).catch((err) => setError((err as Error).message));
@@ -208,11 +238,16 @@ function ModulesSection() {
     setModules((prev) => prev?.map((m) => (m.id === updated.id ? updated : m)) ?? null);
   }
 
-  async function toggleActive(module: BillingModuleSummary) {
+  async function confirmToggleActive() {
+    if (!pendingToggle) return;
+    setToggling(true);
     try {
-      applyUpdated(await updateBillingModule(module.id, { active: !module.active }));
+      applyUpdated(await updateBillingModule(pendingToggle.id, { active: !pendingToggle.active }));
+      setPendingToggle(null);
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setToggling(false);
     }
   }
 
@@ -239,13 +274,33 @@ function ModulesSection() {
                 <TableCell>{module.label}</TableCell>
                 <TableCell>{module.description}</TableCell>
                 <TableCell align="right">{money(module.monthlyPrice)}</TableCell>
-                <TableCell><Switch size="small" checked={module.active} disabled={!canEdit} onChange={() => toggleActive(module)} /></TableCell>
+                <TableCell><Switch size="small" checked={module.active} disabled={!canEdit} onChange={() => setPendingToggle(module)} /></TableCell>
               </TableRow>
             ))}
             {modules && modules.length === 0 && <TableRow><TableCell colSpan={5}>Nenhum módulo de billing cadastrado.</TableCell></TableRow>}
           </TableBody>
         </Table>
       </TableContainer>
+      <PlatformAdminConfirmDialog
+        open={pendingToggle != null}
+        title={pendingToggle?.active ? "Desativar módulo do catálogo?" : "Ativar módulo do catálogo?"}
+        description={
+          pendingToggle?.active
+            ? "Esta ação invalida IMEDIATAMENTE o cache Redis de todos os tenants que contratam este módulo, revogando o acesso na hora (não espera o TTL de 60s)."
+            : "O módulo volta a ficar disponível para contratação por tenants imediatamente."
+        }
+        impact={pendingToggle ? [
+          { label: "Módulo", value: `${pendingToggle.code} — ${pendingToggle.label}` },
+          { label: "Estado atual", value: pendingToggle.active ? "Ativo" : "Inativo" },
+          { label: "Novo estado", value: pendingToggle.active ? "Inativo" : "Ativo" },
+          { label: "Preço/mês", value: money(pendingToggle.monthlyPrice) },
+        ] : []}
+        confirmLabel={pendingToggle?.active ? "Desativar" : "Ativar"}
+        danger={pendingToggle?.active}
+        busy={toggling}
+        onConfirm={confirmToggleActive}
+        onClose={() => setPendingToggle(null)}
+      />
     </Box>
   );
 }

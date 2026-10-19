@@ -41,37 +41,27 @@ import {
   acceptAccountingEngagement,
   revokeAccountingEngagement,
   assertAccountingAccess,
+  assertAccountingAccessBatch,
   EngagementNotAcceptableError,
   EngagementAcceptanceExpiredError,
   NoActiveEngagementError,
   DuplicateActiveEngagementError,
   EngagementNotRevocableError,
 } from "../../services/accounting-office/engagement.service";
-import { generateSpedEcd, generateDefis, NoActiveLayoutVersionError } from "../../services/accounting-office/sped-ecd.service";
-import {
-  generateEcf,
-  generateEfdReinf,
-  generateDctfWeb,
-  generateInformeRendimentosSocio,
-  EcfNotApplicableError,
-  NoPartnerPayoutsFoundError,
-  EcfActivityType,
-} from "../../services/accounting-office/ecf-reinf-dctfweb.service";
-import { putObjectDirect, presignObjectDownload } from "../../lib/object-storage";
+import { presignObjectDownload } from "../../lib/object-storage";
+import { hasPermission } from "../../lib/permission-cache";
+import { accountingDocumentGenerationQueue } from "../../lib/queue";
+import type { AccountingDocumentGenerationJobData } from "../../workers/accounting-document-generation.worker";
 
 export const accountingOfficeRouter = Router();
 
-async function hasPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
-  const [defaultGrant, override] = await Promise.all([
-    prisma.roleDefaultPermission.findUnique({ where: { role_permissionCode: { role: role as any, permissionCode } } }),
-    prisma.rolePermission.findUnique({ where: { userId_permission: { userId, permission: permissionCode } } }),
-  ]);
-  return override ? override.granted : Boolean(defaultGrant);
-}
+// CORREÇÃO DE AUDITORIA (fa-perf-permission-check-no-cache): `hasPermission()` local
+// (2 `findUnique` por chamada, em TODA rota deste módulo) foi substituída pela versão
+// compartilhada com cache Redis de 60s (`lib/permission-cache.ts`).
 
 async function requireManage(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "accounting-office:engagement:manage"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "accounting-office:engagement:manage"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite gerenciar vínculos contábeis." } });
     return false;
   }
@@ -79,8 +69,8 @@ async function requireManage(req: Request, res: Response): Promise<boolean> {
 }
 
 async function requireTaskRead(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "accounting-office:task:read"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "accounting-office:task:read"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar tarefas contábeis." } });
     return false;
   }
@@ -88,8 +78,8 @@ async function requireTaskRead(req: Request, res: Response): Promise<boolean> {
 }
 
 async function requireTaskWrite(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "accounting-office:task:write"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "accounting-office:task:write"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite atualizar tarefas contábeis." } });
     return false;
   }
@@ -97,8 +87,8 @@ async function requireTaskWrite(req: Request, res: Response): Promise<boolean> {
 }
 
 async function requireDocumentRead(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "accounting-office:document:read"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "accounting-office:document:read"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar documentos oficiais." } });
     return false;
   }
@@ -106,8 +96,8 @@ async function requireDocumentRead(req: Request, res: Response): Promise<boolean
 }
 
 async function requireDocumentWrite(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "accounting-office:document:write"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "accounting-office:document:write"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite gerar documentos oficiais." } });
     return false;
   }
@@ -115,8 +105,8 @@ async function requireDocumentWrite(req: Request, res: Response): Promise<boolea
 }
 
 async function requirePartnerRead(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "accounting-office:partner:read"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "accounting-office:partner:read"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar sócios/pró-labore." } });
     return false;
   }
@@ -124,8 +114,8 @@ async function requirePartnerRead(req: Request, res: Response): Promise<boolean>
 }
 
 async function requirePartnerManage(req: Request, res: Response): Promise<boolean> {
-  const { userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "accounting-office:partner:manage"))) {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(tenantId, role, userId, "accounting-office:partner:manage"))) {
     res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite cadastrar sócios/lançar pró-labore." } });
     return false;
   }
@@ -303,22 +293,18 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, requireMod
   // CORREÇÃO DE AUDITORIA: o filtro `status: "ACTIVE"` acima já restringe a query,
   // mas nenhum acesso cross-tenant real passava por `assertAccountingAccess()` —
   // a única porta oficial de acesso cross-tenant do módulo (Capítulo 7.4), que
-  // também grava a trilha de auditoria (`CROSS_TENANT_ACCESS`). Revalida cada
-  // engagement individualmente e descarta silenciosamente qualquer um que tenha
-  // sido revogado entre a query acima e esta checagem (corrida improvável, mas
-  // não impossível), em vez de devolver dado de um vínculo não mais ativo.
-  const accessChecks = await Promise.all(
-    engagements.map(async (engagement) => {
-      try {
-        await assertAccountingAccess(tenantId, engagement.clientTenantId);
-        return true;
-      } catch (err) {
-        if (err instanceof NoActiveEngagementError) return false;
-        throw err;
-      }
-    }),
+  // também grava a trilha de auditoria (`CROSS_TENANT_ACCESS`). Revalida em uma
+  // única query em lote (fa-perf-accounting-access-n-plus-1 — antes era um
+  // `findFirst` + `create` de auditoria POR engagement dentro de um `Promise.all`,
+  // até ~2 queries extras por item/~400 para 200 engagements) e descarta
+  // silenciosamente qualquer um que tenha sido revogado entre a query acima e esta
+  // checagem (corrida improvável, mas não impossível), em vez de devolver dado de
+  // um vínculo não mais ativo.
+  const authorizedClientTenantIds = await assertAccountingAccessBatch(
+    tenantId,
+    engagements.map((e) => e.clientTenantId),
   );
-  const authorizedEngagements = engagements.filter((_, index) => accessChecks[index]);
+  const authorizedEngagements = engagements.filter((e) => authorizedClientTenantIds.has(e.clientTenantId));
 
   const clientTenantIds = authorizedEngagements.map((e) => e.clientTenantId);
   const taskCounts = await prisma.accountingTask.groupBy({
@@ -495,11 +481,38 @@ accountingOfficeRouter.get("/official-tax-documents", requireAuth, requireModule
     ownerTenantId = clientTenantId;
   }
 
-  const documents = await prisma.officialTaxDocument.findMany({
-    where: { tenantId: ownerTenantId, ...(documentType ? { documentType: documentType as any } : {}) },
-    orderBy: { generatedAt: "desc" },
-  });
-  return res.json({ success: true, data: documents, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-perf-accounting-docs-no-pagination): `findMany` sem
+  // skip/take/select retornava TODOS os documentos do tenant (incluindo o campo
+  // `fileUrl` bruto, nunca necessário na listagem). Mesmo padrão page/pageSize já
+  // usado em users.routes.ts/stock.routes.ts.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { tenantId: ownerTenantId, ...(documentType ? { documentType: documentType as any } : {}) };
+
+  const [documents, total] = await Promise.all([
+    prisma.officialTaxDocument.findMany({
+      where,
+      orderBy: { generatedAt: "desc" },
+      select: {
+        id: true,
+        tenantId: true,
+        generatedByAccountingFirmTenantId: true,
+        documentType: true,
+        layoutVersion: true,
+        competenciaInicio: true,
+        competenciaFim: true,
+        transmissionProtocol: true,
+        rejectionReason: true,
+        failureReason: true,
+        status: true,
+        generatedAt: true,
+      },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.officialTaxDocument.count({ where }),
+  ]);
+  return res.json({ success: true, meta: { page, pageSize, total }, data: documents, error: null });
 });
 
 const generateDocumentSchema = z.object({
@@ -517,10 +530,16 @@ const generateDocumentSchema = z.object({
 });
 
 /**
- * Gera de fato o arquivo (ECD/DEFIS), faz upload para R2 e persiste o
- * `OfficialTaxDocument` com status GENERATED. Caminho A (contador) exige
- * vínculo ATIVO com o tenant-cliente; Caminho B (lojista autogerando) não
- * exige vínculo nenhum.
+ * Enfileira a geração do arquivo (ECD/DEFIS/ECF/EFD-Reinf/DCTFWeb/Informe de
+ * Rendimentos do Sócio) via BullMQ — nunca mais síncrono dentro da requisição HTTP
+ * (CORREÇÃO DE AUDITORIA fa-perf-accounting-doc-generation-inline: a geração real
+ * podia envolver centenas de lançamentos contábeis + upload para o R2, arriscando
+ * timeout/alto uso de memória no processo da API). A validação de formato/campos
+ * obrigatórios por `documentType` continua síncrona (retorno 400 imediato,
+ * nenhuma mudança de contrato para o cliente), mas a geração do conteúdo e o
+ * upload passam a rodar em `workers/accounting-document-generation.worker.ts`.
+ * Caminho A (contador) exige vínculo ATIVO com o tenant-cliente; Caminho B
+ * (lojista autogerando) não exige vínculo nenhum.
  */
 accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireDocumentWrite(req, res))) return;
@@ -546,106 +565,65 @@ accountingOfficeRouter.post("/official-tax-documents/generate", requireAuth, req
     generatedByAccountingFirmTenantId = tenantId;
   }
 
-  try {
-    let content: string;
-    let layoutVersion: string;
-    let competenciaInicio: Date;
-    let competenciaFim: Date;
-    let status: "GENERATED" | "DRAFT" = "GENERATED";
+  let competenciaInicio: Date;
+  let competenciaFim: Date;
 
-    if (parsed.data.documentType === "ECD") {
-      if (!parsed.data.competenciaInicio || !parsed.data.competenciaFim) {
-        return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "ECD exige competenciaInicio e competenciaFim." } });
-      }
-      competenciaInicio = new Date(parsed.data.competenciaInicio);
-      competenciaFim = new Date(parsed.data.competenciaFim);
-      const result = await generateSpedEcd(ownerTenantId, competenciaInicio, competenciaFim);
-      content = result.content;
-      layoutVersion = result.layoutVersion;
-    } else if (parsed.data.documentType === "DEFIS") {
-      if (!parsed.data.calendarYear) {
-        return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "DEFIS exige calendarYear." } });
-      }
-      competenciaInicio = new Date(Date.UTC(parsed.data.calendarYear, 0, 1));
-      competenciaFim = new Date(Date.UTC(parsed.data.calendarYear, 11, 31, 23, 59, 59));
-      const result = await generateDefis(ownerTenantId, parsed.data.calendarYear);
-      content = result.content;
-      layoutVersion = result.layoutVersion;
-    } else if (parsed.data.documentType === "ECF") {
-      if (!parsed.data.calendarYear || !parsed.data.activityType) {
-        return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "ECF exige calendarYear e activityType (COMERCIO|SERVICO)." } });
-      }
-      competenciaInicio = new Date(Date.UTC(parsed.data.calendarYear, 0, 1));
-      competenciaFim = new Date(Date.UTC(parsed.data.calendarYear, 11, 31, 23, 59, 59));
-      const result = await generateEcf(ownerTenantId, parsed.data.calendarYear, parsed.data.activityType as EcfActivityType);
-      content = result.content;
-      layoutVersion = result.layoutVersion;
-    } else if (parsed.data.documentType === "EFD_REINF" || parsed.data.documentType === "DCTFWEB") {
-      if (!parsed.data.competencia) {
-        return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: `${parsed.data.documentType} exige competencia no formato "AAAA-MM".` } });
-      }
-      const [year, month] = parsed.data.competencia.split("-").map(Number);
-      competenciaInicio = new Date(Date.UTC(year, month - 1, 1));
-      competenciaFim = new Date(Date.UTC(year, month, 0, 23, 59, 59));
-      const result =
-        parsed.data.documentType === "EFD_REINF"
-          ? await generateEfdReinf(ownerTenantId, parsed.data.competencia)
-          : await generateDctfWeb(ownerTenantId, parsed.data.competencia);
-      content = result.content;
-      layoutVersion = result.layoutVersion;
-      // Ambos carregam campos de "código de receita" pendentes de confirmação do
-      // contador junto à tabela vigente da RFB (ver cabeçalho de
-      // ecf-reinf-dctfweb.service.ts) — nasce DRAFT, nunca GENERATED, até revisão humana.
-      status = "DRAFT";
-    } else {
-      // INFORME_RENDIMENTOS_SOCIO — documento interno, sem leiaute SPED/transmissão a
-      // órgão (ver comentário do enum OfficialTaxDocumentType), por isso não chama
-      // `resolveActiveLayoutVersion`.
-      if (!parsed.data.calendarYear || !parsed.data.partnerId) {
-        return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "INFORME_RENDIMENTOS_SOCIO exige calendarYear e partnerId." } });
-      }
-      competenciaInicio = new Date(Date.UTC(parsed.data.calendarYear, 0, 1));
-      competenciaFim = new Date(Date.UTC(parsed.data.calendarYear, 11, 31, 23, 59, 59));
-      const result = await generateInformeRendimentosSocio(ownerTenantId, parsed.data.partnerId, parsed.data.calendarYear);
-      content = result.content;
-      layoutVersion = "INTERNO — SEM LEIAUTE SPED (documento entregue ao sócio para sua própria DIRPF)";
+  if (parsed.data.documentType === "ECD") {
+    if (!parsed.data.competenciaInicio || !parsed.data.competenciaFim) {
+      return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "ECD exige competenciaInicio e competenciaFim." } });
     }
-
-    const fileName = `${parsed.data.documentType}-${competenciaInicio.toISOString().slice(0, 10)}-${competenciaFim.toISOString().slice(0, 10)}.txt`;
-    const { storageKey } = await putObjectDirect({
-      tenantId: ownerTenantId,
-      category: "official-tax-documents",
-      fileName,
-      mimeType: "text/plain",
-      body: content,
-    });
-
-    const document = await prisma.officialTaxDocument.create({
-      data: {
-        tenantId: ownerTenantId,
-        generatedByAccountingFirmTenantId,
-        documentType: parsed.data.documentType,
-        layoutVersion,
-        competenciaInicio,
-        competenciaFim,
-        fileUrl: storageKey,
-        status,
-      },
-    });
-
-    return res.status(201).json({ success: true, data: document, error: null });
-  } catch (err) {
-    if (err instanceof NoActiveLayoutVersionError) {
-      return res.status(422).json({ success: false, data: null, error: { code: "NO_ACTIVE_LAYOUT_VERSION", message: err.message } });
+    competenciaInicio = new Date(parsed.data.competenciaInicio);
+    competenciaFim = new Date(parsed.data.competenciaFim);
+  } else if (parsed.data.documentType === "DEFIS" || parsed.data.documentType === "ECF" || parsed.data.documentType === "INFORME_RENDIMENTOS_SOCIO") {
+    if (!parsed.data.calendarYear) {
+      return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: `${parsed.data.documentType} exige calendarYear.` } });
     }
-    if (err instanceof EcfNotApplicableError) {
-      return res.status(409).json({ success: false, data: null, error: { code: "ECF_NOT_APPLICABLE", message: err.message } });
+    if (parsed.data.documentType === "ECF" && !parsed.data.activityType) {
+      return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "ECF exige calendarYear e activityType (COMERCIO|SERVICO)." } });
     }
-    if (err instanceof NoPartnerPayoutsFoundError) {
-      return res.status(404).json({ success: false, data: null, error: { code: "NO_PARTNER_PAYOUTS_FOUND", message: err.message } });
+    if (parsed.data.documentType === "INFORME_RENDIMENTOS_SOCIO" && !parsed.data.partnerId) {
+      return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "INFORME_RENDIMENTOS_SOCIO exige calendarYear e partnerId." } });
     }
-    throw err;
+    competenciaInicio = new Date(Date.UTC(parsed.data.calendarYear, 0, 1));
+    competenciaFim = new Date(Date.UTC(parsed.data.calendarYear, 11, 31, 23, 59, 59));
+  } else {
+    // EFD_REINF | DCTFWEB
+    if (!parsed.data.competencia) {
+      return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: `${parsed.data.documentType} exige competencia no formato "AAAA-MM".` } });
+    }
+    const [year, month] = parsed.data.competencia.split("-").map(Number);
+    competenciaInicio = new Date(Date.UTC(year, month - 1, 1));
+    competenciaFim = new Date(Date.UTC(year, month, 0, 23, 59, 59));
   }
+
+  const document = await prisma.officialTaxDocument.create({
+    data: {
+      tenantId: ownerTenantId,
+      generatedByAccountingFirmTenantId,
+      documentType: parsed.data.documentType,
+      competenciaInicio,
+      competenciaFim,
+      status: "PENDING",
+    },
+  });
+
+  const jobData: AccountingDocumentGenerationJobData = {
+    documentId: document.id,
+    ownerTenantId,
+    documentType: parsed.data.documentType,
+    calendarYear: parsed.data.calendarYear,
+    competencia: parsed.data.competencia,
+    activityType: parsed.data.activityType,
+    partnerId: parsed.data.partnerId,
+    competenciaInicio: competenciaInicio.toISOString(),
+    competenciaFim: competenciaFim.toISOString(),
+  };
+  await accountingDocumentGenerationQueue.add("generate-official-tax-document", jobData, {
+    attempts: 1, // geração não é idempotente de forma segura para retry automático — falha vira status FAILED, usuário tenta de novo manualmente
+    removeOnComplete: true,
+  });
+
+  return res.status(202).json({ success: true, data: document, error: null });
 });
 
 /** URL assinada de download do arquivo gerado (reaproveita o mesmo presign de leitura do R2 usado em `storage.routes.ts`). */
@@ -668,6 +646,15 @@ accountingOfficeRouter.get("/official-tax-documents/:id/download", requireAuth, 
   }
   if (!allowed) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Você não tem acesso a este documento." } });
+  }
+  if (!document.fileUrl) {
+    // Geração ainda em andamento (PENDING/PROCESSING) ou falhou (FAILED) — nunca
+    // existiu um arquivo no R2 para gerar presign.
+    return res.status(409).json({
+      success: false,
+      data: null,
+      error: { code: "DOCUMENT_NOT_READY", message: `Documento ainda não está pronto para download (status atual: ${document.status}).` },
+    });
   }
   const { downloadUrl, expiresInSeconds } = await presignObjectDownload(document.tenantId, document.fileUrl);
   return res.json({ success: true, data: { downloadUrl, expiresInSeconds }, error: null });

@@ -48,6 +48,12 @@ function validationError(res: Response, details: unknown) {
 }
 
 class InsufficientBorrowedBalanceError extends Error {}
+// CORREÇÃO DE AUDITORIA (fa-liquor-ledger-return-no-sale-validation): o saleId
+// opcional de um lançamento manual antes só era checado quanto à EXISTÊNCIA no
+// tenant — nunca se a venda pertence ao mesmo cliente, nem se a quantidade
+// devolvida respeita o que foi efetivamente emprestado NAQUELA venda específica.
+class SaleContainerNotLentError extends Error {}
+class SaleReturnExceedsLentQuantityError extends Error {}
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -142,20 +148,44 @@ liquorLedgerRouter.get("/liquor-ledger/overdue", requireAuth, requireModule("LIQ
   if (!thresholdParsed.success) return validationError(res, thresholdParsed.error.flatten());
   const daysThreshold = thresholdParsed.data;
 
+  // CORREÇÃO DE AUDITORIA (fa-liquor-ledger-truncated-fifo): filtros opcionais de
+  // escopo — permitem ao operador restringir a consulta a um cliente/produto
+  // específico, reduzindo o volume lido muito abaixo do teto defensivo abaixo, sem
+  // depender de paginação (o algoritmo FIFO precisa do histórico cronológico
+  // completo DENTRO do escopo consultado para estar correto).
+  const scopeParsed = z.object({ clientId: z.string().uuid().optional(), productId: z.string().uuid().optional() }).safeParse({
+    clientId: typeof req.query.clientId === "string" ? req.query.clientId : undefined,
+    productId: typeof req.query.productId === "string" ? req.query.productId : undefined,
+  });
+  if (!scopeParsed.success) return validationError(res, scopeParsed.error.flatten());
+  const { clientId: scopeClientId, productId: scopeProductId } = scopeParsed.data;
+
+  const LEDGER_ROW_LIMIT = 50000;
   const entries = await prisma.returnableContainerLedger.findMany({
-    where: { tenantId },
+    where: { tenantId, ...(scopeClientId ? { clientId: scopeClientId } : {}), ...(scopeProductId ? { productId: scopeProductId } : {}) },
     orderBy: { createdAt: "asc" },
     include: { client: { select: { id: true, name: true, phone: true } } },
-    // CORREÇÃO DE AUDITORIA: relatório de atraso lia TODO o histórico de
-    // lançamentos do tenant sem nenhum teto/paginação — em um tenant antigo com
-    // muitos anos de movimentação de cascos isso cresce sem limite. O algoritmo
-    // FIFO precisa da ordem cronológica completa para ser correto, então o teto
-    // aqui é uma última camada de defesa (volume realista mesmo para uma adega
-    // de grande porte), não um filtro de negócio — se este teto for atingido, o
-    // relatório deve ser re-executado com um filtro de cliente/produto mais
-    // específico (não implementado nesta rodada).
-    take: 50000,
+    // CORREÇÃO DE AUDITORIA (fa-liquor-ledger-truncated-fifo): o teto abaixo NUNCA
+    // é tratado como um corte silencioso de relatório — o algoritmo FIFO depende da
+    // ordem cronológica COMPLETA do(s) par(es) (cliente, produto) consultados para
+    // calcular corretamente o saldo de cascos em aberto; um corte no meio da fila
+    // apresentaria um saldo incorreto (subestimado) como se fosse definitivo. Se o
+    // teto for atingido, a rota abaixo rejeita explicitamente o relatório (nunca
+    // retorna um resultado parcial disfarçado de completo) e orienta a refinar o
+    // filtro de cliente/produto.
+    take: LEDGER_ROW_LIMIT,
   });
+
+  if (entries.length >= LEDGER_ROW_LIMIT) {
+    return res.status(422).json({
+      success: false,
+      data: null,
+      error: {
+        code: "LEDGER_HISTORY_TRUNCATED",
+        message: `O histórico de lançamentos de cascos (${scopeClientId || scopeProductId ? "mesmo já filtrado" : "sem filtro"}) ultrapassa ${LEDGER_ROW_LIMIT} registros. O algoritmo FIFO exige o histórico cronológico completo do(s) par(es) cliente/produto consultado(s) — este relatório nunca apresenta um resultado truncado como se fosse completo. Refine a consulta informando clientId e/ou productId (query string) para reduzir o volume e tente novamente.`,
+      },
+    });
+  }
 
   type Group = {
     clientId: string;
@@ -242,6 +272,11 @@ const entrySchema = z.object({
   direction: z.enum(["BORROWED", "RETURNED"]),
   quantity: z.number().int().positive(),
   saleId: z.string().uuid().optional().nullable(),
+  // CORREÇÃO DE AUDITORIA (fa-liquor-ledger-return-no-sale-validation): exigido
+  // sempre que `saleId` não for informado — sem venda vinculada, este é um ajuste
+  // administrativo puro (correção de erro, casco reencontrado etc.) e precisa de
+  // uma justificativa auditável, nunca um número "solto" sem explicação.
+  reasonCode: z.string().trim().min(3).max(200).optional(),
 });
 
 liquorLedgerRouter.post("/liquor-ledger/entries", requireAuth, requireModule("LIQUOR_LEDGER"), async (req: Request, res: Response) => {
@@ -251,7 +286,18 @@ liquorLedgerRouter.post("/liquor-ledger/entries", requireAuth, requireModule("LI
   }
   const parsed = entrySchema.safeParse(req.body);
   if (!parsed.success) return validationError(res, parsed.error.flatten());
-  const { clientId, productId, direction, quantity, saleId } = parsed.data;
+  const { clientId, productId, direction, quantity, saleId, reasonCode } = parsed.data;
+
+  // CORREÇÃO DE AUDITORIA (fa-liquor-ledger-return-no-sale-validation): sem venda
+  // vinculada, não há como conferir de onde veio a dívida de casco — exige
+  // justificativa explícita para criar trilha de auditoria do ajuste.
+  if (!saleId && !reasonCode) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: { code: "REASON_REQUIRED", message: "Lançamento sem venda vinculada (saleId) é um ajuste administrativo e exige reasonCode explicando o motivo." },
+    });
+  }
 
   const client = await prisma.client.findFirst({ where: { id: clientId, tenantId }, select: { id: true } });
   if (!client) return notFound(res, "Cliente não encontrado.");
@@ -270,8 +316,18 @@ liquorLedgerRouter.post("/liquor-ledger/entries", requireAuth, requireModule("LI
   }
 
   if (saleId) {
-    const sale = await prisma.sale.findFirst({ where: { id: saleId, tenantId }, select: { id: true } });
+    const sale = await prisma.sale.findFirst({ where: { id: saleId, tenantId }, select: { id: true, clientId: true } });
     if (!sale) return notFound(res, "Venda informada não encontrada.");
+    // CORREÇÃO DE AUDITORIA (fa-liquor-ledger-return-no-sale-validation): a venda
+    // vinculada precisa pertencer ao MESMO cliente do lançamento — sem isso seria
+    // possível "quitar" o casco de um cliente citando a venda de outro.
+    if (sale.clientId !== clientId) {
+      return res.status(409).json({
+        success: false,
+        data: null,
+        error: { code: "SALE_CLIENT_MISMATCH", message: "A venda informada pertence a outro cliente — não pode ser usada para justificar este lançamento." },
+      });
+    }
   }
 
   try {
@@ -299,8 +355,29 @@ liquorLedgerRouter.post("/liquor-ledger/entries", requireAuth, requireModule("LI
             );
           }
         }
+        // CORREÇÃO DE AUDITORIA (fa-liquor-ledger-return-no-sale-validation): quando
+        // a devolução cita uma venda específica, a quantidade devolvida não pode
+        // exceder o que foi emprestado NAQUELA venda (nunca apenas o saldo agregado
+        // do cliente/produto, que pode incluir cascos de OUTRAS vendas/lançamentos).
+        if (direction === "RETURNED" && saleId) {
+          const saleEntries = await tx.returnableContainerLedger.findMany({
+            where: { tenantId, saleId, productId },
+            select: { direction: true, quantity: true },
+          });
+          const lentOnSale = saleEntries.reduce((sum, e) => (e.direction === "BORROWED" ? sum + e.quantity : sum), 0);
+          const alreadyReturnedOnSale = saleEntries.reduce((sum, e) => (e.direction === "RETURNED" ? sum + e.quantity : sum), 0);
+          const remainingOnSale = lentOnSale - alreadyReturnedOnSale;
+          if (lentOnSale === 0) {
+            throw new SaleContainerNotLentError(`A venda informada não tem nenhum casco deste produto emprestado — não pode ser usada para justificar a devolução.`);
+          }
+          if (quantity > remainingOnSale) {
+            throw new SaleReturnExceedsLentQuantityError(
+              `Quantidade a devolver (${quantity}) excede o que foi emprestado nesta venda específica (${remainingOnSale} ainda em aberto para esta venda).`,
+            );
+          }
+        }
         return tx.returnableContainerLedger.create({
-          data: { tenantId, clientId, productId, direction, quantity, saleId: saleId ?? null },
+          data: { tenantId, clientId, productId, direction, quantity, saleId: saleId ?? null, reasonCode: reasonCode ?? null, createdByUserId: userId },
         });
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -309,6 +386,12 @@ liquorLedgerRouter.post("/liquor-ledger/entries", requireAuth, requireModule("LI
   } catch (err) {
     if (err instanceof InsufficientBorrowedBalanceError) {
       return res.status(409).json({ success: false, data: null, error: { code: "INSUFFICIENT_BORROWED_BALANCE", message: err.message } });
+    }
+    if (err instanceof SaleContainerNotLentError) {
+      return res.status(409).json({ success: false, data: null, error: { code: "SALE_CONTAINER_NOT_LENT", message: err.message } });
+    }
+    if (err instanceof SaleReturnExceedsLentQuantityError) {
+      return res.status(409).json({ success: false, data: null, error: { code: "SALE_RETURN_EXCEEDS_LENT_QUANTITY", message: err.message } });
     }
     throw err;
   }

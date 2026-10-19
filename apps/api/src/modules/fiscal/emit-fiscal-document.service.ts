@@ -81,6 +81,36 @@ function onlyDigits(value: string): string {
   return value.replace(/\D/g, "");
 }
 
+// CORREÇÃO DE AUDITORIA (fa-fiscal-decimal-to-number-precision): `Number(decimal)`
+// converte um `Prisma.Decimal` para IEEE-754 float ANTES de montar o payload da
+// Focus NFe — um valor fiscal como "19.999999999999996" (erro de ponto flutuante
+// real, não hipotético) chegaria à SEFAZ com mais casas decimais do que a escala
+// fiscal (2 casas) permite, arriscando divergência entre a soma dos itens e a soma
+// dos pagamentos declarados na mesma nota. `Prisma.Decimal.toFixed(2)` nunca passa
+// por IEEE-754 (decimal.js opera em base 10 arbitrária) e já devolve a STRING no
+// formato exato que a Focus NFe espera para campos monetários — usado em TODO
+// campo `valor_*`/`aliquota` deste arquivo, nunca mais `Number(decimal)` cru.
+function toFiscalAmount(value: Prisma.Decimal | number): string {
+  const decimal = value instanceof Prisma.Decimal ? value : new Prisma.Decimal(value);
+  return decimal.toFixed(2);
+}
+
+// CORREÇÃO DE AUDITORIA (fa-fiscal-decimal-to-number-precision): valida que a soma
+// dos itens bate com a soma dos pagamentos declarados (mesma escala de 2 casas
+// decimais) ANTES de transmitir a nota à Focus NFe/SEFAZ — uma divergência aqui
+// (ex.: bug de cálculo upstream, split de pagamento incompleto) é um erro de
+// CADASTRO/CÁLCULO, nunca de rede/SEFAZ, e bloqueia a emissão da mesma forma que
+// NCM/UF ausentes acima, em vez de transmitir um documento fiscal com valores
+// internamente inconsistentes (risco real de autuação).
+function assertItemsMatchPayments(itemsTotal: Prisma.Decimal, paymentsTotal: Prisma.Decimal, context: string): void {
+  const diff = itemsTotal.minus(paymentsTotal).abs();
+  if (diff.greaterThan("0.01")) {
+    throw new FiscalDataValidationError(
+      `${context}: a soma dos itens (R$ ${itemsTotal.toFixed(2)}) não bate com a soma dos pagamentos declarados (R$ ${paymentsTotal.toFixed(2)}) — divergência de R$ ${diff.toFixed(2)}. Corrija o fechamento da venda antes de emitir o documento fiscal.`,
+    );
+  }
+}
+
 /**
  * Resolve CFOP/CST-CSOSN aplicável ao item, reaproveitando a mesma TaxRule central
  * (Capítulo 21.6) consultada por tax-engine.service.ts, com a mesma precedência
@@ -160,8 +190,22 @@ export async function emitFiscalDocument(
     // segue um contrato de payload diferente (destinatário PJ obrigatório, duplicatas,
     // transporte) ainda não portado para este worker — documentado honestamente como
     // gap de escopo, nunca silenciosamente tratado como NFC-e.
+    //
+    // GAP DE ESCOPO CONHECIDO (fa-fiscal-nfe55-not-implemented): NF-e modelo 55 NÃO
+    // é suportada por este serviço. Este bloco é um bloqueio HARD e INTENCIONAL —
+    // nunca um "funciona parcialmente". Qualquer FiscalDocument do tipo NFE_SAIDA
+    // (ou outro tipo fora de NFCE/NFSE) falha aqui, de forma alta e visível (log
+    // .error + exceção), ANTES de qualquer tentativa de montar payload/transmitir à
+    // Focus NFe. Implementar NF-e 55 completa (payload com duplicatas, transporte,
+    // destinatário PJ obrigatório, XML de contingência) é um projeto à parte que
+    // requer testes de homologação reais contra a SEFAZ — não deve ser implementado
+    // como correção pontual de auditoria.
+    createModuleLogger("emit-fiscal-document").error(
+      { fiscalDocumentId: fiscalDocument.id, fiscalDocumentType: fiscalDocument.type },
+      "BLOQUEIO INTENCIONAL: emissão de NF-e modelo 55 (ou tipo de documento fora de NFCE/NFSE) não é suportada por este worker — gap de escopo conhecido e documentado (fa-fiscal-nfe55-not-implemented), nunca tratar parcialmente como NFC-e/NFS-e.",
+    );
     throw new Error(
-      `Emissão automática via Focus NFe implementada apenas para NFC-e/NFS-e nesta fase — FiscalDocument ${fiscalDocument.id} é do tipo ${fiscalDocument.type}.`,
+      `Emissão automática via Focus NFe implementada apenas para NFC-e/NFS-e nesta fase — FiscalDocument ${fiscalDocument.id} é do tipo ${fiscalDocument.type}. NF-e modelo 55 não é suportada (gap de escopo conhecido, ver fa-fiscal-nfe55-not-implemented).`,
     );
   }
 
@@ -242,9 +286,9 @@ export async function emitFiscalDocument(
         quantidade_comercial: Number(item.quantity),
         quantidade_tributavel: Number(item.quantity),
         cfop,
-        valor_unitario_comercial: Number(item.unitPrice),
-        valor_unitario_tributavel: Number(item.unitPrice),
-        valor_bruto: Number(item.totalPrice),
+        valor_unitario_comercial: toFiscalAmount(item.unitPrice),
+        valor_unitario_tributavel: toFiscalAmount(item.unitPrice),
+        valor_bruto: toFiscalAmount(item.totalPrice),
         unidade_comercial: "UN",
         unidade_tributavel: "UN",
         icms_origem: product.icmsOrigin, // tabela SEFAZ "Origem da Mercadoria" (Convênio ICMS 38/2013), configurável por produto em Cadastros > Produtos
@@ -265,8 +309,17 @@ export async function emitFiscalDocument(
   // SEFAZ, é devolução ao cliente, não faz parte da receita da venda).
   const formasPagamento = sale.payments.map((payment) => ({
     forma_pagamento: PAYMENT_METHOD_TO_SEFAZ_CODE[payment.method] ?? "99",
-    valor_pagamento: Number(payment.amount),
+    valor_pagamento: toFiscalAmount(payment.amount),
   }));
+
+  // CORREÇÃO DE AUDITORIA (fa-fiscal-decimal-to-number-precision): valida ANTES de
+  // transmitir que a soma dos itens bate com a soma dos pagamentos — nunca confia
+  // apenas em `sale.payments` ter sido preenchido corretamente a montante.
+  const paymentsTotal =
+    sale.payments.length > 0
+      ? sale.payments.reduce((acc, payment) => acc.plus(payment.amount), new Prisma.Decimal(0))
+      : totalPayment; // sem split de pagamento: o fallback abaixo usa o próprio totalPayment como "pagamento único"
+  assertItemsMatchPayments(totalPayment, paymentsTotal, `Venda ${sale.id} (NFC-e)`);
   // CORREÇÃO DE AUDITORIA (mega-audit rodada 5): `local_destino` (tabela SEFAZ
   // "Local de destino da operação") estava fixo em "1" (operação interna) para
   // TODA venda — inconsistente com o CFOP já resolvido por item acima (que
@@ -286,7 +339,10 @@ export async function emitFiscalDocument(
     local_destino: localDestino,
     natureza_operacao: "VENDA AO CONSUMIDOR",
     items,
-    formas_pagamento: formasPagamento.length > 0 ? formasPagamento : [{ forma_pagamento: PAYMENT_METHOD_TO_SEFAZ_CODE[sale.paymentMethod] ?? "99", valor_pagamento: Number(totalPayment) }],
+    formas_pagamento:
+      formasPagamento.length > 0
+        ? formasPagamento
+        : [{ forma_pagamento: PAYMENT_METHOD_TO_SEFAZ_CODE[sale.paymentMethod] ?? "99", valor_pagamento: toFiscalAmount(totalPayment) }],
   };
 
   if (sale.client?.document) {
@@ -461,7 +517,7 @@ async function emitNfseDocument(
   // valor bruto dos serviços — nunca recalculada aqui a partir de uma TaxRule
   // nova, para que o valor transmitido à prefeitura seja idêntico ao que já foi
   // persistido/auditado no fechamento da venda (fonte única da verdade).
-  const aliquotaIss = fiscalDocument.issAmount && valorServicos.greaterThan(0) ? Number(fiscalDocument.issAmount.div(valorServicos).mul(100)) : 0;
+  const aliquotaIss = fiscalDocument.issAmount && valorServicos.greaterThan(0) ? Number(fiscalDocument.issAmount.div(valorServicos).mul(100).toFixed(2)) : 0;
 
   const payload: Record<string, unknown> = {
     data_emissao: new Date().toISOString(),
@@ -469,7 +525,7 @@ async function emitNfseDocument(
     servico: {
       item_lista_servico: itemListaServico,
       discriminacao: descricaoServico,
-      valor_servicos: Number(valorServicos),
+      valor_servicos: toFiscalAmount(valorServicos),
       aliquota: aliquotaIss,
       iss_retido: fiscalDocument.issRetidoNaFonte,
     },

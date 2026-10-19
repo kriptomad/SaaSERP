@@ -13,8 +13,11 @@ import { requireAuth } from "../../middlewares/auth.middleware";
 import { createModuleLogger } from "../../lib/logger";
 import {
   closeSaleAndEmitFiscalDocument,
+  assertValidSaleQuantity,
+  InvalidSaleQuantityError,
   SerialNotFoundError,
   SerialNotReadyForSaleError,
+  SerialAlreadyClaimedError,
   CashRegisterNotFoundError,
   VariantRequiredError,
   VariantNotFoundError,
@@ -171,6 +174,30 @@ salesRouter.post("/sales", requireAuth, async (req: Request, res: Response) => {
     }
   }
 
+  // CORREÇÃO DE AUDITORIA (fa-sale-quantity-fraction-unvalidated): validação prévia,
+  // antes de abrir a transação de fechamento — rejeita cedo um carrinho com
+  // quantidade fracionada/escala incompatível, poupando o trabalho de toda a
+  // orquestração fiscal/estoque só para falhar no primeiro item problemático. A
+  // validação definitiva (que não pode ser contornada por um snapshot de produto
+  // desatualizado) é sempre a revalidação dentro da transação, em close-sale.service.ts.
+  const quantityCheckProducts = await prisma.product.findMany({
+    where: { id: { in: [...new Set(input.items.map((item) => item.productId))] }, tenantId },
+    select: { id: true, name: true, saleUnit: true, isWeighted: true, trackingType: true },
+  });
+  const quantityCheckProductById = new Map(quantityCheckProducts.map((p) => [p.id, p]));
+  for (const item of input.items) {
+    const product = quantityCheckProductById.get(item.productId);
+    if (!product) continue; // produto inexistente é tratado depois, dentro da transação (findFirstOrThrow).
+    try {
+      assertValidSaleQuantity(product, item.quantity);
+    } catch (error) {
+      if (error instanceof InvalidSaleQuantityError) {
+        return res.status(400).json({ success: false, data: null, error: { code: "INVALID_SALE_QUANTITY", message: error.message } });
+      }
+      throw error;
+    }
+  }
+
   try {
     const result = await closeSaleAndEmitFiscalDocument(prisma, {
       tenantId,
@@ -240,6 +267,8 @@ function resolveSaleCloseError(err: unknown): { status: number; code: string; me
   if (err instanceof CashRegisterNotFoundError) return { status: 404, code: "CASH_REGISTER_NOT_FOUND", message: err.message };
   if (err instanceof SerialNotFoundError) return { status: 404, code: "SERIAL_NOT_FOUND", message: err.message };
   if (err instanceof SerialNotReadyForSaleError) return { status: 409, code: "SERIAL_NOT_READY", message: err.message };
+  if (err instanceof SerialAlreadyClaimedError) return { status: 409, code: "SERIAL_ALREADY_CLAIMED", message: err.message };
+  if (err instanceof InvalidSaleQuantityError) return { status: 400, code: "INVALID_SALE_QUANTITY", message: err.message };
   if (err instanceof VariantRequiredError) return { status: 400, code: "VARIANT_REQUIRED", message: err.message };
   if (err instanceof VariantNotFoundError) return { status: 404, code: "VARIANT_NOT_FOUND", message: err.message };
   if (err instanceof InsufficientVariantStockError) return { status: 409, code: "INSUFFICIENT_VARIANT_STOCK", message: err.message };

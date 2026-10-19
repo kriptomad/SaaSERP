@@ -260,6 +260,7 @@ model Tenant {
   technicianCommissionRules    TechnicianCommissionRule[] // Capítulo 4.2 — % de comissão por técnico (ou regra padrão do tenant)
   reportDefinitions            ReportDefinition[]
   scheduledReports             ScheduledReport[]
+  reportExportJobs             ReportExportJob[] // fa-perf-report-export-inline
   dashboardLayouts             DashboardLayout[]
   // Filitech Pessoal (Capítulo 22) — populado apenas quando tenantType = PERSONAL.
   personalAccounts             PersonalAccount[]
@@ -496,6 +497,15 @@ model Subscription {
   // usado. Nunca uma fonte de verdade duradoura — esvaziado junto com a Subscription
   // quando o checkout é confirmado ou expira.
   pendingCouponId              String?
+  // CORREÇÃO DE AUDITORIA (fa-billing-outoforder-active-reactivation): timestamp do
+  // evento financeiro (Stripe `event.created`/equivalente Asaas) mais recente já
+  // aplicado a esta assinatura — nunca o `createdAt` de quando NÓS recebemos o
+  // webhook (que pode chegar fora de ordem por retry/fila do provedor). Usado para
+  // tornar as transições de status MONOTÔNICAS no tempo do evento: um
+  // `customer.subscription.updated` com status "active" que chega DEPOIS (no
+  // relógio do provedor) de um `charge.refunded`/`charge.dispute.created" já
+  // processado não pode reativar o tenant só porque chegou depois na nossa fila.
+  lastFinancialEventAt         DateTime?
   createdAt                    DateTime           @default(now())
   updatedAt                    DateTime           @updatedAt
 
@@ -566,14 +576,39 @@ model LicenseActivation {
   @@map("license_activations")
 }
 
+// CORREÇÃO DE AUDITORIA (fa-billing-webhook-idempotency-race): o dedup anterior
+// tratava `BillingEvent.create()` como a própria prova de conclusão — a reentrega
+// concorrente do MESMO evento (normal em Stripe/Asaas) podia receber 200
+// "duplicate" enquanto a primeira requisição ainda processava e, se esta
+// primeira falhasse depois, `releaseBillingEvent` apagava a linha e o provedor
+// NUNCA mais reentregava aquele evento (ele já tinha recebido 200 da segunda
+// requisição). Modelado agora como uma máquina de estados explícita com lease:
+// PROCESSING (reivindicado, com prazo de expiração da lease) → SUCCEEDED (só
+// depois que a transação de negócio correspondente efetivamente commitou) ou
+// FAILED (liberado para nova tentativa). Reentregas que chegam enquanto o
+// estado é PROCESSING e a lease ainda não expirou recebem um erro não-2xx (o
+// provedor reenvia depois), nunca um 200 "duplicate" prematuro.
+enum BillingEventStatus {
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
 model BillingEvent {
-  id               String   @id @default(uuid())
+  id               String             @id @default(uuid())
   subscriptionId   String
   provider         String
   externalEventKey String
   type             String
   payload          Json
-  createdAt        DateTime @default(now())
+  status           BillingEventStatus @default(PROCESSING)
+  // Prazo máximo esperado para concluir o processamento deste evento — se o
+  // processo morrer/travar depois de reivindicar o evento mas antes de marcá-lo
+  // SUCCEEDED/FAILED, uma lease expirada permite que uma reentrega futura
+  // reivindique a linha de novo em vez de ficar PROCESSING para sempre.
+  leaseExpiresAt   DateTime
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
 
   subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
 
@@ -656,6 +691,7 @@ model User {
   // usado para gerar os horários livres da Agenda Online pública.
   workingHours                  ProfessionalWorkingHours[]   @relation("ProfessionalWorkingHoursProfessional")
   reportDefinitionsCreated      ReportDefinition[]
+  reportExportJobsRequested     ReportExportJob[] // fa-perf-report-export-inline
   dashboardLayout               DashboardLayout?
   // Catálogo fiscal global (Capítulo 21.15/21.16) — só populado em SUPER_ADMIN do painel do dono.
   ibsCbsRegimeElectionsSigned   TenantIbsCbsRegimeElection[]
@@ -1358,6 +1394,13 @@ model ReturnableContainerLedger {
   direction ContainerLedgerDirection
   quantity  Int
   saleId    String?
+  // CORREÇÃO DE AUDITORIA (fa-liquor-ledger-return-no-sale-validation): lançamento
+  // manual sem `saleId` (ajuste administrativo — ex.: casco encontrado depois de
+  // perdido, correção de erro de digitação anterior) agora exige justificativa
+  // explícita e registra quem autorizou, criando trilha de auditoria para um
+  // movimento que, por definição, não está vinculado a nenhuma venda conferível.
+  reasonCode      String?
+  createdByUserId String?
   createdAt DateTime                 @default(now())
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -3375,6 +3418,11 @@ model SupportTicket {
 
   @@index([tenantId, status])
   @@index([assignedToPlatformAdminUserId, status])
+  // CORREÇÃO DE AUDITORIA (fa-perf-support-tickets-no-pagination): a listagem
+  // paginada filtra por tenantId (isolamento automático) + status opcional,
+  // ordenando por createdAt desc — índice composto cobre esse padrão de acesso
+  // sem precisar de um sort em memória separado do filtro.
+  @@index([tenantId, status, createdAt])
   @@map("support_tickets")
 }
 
@@ -3689,6 +3737,7 @@ model ReportDefinition {
   tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   createdBy        User              @relation(fields: [createdByUserId], references: [id])
   scheduledReports ScheduledReport[]
+  exportJobs       ReportExportJob[]
 
   @@index([tenantId, isPinnedToDashboard])
   @@map("report_definitions")
@@ -3711,6 +3760,39 @@ model ScheduledReport {
   @@map("scheduled_reports")
 }
 
+/// fa-perf-report-export-inline — rastreamento do job assíncrono de exportação
+/// PDF/XLSX sob demanda (`GET /report-definitions/:id/export`), mesmo padrão de
+/// `TenantDataExportJob` (Capítulo 18.4): estado persistido no próprio registro
+/// (QUEUED -> GENERATING -> COMPLETED/FAILED), arquivo final no R2
+/// (`resultStorageKey`), nunca gerado síncrono dentro do processo HTTP.
+model ReportExportJob {
+  id                 String            @id @default(uuid())
+  tenantId           String
+  reportDefinitionId String
+  requestedByUserId  String
+  format             String // "PDF" | "XLSX"
+  status             ReportExportStatus @default(QUEUED)
+  rowCount           Int? // preenchido quando COMPLETED — útil para auditar o limite de linhas
+  resultStorageKey   String? // arquivo final no R2, preenchido quando COMPLETED
+  failureReason      String?
+  createdAt          DateTime          @default(now())
+  completedAt        DateTime?
+
+  tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reportDefinition ReportDefinition @relation(fields: [reportDefinitionId], references: [id], onDelete: Cascade)
+  requestedBy      User             @relation(fields: [requestedByUserId], references: [id])
+
+  @@index([tenantId, status])
+  @@map("report_export_jobs")
+}
+
+enum ReportExportStatus {
+  QUEUED
+  GENERATING
+  COMPLETED
+  FAILED
+}
+
 model DashboardLayout {
   id        String   @id @default(uuid())
   tenantId  String
@@ -3724,6 +3806,7 @@ model DashboardLayout {
   @@index([tenantId])
   @@map("dashboard_layouts")
 }
+
 
 enum DataImportStatus {
   UPLOADED
@@ -3993,8 +4076,11 @@ enum OfficialTaxDocumentType {
 }
 
 enum OfficialTaxDocumentStatus {
+  PENDING // job de geração enfileirado no BullMQ, ainda não iniciado pelo worker (fa-perf-accounting-doc-generation-inline)
+  PROCESSING // worker gerando o layout (SPED/ECF/etc.) e fazendo upload para o R2
   DRAFT // gerado localmente, ainda não assinado/transmitido
   GENERATED // arquivo final pronto para assinatura digital e transmissão
+  FAILED // geração falhou no worker — `failureReason` preenchido
   TRANSMITTED // recibo de transmissão (protocolo) já emitido pelo órgão competente
   REJECTED // órgão competente rejeitou — `rejectionReason` preenchido
 }
@@ -4125,19 +4211,26 @@ model OfficialTaxDocument {
   tenantId                          String // tenant-cliente dono do documento (sempre, mesmo no Caminho B sem escritório contratado)
   generatedByAccountingFirmTenantId String? // nulo no Caminho B (autogerado pelo próprio lojista)
   documentType                      OfficialTaxDocumentType
-  layoutVersion                     String // ex.: "Leiaute 12" (ECF, ano-calendário 2025) — lido do catálogo versionado, nunca hardcoded
+  layoutVersion                     String? // ex.: "Leiaute 12" (ECF, ano-calendário 2025) — lido do catálogo versionado; nulo enquanto status = PENDING/PROCESSING/FAILED (ainda não resolvido pelo worker)
   competenciaInicio                 DateTime
   competenciaFim                    DateTime
-  fileUrl                           String // objeto no Cloudflare R2 (Capítulo 3.3)
+  fileUrl                           String? // objeto no Cloudflare R2 (Capítulo 3.3) — nulo até o worker BullMQ terminar a geração (fa-perf-accounting-doc-generation-inline)
   transmissionProtocol              String? // recibo de transmissão do SPED/e-CAC, preenchido apenas quando status = TRANSMITTED
   rejectionReason                   String?
-  status                            OfficialTaxDocumentStatus @default(DRAFT)
+  failureReason                     String? // preenchido pelo worker quando status = FAILED (ex.: NoActiveLayoutVersionError/EcfNotApplicableError)
+  status                            OfficialTaxDocumentStatus @default(PENDING)
   generatedAt                       DateTime                  @default(now())
 
   tenant          Tenant  @relation("OfficialTaxDocumentsOfTenant", fields: [tenantId], references: [id], onDelete: Cascade)
   generatedByFirm Tenant? @relation("OfficialTaxDocumentsGeneratedByFirm", fields: [generatedByAccountingFirmTenantId], references: [id])
 
   @@index([tenantId, documentType, competenciaInicio])
+  // CORREÇÃO DE AUDITORIA (fa-perf-accounting-docs-no-pagination): a listagem
+  // paginada ordena por `generatedAt desc` filtrando por tenantId (+ documentType
+  // opcional) — índice composto cobre o padrão de acesso real da rota sem precisar
+  // de sort em memória.
+  @@index([tenantId, generatedAt])
+  @@index([tenantId, documentType, generatedAt])
   @@map("official_tax_documents")
 }
 

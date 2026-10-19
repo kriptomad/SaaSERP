@@ -76,6 +76,14 @@ export const STORAGE_CATEGORIES = {
   // lojista junto do relato do problema ou de uma resposta — mesmo padrão de upload
   // direto do navegador usado em work-order-photos/client-record-photos.
   "support-ticket-attachments": { allowedMimeTypes: ["image/jpeg", "image/png", "image/webp", "application/pdf"], maxBytes: 10 * 1024 * 1024, publicReadable: false },
+  // fa-perf-report-export-inline — PDF/XLSX gerado sob demanda por
+  // `workers/report-export-generation.worker.ts` a partir de um `ReportDefinition`,
+  // upload direto pelo backend (mesmo padrão de "official-tax-documents").
+  "report-exports": {
+    allowedMimeTypes: ["application/pdf", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+    maxBytes: 25 * 1024 * 1024,
+    publicReadable: false,
+  },
 } as const;
 export type StorageCategory = keyof typeof STORAGE_CATEGORIES;
 

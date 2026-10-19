@@ -35,6 +35,12 @@ import { resolveTaxReformPhase } from "../fiscal/tax-reform-phase.service";
 export class WorkOrderNotFoundError extends Error {}
 export class WorkOrderNotReadyForDeliveryError extends Error {}
 export class WorkOrderHasNoBillableItemsError extends Error {}
+// CORREÇÃO DE AUDITORIA (fa-workorder-checklist-no-schema): a transição para
+// entrega/faturamento só checava `status === "READY"`, nunca se o checklist de
+// entrega (etapa DELIVERY, com assinatura do cliente) de fato existia — uma O.S.
+// podia ser "entregue e faturada" sem nenhum registro de que o cliente conferiu/
+// aceitou o equipamento na retirada.
+export class WorkOrderChecklistIncompleteError extends Error {}
 
 export interface BillAndDeliverWorkOrderInput {
   tenantId: string;
@@ -57,6 +63,24 @@ export async function billAndDeliverWorkOrder(prisma: TenantScopedPrismaClient, 
       }
       if (workOrder.items.length === 0) {
         throw new WorkOrderHasNoBillableItemsError("Não é possível faturar uma O.S. sem nenhum item de peça ou mão de obra lançado.");
+      }
+
+      // CORREÇÃO DE AUDITORIA (fa-workorder-checklist-no-schema): o status READY
+      // por si só não prova que o checklist de entrega foi preenchido — exige a
+      // existência de um `OsChecklist` da etapa DELIVERY, com assinatura do
+      // cliente, ANTES de permitir o efeito irreversível desta função (Sale +
+      // Payment + FiscalDocument + status DELIVERED). O schema por etapa
+      // (work-orders.routes.ts) já garante que, uma vez criado, esse checklist tem
+      // todos os campos obrigatórios preenchidos — aqui só confirmamos que ele
+      // existe para esta O.S.
+      const deliveryChecklist = await tx.osChecklist.findFirst({
+        where: { tenantId: input.tenantId, workOrderId: workOrder.id, stage: "DELIVERY" },
+        orderBy: { createdAt: "desc" },
+      });
+      if (!deliveryChecklist || !deliveryChecklist.clientSignatureUrl) {
+        throw new WorkOrderChecklistIncompleteError(
+          "Não é possível entregar/faturar esta O.S. sem o checklist de entrega (etapa DELIVERY) preenchido e assinado pelo cliente.",
+        );
       }
 
       const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: input.tenantId }, select: { taxRegime: true, uf: true } });

@@ -111,3 +111,25 @@ export function requireSuperAdmin(req: Request, res: Response, next: NextFunctio
   }
   next();
 }
+
+// GAP DE AUDITORIA FECHADO (fa-superadmin-granular-role-authorization): várias
+// rotas do painel só exigiam `requirePlatformAdminAuth` (qualquer papel logado),
+// sem diferenciar SUPER_ADMIN/SUPPORT_AGENT/FINANCE_ANALYST — concedendo acesso
+// amplo demais a dados globais sensíveis (sessões de impersonation, audit log
+// completo, credenciais/integrações, API keys/webhooks) a papéis que deveriam
+// ter visão restrita por capacidade (FINANCE_ANALYST: só billing; SUPPORT_AGENT:
+// só chamados/dados mínimos de tenant). `requireRole` aplica essa checagem
+// granular por rota, sempre DEPOIS de `requirePlatformAdminAuth`.
+export function requireRole(...allowedRoles: Array<"SUPER_ADMIN" | "SUPPORT_AGENT" | "FINANCE_ANALYST">) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const role = req.platformAdminSession?.role;
+    if (!role || !allowedRoles.includes(role)) {
+      return res.status(403).json({
+        success: false,
+        data: null,
+        error: { code: "FORBIDDEN", message: `Esta ação exige um dos papéis: ${allowedRoles.join(", ")}.` },
+      });
+    }
+    next();
+  };
+}

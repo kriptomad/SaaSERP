@@ -57,30 +57,39 @@ export async function issueCorrectionLetter(
     );
   }
 
-  const lastEvent = await prisma.fiscalDocumentEvent.findFirst({
-    where: { fiscalDocumentId: fiscalDocument.id, eventType: "CORRECTION_LETTER" },
-    orderBy: { sequenceNumber: "desc" },
-  });
+  // fa-fiscal-cancel-cce-double-submit: igual ao cancelamento (cancel-fiscal-document
+  // .service.ts), duas requisições concorrentes de CC-e liam o mesmo `lastEvent` e
+  // podiam calcular o mesmo `nextSequence` — ou pior, uma 20ª e 21ª simultâneas
+  // escapavam do limite de 20 porque a checagem lia um `lastEvent` desatualizado. Lock
+  // consultivo por fiscalDocumentId serializa a leitura+escrita inteira.
+  const event = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${fiscalDocument.id} || ':correction_letter'))`;
 
-  // A SEFAZ aceita até 20 CC-e por nota, sendo que apenas a última é válida — este
-  // limite é verificado aqui (nunca silenciosamente ignorado) porque uma 21ª
-  // tentativa seria rejeitada pela própria SEFAZ sem nenhum ganho real para o lojista.
-  const nextSequence = (lastEvent?.sequenceNumber ?? 0) + 1;
-  if (nextSequence > 20) {
-    throw new CorrectionLetterNotApplicableToDocumentTypeError(
-      "Limite de 20 Cartas de Correção por nota já atingido (regra nacional da SEFAZ). Apenas a última CC-e emitida continua válida.",
-    );
-  }
+    const lastEvent = await tx.fiscalDocumentEvent.findFirst({
+      where: { fiscalDocumentId: fiscalDocument.id, eventType: "CORRECTION_LETTER" },
+      orderBy: { sequenceNumber: "desc" },
+    });
 
-  const event = await prisma.fiscalDocumentEvent.create({
-    data: {
-      tenantId: params.tenantId,
-      fiscalDocumentId: fiscalDocument.id,
-      eventType: "CORRECTION_LETTER",
-      sequenceNumber: nextSequence,
-      justification: text,
-      status: "PENDING",
-    },
+    // A SEFAZ aceita até 20 CC-e por nota, sendo que apenas a última é válida — este
+    // limite é verificado aqui (nunca silenciosamente ignorado) porque uma 21ª
+    // tentativa seria rejeitada pela própria SEFAZ sem nenhum ganho real para o lojista.
+    const nextSequence = (lastEvent?.sequenceNumber ?? 0) + 1;
+    if (nextSequence > 20) {
+      throw new CorrectionLetterNotApplicableToDocumentTypeError(
+        "Limite de 20 Cartas de Correção por nota já atingido (regra nacional da SEFAZ). Apenas a última CC-e emitida continua válida.",
+      );
+    }
+
+    return tx.fiscalDocumentEvent.create({
+      data: {
+        tenantId: params.tenantId,
+        fiscalDocumentId: fiscalDocument.id,
+        eventType: "CORRECTION_LETTER",
+        sequenceNumber: nextSequence,
+        justification: text,
+        status: "PENDING",
+      },
+    });
   });
 
   // Mesma orquestração em duas fases do cancelamento (cancel-fiscal-document.service.ts):

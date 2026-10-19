@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert, Box, Button, Chip, CircularProgress, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Tooltip, Typography } from "@mui/material";
 import { usePlatformAdminAuth } from "./PlatformAdminAuthContext";
 import { DatabaseBackupLog, getDatabaseBackupDownloadUrl, listDatabaseBackups, triggerDatabaseBackup } from "./database-backups.api";
+import { PlatformAdminConfirmDialog } from "./PlatformAdminConfirmDialog";
 
 function formatBytes(bytes: string | null): string {
   if (!bytes) return "—";
@@ -28,6 +29,7 @@ export function DatabaseBackupsPage() {
   const [error, setError] = useState<string | null>(null);
   const [triggering, setTriggering] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [confirmTriggerOpen, setConfirmTriggerOpen] = useState(false);
 
   const reload = useCallback(() => {
     listDatabaseBackups().then(setLogs).catch((err) => setError((err as Error).message));
@@ -51,6 +53,7 @@ export function DatabaseBackupsPage() {
       setError((err as Error).message);
     } finally {
       setTriggering(false);
+      setConfirmTriggerOpen(false);
     }
   }
 
@@ -72,7 +75,7 @@ export function DatabaseBackupsPage() {
       <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
         <Typography variant="h5">Backups do banco de dados</Typography>
         {canTrigger && (
-          <Button variant="contained" onClick={handleTrigger} disabled={triggering} startIcon={triggering ? <CircularProgress size={16} /> : undefined}>
+          <Button variant="contained" onClick={() => setConfirmTriggerOpen(true)} disabled={triggering} startIcon={triggering ? <CircularProgress size={16} /> : undefined}>
             Fazer backup agora
           </Button>
         )}
@@ -124,6 +127,16 @@ export function DatabaseBackupsPage() {
           </TableBody>
         </Table>
       </TableContainer>
+      <PlatformAdminConfirmDialog
+        open={confirmTriggerOpen}
+        title="Disparar backup manual agora?"
+        description="Será feito um dump lógico completo da plataforma (TODOS os tenants), comprimido e cifrado, e enviado ao armazenamento externo. A operação consome recursos do banco em produção."
+        impact={[{ label: "Escopo", value: "Todos os tenants da plataforma" }, { label: "Tipo", value: "Backup manual (fora do cron das 03:00)" }]}
+        confirmLabel="Disparar backup"
+        busy={triggering}
+        onConfirm={handleTrigger}
+        onClose={() => setConfirmTriggerOpen(false)}
+      />
     </Box>
   );
 }

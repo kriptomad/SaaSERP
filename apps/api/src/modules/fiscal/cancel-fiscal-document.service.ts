@@ -33,6 +33,13 @@ export class CancellationJustificationTooShortError extends Error {}
 export class OnlyAuthorizedDocumentsCanBeCancelledError extends Error {}
 export class CancellationNotApplicableToDocumentTypeError extends Error {}
 export class CancellationDeadlineExpiredError extends Error {}
+// fa-fiscal-cancel-cce-double-submit: duas requisições concorrentes de cancelamento
+// (duplo clique, retry de rede do frontend, duas abas) liam o mesmo `lastEvent`,
+// calculavam o MESMO `sequenceNumber` e ambas chegavam a transmitir o evento
+// 110111 à SEFAZ — risco real de rejeição por duplicidade de evento ou, pior, de
+// duas transmissões "bem-sucedidas" divergentes. Agora bloqueado por
+// `pg_advisory_xact_lock` + checagem de evento ativo (ver abaixo).
+export class CancellationAlreadyInProgressError extends Error {}
 
 export async function cancelFiscalDocument(
   prisma: TenantScopedPrismaClient,
@@ -75,20 +82,48 @@ export async function cancelFiscalDocument(
     );
   }
 
-  const lastEvent = await prisma.fiscalDocumentEvent.findFirst({
-    where: { fiscalDocumentId: fiscalDocument.id, eventType: "CANCELLATION" },
-    orderBy: { sequenceNumber: "desc" },
-  });
+  // fa-fiscal-cancel-cce-double-submit: o "ler lastEvent → calcular sequenceNumber →
+  // create" inteiro roda dentro de uma transação serializada por
+  // `pg_advisory_xact_lock(hashtext(...))` — mesmo padrão já usado em
+  // seat-billing.service.ts/scheduling.routes.ts. O lock é por-transação (liberado
+  // automaticamente no commit/rollback) e serializa exatamente as requisições
+  // concorrentes para o MESMO fiscalDocumentId, nunca bloqueando cancelamentos de
+  // documentos diferentes. Dentro do lock, confirmamos que não existe nenhum evento
+  // de cancelamento ainda ativo (PENDING aguardando resposta da SEFAZ, ou já
+  // AUTHORIZED) antes de criar um novo — isso é o que de fato impede o duplo envio,
+  // não apenas a unicidade de sequenceNumber (que duas transações concorrentes sem
+  // lock poderiam calcular de forma diferente e ambas "passar").
+  const event = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${fiscalDocument.id} || ':cancellation'))`;
 
-  const event = await prisma.fiscalDocumentEvent.create({
-    data: {
-      tenantId: params.tenantId,
-      fiscalDocumentId: fiscalDocument.id,
-      eventType: "CANCELLATION",
-      sequenceNumber: (lastEvent?.sequenceNumber ?? 0) + 1,
-      justification: params.justification,
-      status: "PENDING",
-    },
+    const activeEvent = await tx.fiscalDocumentEvent.findFirst({
+      where: {
+        fiscalDocumentId: fiscalDocument.id,
+        eventType: "CANCELLATION",
+        status: { in: ["PENDING", "AUTHORIZED"] },
+      },
+    });
+    if (activeEvent) {
+      throw new CancellationAlreadyInProgressError(
+        `Já existe um cancelamento ${activeEvent.status === "AUTHORIZED" ? "concluído" : "em andamento"} para este documento fiscal — evite reenviar a solicitação.`,
+      );
+    }
+
+    const lastEvent = await tx.fiscalDocumentEvent.findFirst({
+      where: { fiscalDocumentId: fiscalDocument.id, eventType: "CANCELLATION" },
+      orderBy: { sequenceNumber: "desc" },
+    });
+
+    return tx.fiscalDocumentEvent.create({
+      data: {
+        tenantId: params.tenantId,
+        fiscalDocumentId: fiscalDocument.id,
+        eventType: "CANCELLATION",
+        sequenceNumber: (lastEvent?.sequenceNumber ?? 0) + 1,
+        justification: params.justification,
+        status: "PENDING",
+      },
+    });
   });
 
   // Monta/assina/transmite o XML do evento (tpEvento=110111) — nunca síncrono dentro

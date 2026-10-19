@@ -57,6 +57,30 @@ apps/web/vercel.json  → deploy do frontend via Vercel
    na Bible (Capítulo 7.2), seguindo o padrão recomendado pela própria documentação
    do Prisma para extensões genéricas sobre `$allModels`.
 
+## Gaps de compliance conhecidos (documentados, não implementados)
+
+Os itens abaixo são gaps REAIS de escopo identificados em auditoria forense e
+deliberadamente NÃO implementados nesta correção pontual — implementar qualquer um
+deles do zero, sem testar contra o ambiente de homologação real da SEFAZ, seria mais
+arriscado do que deixá-los explicitamente bloqueados/documentados.
+
+1. **Emissão de NF-e modelo 55 não suportada** (`fa-fiscal-nfe55-not-implemented`):
+   `emit-fiscal-document.service.ts` emite apenas NFC-e e NFS-e. Qualquer tentativa de
+   emitir um documento do tipo `NFE_SAIDA` (ou qualquer tipo fora de NFCE/NFSE) é
+   BLOQUEADA de forma explícita e alta (log `.error` + exceção) antes de montar
+   qualquer payload — nunca um "funciona parcialmente". Implementar NF-e 55 completa
+   (destinatário PJ obrigatório, duplicatas, transporte, layout próprio) é um projeto
+   à parte.
+2. **Sem máquina de estados de contingência fiscal formal**
+   (`fa-fiscal-no-formal-contingency`): quando a SEFAZ/Focus NFe fica indisponível por
+   período prolongado, o sistema hoje apenas deixa o `FiscalDocument` em `PENDING` e
+   deixa o BullMQ reagendar (5 tentativas, backoff exponencial) — não há emissão em
+   contingência (EPEC/offline), nem transmissão retroativa automática, nem estados
+   dedicados no `FiscalDocumentStatus` para isso. Ver comentário detalhado em
+   `apps/api/src/workers/fiscal-emission.worker.ts` (acima da função
+   `fiscalEmissionProcessor`) para a lista completa do que falta. Requer projeto
+   dedicado, com testes reais de homologação SEFAZ por UF.
+
 ## Como rodar localmente
 
 ```bash

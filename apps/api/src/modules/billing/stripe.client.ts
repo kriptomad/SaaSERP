@@ -61,6 +61,25 @@ export async function syncSeatQuantityWithStripe(
     return existingSeatItemId;
   }
 
+  // CORREÇÃO DE AUDITORIA (fa-seatbilling-stripe-local-not-atomic): o gap real não
+  // está na transação local (reconcileSeatBillingWithProvider já serializa por
+  // pg_advisory_xact_lock por tenant) — está aqui: se `stripe.subscriptionItems
+  // .create` tiver sucesso mas a persistência local subsequente de
+  // `stripeSeatSubscriptionItemId` falhar/nunca commitar (crash do processo,
+  // timeout de rede na resposta, etc.), a próxima reconciliação chega aqui de novo
+  // com `existingSeatItemId === null` e criaria um SEGUNDO item de assento na
+  // mesma assinatura Stripe — cobrando o tenant em duplicidade. Antes de criar,
+  // consultamos os subscription items JÁ existentes na assinatura e procuramos por
+  // um que já use o mesmo Price de assento extra; se encontrado, reconciliamos
+  // nele (atualizando a quantity) em vez de criar um novo, e devolvemos o id real
+  // para o chamador persistir — fechando a janela de duplicação do lado Stripe.
+  const existingItems = await stripe.subscriptionItems.list({ subscription: stripeSubscriptionId, limit: 100 });
+  const orphanedSeatItem = existingItems.data.find((item) => item.price.id === extraSeatPriceId);
+  if (orphanedSeatItem) {
+    await stripe.subscriptionItems.update(orphanedSeatItem.id, { quantity: extraSeatCount });
+    return orphanedSeatItem.id;
+  }
+
   const item = await stripe.subscriptionItems.create({
     subscription: stripeSubscriptionId,
     price: extraSeatPriceId,

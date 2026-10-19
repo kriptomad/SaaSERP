@@ -11,7 +11,7 @@
 //   - `SaleItem.productVariantId` não tem onDelete → variante já vendida jamais é excluída.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prisma } from "@filitech/db";
+import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
 
@@ -276,12 +276,20 @@ productVariantsRouter.get("/products/:productId/variants/stock", requireAuth, re
     orderBy: { axisValue: "asc" },
     take: 500, // teto defensivo — produto em grade não costuma passar de algumas dezenas de combinações
   });
-  const totalVariantStock = variants.reduce((acc, v) => acc + Number(v.stockQuantity), 0);
+  const totalVariantStock = await prisma.productVariant.aggregate({
+    where: { tenantId, productId: product.id },
+    _sum: { stockQuantity: true },
+  });
   return res.json({
     success: true,
     data: {
       product,
-      totalVariantStock,
+      // CORREÇÃO DE AUDITORIA (fa-variant-stock-total-float-precision): a soma
+      // anterior usava `Number(v.stockQuantity)` + `reduce` em ponto flutuante,
+      // perdendo precisão decimal para produtos vendidos fracionadamente (ex.:
+      // tecido por metro). Agora soma via `_sum` agregado no próprio banco
+      // (`Prisma.Decimal` internamente) e serializa como string decimal exata.
+      totalVariantStock: (totalVariantStock._sum.stockQuantity ?? new Prisma.Decimal(0)).toString(),
       variants: variants.map((v) => ({
         id: v.id,
         axis: v.axis.name,
@@ -329,7 +337,13 @@ const stockAdjustSchema = z.object({
   reasonCode: z.string().trim().min(2).max(60),
 });
 
-// Só produtos sem rastreio (trackingType NONE): lote/serial têm saldo próprio e divergiriam do saldo da variante.
+// CORREÇÃO DE AUDITORIA (fa-variant-stock-dual-source-of-truth): o saldo por
+// variante só existe/faz sentido para produtos explicitamente `trackingType =
+// VARIANT` — um produto NONE usa exclusivamente `Product.stockQuantity` (ver
+// close-sale.service.ts, ramo NONE), e deixar este endpoint ajustar saldo de
+// variante PARA ELE criava duas fontes de verdade divergentes (o agregado do
+// produto, atualizado pela venda normal, e o saldo por variante, atualizado só
+// por aqui, nunca lido/decrementado por nenhuma venda de produto NONE).
 productVariantsRouter.post("/product-variants/:variantId/stock-adjust", requireAuth, requireModule("FASHION_VARIANTS"), async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
   if (!(await hasPermission(req.session!.role, req.session!.userId, "stock:movement:write"))) {
@@ -342,8 +356,8 @@ productVariantsRouter.post("/product-variants/:variantId/stock-adjust", requireA
 
   const variant = await prisma.productVariant.findFirst({ where: { id: req.params.variantId, tenantId }, include: { product: { select: { trackingType: true } } } });
   if (!variant) return fail(res, 404, "NOT_FOUND", "Variante não encontrada.");
-  if (variant.product.trackingType !== "NONE") {
-    return fail(res, 409, "TRACKED_PRODUCT", "Produtos com rastreio de lote/serial não suportam saldo por variante.");
+  if (variant.product.trackingType !== "VARIANT") {
+    return fail(res, 409, "TRACKED_PRODUCT", "Ajuste de estoque por variante exige que o produto esteja explicitamente marcado como trackingType=VARIANT (produtos NONE/BATCH/SERIAL usam seu próprio saldo).");
   }
 
   const result = await prisma.$transaction(async (tx) => {
@@ -352,7 +366,10 @@ productVariantsRouter.post("/product-variants/:variantId/stock-adjust", requireA
       data: { stockQuantity: { increment: quantityDelta } },
     });
     if (updated.count === 0) return null;
-    await tx.product.update({ where: { id: variant.productId }, data: { stockQuantity: { increment: quantityDelta } } });
+    // Nunca sincroniza `Product.stockQuantity` (o parent) aqui: para produtos
+    // VARIANT, o saldo por variante É o saldo real — o agregado do produto-pai não
+    // é uma segunda fonte de verdade a manter em sincronia (ver nota de auditoria
+    // acima e close-sale.service.ts, ramo VARIANT).
     await tx.stockMovement.create({
       data: {
         tenantId,

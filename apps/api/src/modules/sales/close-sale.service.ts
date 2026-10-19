@@ -39,6 +39,47 @@ function addCalendarDays(base: Date, days: number): Date {
   return result;
 }
 
+// CORREÇÃO DE AUDITORIA (fa-sale-quantity-fraction-unvalidated): antes, `item.quantity`
+// era usado direto na baixa de estoque (lote/variante/produto) sem validar se o
+// produto realmente permite venda fracionada (`Product.isWeighted`/`saleUnit`) nem se
+// a quantidade respeita a escala decimal das colunas de estoque (`Decimal(12,3)`).
+// Isso permitia, por exemplo, vender "0.5" unidade de um produto só-unidade (saleUnit
+// UNIT, isWeighted=false — ex.: uma lata de refrigerante) ou uma quantidade com mais
+// casas decimais do que o banco suporta (arredondado silenciosamente pelo Postgres,
+// divergindo do que o caixa viu na tela). Exportada para ser reaproveitada como
+// validação prévia (antes de abrir a transação) em sales.routes.ts — a validação
+// definitiva, que não pode ser contornada, é sempre a execução abaixo dentro da
+// transação de fechamento, com o produto lido do próprio banco.
+export function assertValidSaleQuantity(
+  product: { name: string; saleUnit: string; isWeighted: boolean; trackingType: string },
+  quantity: number,
+): void {
+  // Produto rastreado por número de série representa uma unidade física discreta —
+  // nunca "0.5 serial". Each SaleItem corresponde a exatamente 1 serial lido.
+  if (product.trackingType === "SERIAL" && quantity !== 1) {
+    throw new InvalidSaleQuantityError(
+      `Produto ${product.name} é rastreado por número de série/IMEI — cada item da venda deve ter quantidade exatamente 1 (um serial por linha).`,
+    );
+  }
+
+  const allowsFractionalSale = product.isWeighted || product.saleUnit !== "UNIT";
+  if (!allowsFractionalSale && !Number.isInteger(quantity)) {
+    throw new InvalidSaleQuantityError(
+      `Produto ${product.name} é vendido apenas em unidades inteiras (saleUnit=UNIT, isWeighted=false) — quantidade ${quantity} é inválida.`,
+    );
+  }
+
+  // Colunas de saldo (`Product.stockQuantity`/`ProductVariant.stockQuantity`) são
+  // `Decimal(12,3)` — mais de 3 casas decimais seria truncado silenciosamente pelo
+  // banco, divergindo do valor exibido/confirmado na tela do PDV.
+  const decimalPlaces = (Math.abs(quantity).toString().split(".")[1] ?? "").length;
+  if (decimalPlaces > 3) {
+    throw new InvalidSaleQuantityError(
+      `Quantidade ${quantity} do produto ${product.name} excede a precisão suportada pelo estoque (máximo 3 casas decimais).`,
+    );
+  }
+}
+
 export interface CloseSaleServerInput {
   tenantId: string;
   idempotencyKey: string;
@@ -91,10 +132,19 @@ export interface CloseSaleServerInput {
 
 export class SerialNotReadyForSaleError extends Error {}
 export class SerialNotFoundError extends Error {}
+// CORREÇÃO DE AUDITORIA (fa-serial-sale-not-atomic-claim): o claim de serial
+// concorrente (dois PDVs lendo o mesmo serial IN_STOCK e ambos tentando vendê-lo)
+// agora falha com este erro em vez de permitir dupla venda silenciosa.
+export class SerialAlreadyClaimedError extends Error {}
 export class CashRegisterNotFoundError extends Error {}
 export class VariantRequiredError extends Error {}
 export class VariantNotFoundError extends Error {}
 export class InsufficientVariantStockError extends Error {}
+// CORREÇÃO DE AUDITORIA (fa-sale-quantity-fraction-unvalidated): quantidade do item
+// incompatível com a regra de fracionamento do produto (ex.: produto vendido só em
+// unidade inteira recebendo quantidade fracionada) ou com a escala decimal suportada
+// pelas colunas de estoque (`Decimal(12,3)`).
+export class InvalidSaleQuantityError extends Error {}
 // Capítulo 4.6 — Varejo Geral (Crediário/Fiado): GAP DE AUDITORIA ENCONTRADO E
 // CORRIGIDO. `paymentMethod: STORE_CREDIT` já era aceito pelo tipo, mas nenhuma
 // validação contra `Client.creditLimit`/`creditBalanceUsed` existia — a regra de
@@ -246,6 +296,12 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
 
       for (const item of input.items) {
         const product = await tx.product.findFirstOrThrow({ where: { id: item.productId, tenantId: input.tenantId } });
+
+        // CORREÇÃO DE AUDITORIA (fa-sale-quantity-fraction-unvalidated): revalida a
+        // quantidade do item contra a regra de fracionamento/escala do produto lido
+        // agora do próprio banco (nunca confia apenas na validação prévia da rota,
+        // que pode estar olhando um snapshot do produto já desatualizado).
+        assertValidSaleQuantity(product, item.quantity);
 
         // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): resolve o preço canônico no
         // SERVIDOR — nunca confia no `item.unitPrice` enviado pelo cliente (PDV online
@@ -402,8 +458,32 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
               `Serial ${item.serialNumber} ainda está pendente de conferência física de IMEI — não pode ser vendido.`,
             );
           }
-          await tx.productSerial.update({ where: { id: serial.id }, data: { status: "SOLD" } });
-          await tx.product.update({ where: { id: product.id }, data: { stockQuantity: { decrement: 1 } } });
+          // CORREÇÃO DE AUDITORIA (fa-serial-sale-not-atomic-claim): o `findUnique`
+          // acima é só uma leitura para mensagens de erro amigáveis — o claim real do
+          // serial é este `updateMany` condicional (`WHERE id=? AND status='IN_STOCK'`),
+          // nunca um `update()` direto baseado no status já lido. Duas vendas
+          // concorrentes do mesmo serial (dois PDVs lendo "IN_STOCK" ao mesmo tempo)
+          // só deixam UMA ganhar a corrida — a segunda encontra `count !== 1` e falha
+          // com erro de negócio, nunca vende o mesmo IMEI duas vezes.
+          const serialClaim = await tx.productSerial.updateMany({
+            where: { id: serial.id, tenantId: input.tenantId, status: "IN_STOCK" },
+            data: { status: "SOLD" },
+          });
+          if (serialClaim.count !== 1) {
+            throw new SerialAlreadyClaimedError(
+              `Serial ${item.serialNumber} acabou de ser reservado/vendido por outra operação concorrente — recarregue o estoque e tente novamente.`,
+            );
+          }
+          // Decremento do agregado também condicional (nunca um `update()` cego):
+          // protege contra o mesmo `Product.stockQuantity` já ter sido zerado por
+          // outro ajuste concorrente entre a leitura do produto e este ponto.
+          const claimedProductStock = await tx.product.updateMany({
+            where: { id: product.id, tenantId: input.tenantId, stockQuantity: { gte: 1 } },
+            data: { stockQuantity: { decrement: 1 } },
+          });
+          if (claimedProductStock.count === 0) {
+            throw new InsufficientStockError(`Estoque insuficiente do produto ${product.name} para concluir a venda.`);
+          }
           soldSerialIds.push(serial.id);
         } else {
           // NONE: baixa direta, sem necessidade de lock por lote/série.

@@ -2,14 +2,21 @@
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 2.7/7.3/20.1 — processamento real de webhooks
 // Stripe (assinatura HMAC via SDK oficial) e Asaas (authToken de 32+ chars, comparação
 // de tempo constante), ambos convergindo para a régua de dunning única (Cap.2.7.4).
-// Idempotência garantida pelo @@unique([provider, externalEventKey]) de BillingEvent —
-// webhooks reentregues (comportamento normal de Stripe/Asaas) nunca reprocessam 2x.
+// Idempotência garantida por uma máquina de estados explícita (PROCESSING/
+// SUCCEEDED/FAILED com lease) sobre o @@unique([provider, externalEventKey]) de
+// BillingEvent — ver `claimBillingEvent` abaixo (fa-billing-webhook-idempotency-race).
 import { Router, Request, Response } from "express";
 import crypto from "node:crypto";
 import { prismaUnscoped } from "@filitech/db";
 import { getStripeClient } from "./stripe.client";
 import { getPlatformSecret } from "../../lib/platform-secrets";
-import { handlePaymentFailure, handlePaymentRecovered, handleSubscriptionCanceled, handlePaymentReversed } from "./dunning.service";
+import {
+  handlePaymentFailure,
+  handlePaymentRecovered,
+  handleSubscriptionCanceled,
+  handlePaymentReversed,
+  handleSubscriptionPastDue,
+} from "./dunning.service";
 import { invalidateTenantModuleCache } from "../../middlewares/gatekeeper.middleware";
 import { createModuleLogger } from "../../lib/logger";
 
@@ -88,23 +95,112 @@ async function activatePendingSubscription(
 export const stripeWebhookRouter = Router();
 export const asaasWebhookRouter = Router();
 
-async function recordBillingEventOnce(provider: string, externalEventKey: string, subscriptionId: string, type: string, payload: unknown) {
+// CORREÇÃO DE AUDITORIA (fa-billing-webhook-idempotency-race): o dedup anterior
+// usava `BillingEvent.create()` como a própria prova de "evento concluído" — duas
+// entregas concorrentes do MESMO evento (normal em Stripe/Asaas: timeout de rede,
+// retry automático do provedor) podiam resultar em uma delas recebendo 200
+// "duplicate" enquanto a OUTRA ainda processava; se esta segunda falhasse depois,
+// `releaseBillingEvent` apagava a linha e o provedor nunca mais reentregava aquele
+// evento (ele já tinha recebido um 200 de alguém). Modelado agora como uma máquina
+// de estados explícita com lease (ver `BillingEventStatus` no schema):
+//   PROCESSING → reivindicado; lease com prazo de expiração.
+//   SUCCEEDED  → só gravado DEPOIS que a transação de negócio correspondente commitou.
+//   FAILED     → liberado para nova tentativa (reentrega do provedor).
+// Duplicatas que chegam enquanto o estado é PROCESSING e a lease ainda não expirou
+// recebem um erro não-2xx (o provedor reenvia depois) — nunca mais um 200
+// "duplicate" prematuro que poderia descartar um evento ainda em voo.
+const BILLING_EVENT_LEASE_MS = 2 * 60 * 1000; // 2 minutos — folga generosa acima do tempo real de processamento de qualquer handler deste arquivo
+
+type BillingEventClaim =
+  | { outcome: "claimed" }
+  | { outcome: "duplicate-succeeded" }
+  | { outcome: "duplicate-processing" };
+
+async function claimBillingEvent(
+  provider: string,
+  externalEventKey: string,
+  subscriptionId: string,
+  type: string,
+  payload: unknown,
+): Promise<BillingEventClaim> {
+  const now = new Date();
+  const leaseExpiresAt = new Date(now.getTime() + BILLING_EVENT_LEASE_MS);
+
   try {
     await prismaUnscoped.billingEvent.create({
-      data: { provider, externalEventKey, subscriptionId, type, payload: payload as any },
+      data: { provider, externalEventKey, subscriptionId, type, payload: payload as any, status: "PROCESSING", leaseExpiresAt },
     });
-    return true; // primeira vez que este evento é visto
+    return { outcome: "claimed" };
   } catch (err: any) {
-    if (err.code === "P2002") {
-      return false; // já processado (reentrega do provedor) — ignora
-    }
-    throw err;
+    if (err.code !== "P2002") throw err;
   }
+
+  // Já existe uma linha para esta chave de idempotência — decide com base no
+  // estado atual, nunca tratando "já existe" como sinônimo de "já concluído".
+  const existing = await prismaUnscoped.billingEvent.findUnique({
+    where: { provider_externalEventKey: { provider, externalEventKey } },
+  });
+  if (!existing) {
+    // Corrida rara: a linha sumiu entre o create falho e este findUnique (nunca
+    // deveria acontecer, pois esta tabela nunca mais faz DELETE) — tenta reclamar
+    // de novo recursivamente, uma única vez.
+    return claimBillingEvent(provider, externalEventKey, subscriptionId, type, payload);
+  }
+
+  if (existing.status === "SUCCEEDED") {
+    return { outcome: "duplicate-succeeded" };
+  }
+
+  if (existing.status === "PROCESSING" && existing.leaseExpiresAt > now) {
+    // Outra requisição concorrente está processando ESTE MESMO evento agora — não é
+    // seguro responder 200 "duplicate" (o evento pode não ter sido commitado nem
+    // falhado ainda). Responde não-2xx para o provedor reentregar mais tarde.
+    return { outcome: "duplicate-processing" };
+  }
+
+  // status FAILED, ou PROCESSING com lease expirada (o processo anterior morreu/
+  // travou antes de concluir) — reclama atomicamente a linha antes de reprocessar.
+  const reclaimed = await prismaUnscoped.billingEvent.updateMany({
+    where: {
+      provider,
+      externalEventKey,
+      OR: [{ status: "FAILED" }, { status: "PROCESSING", leaseExpiresAt: { lte: now } }],
+    },
+    data: { status: "PROCESSING", leaseExpiresAt, payload: payload as any, type },
+  });
+  if (reclaimed.count === 0) {
+    // Perdeu a corrida para outra requisição que reclamou a lease primeiro.
+    return { outcome: "duplicate-processing" };
+  }
+  return { outcome: "claimed" };
 }
 
-// Se o processamento falhar, libera a chave de idempotência para que a reentrega do provedor seja reprocessada (e não descartada como duplicata).
-async function releaseBillingEvent(provider: string, externalEventKey: string) {
-  await prismaUnscoped.billingEvent.deleteMany({ where: { provider, externalEventKey } }).catch(() => undefined);
+// Só chamado DEPOIS que a transação de negócio correspondente já commitou —
+// nunca antes, para que um crash entre "transação commitada" e "marcar SUCCEEDED"
+// no pior caso apenas force um reprocessamento (idempotente) na próxima
+// reentrega, nunca perca o evento silenciosamente.
+async function markBillingEventSucceeded(provider: string, externalEventKey: string) {
+  await prismaUnscoped.billingEvent.updateMany({ where: { provider, externalEventKey }, data: { status: "SUCCEEDED" } });
+}
+
+// Libera a chave de idempotência (marcando FAILED, nunca apagando a linha) para
+// que a reentrega do provedor seja reprocessada em vez de descartada como
+// duplicata — preserva o histórico completo do evento para auditoria.
+async function markBillingEventFailed(provider: string, externalEventKey: string) {
+  await prismaUnscoped.billingEvent.updateMany({ where: { provider, externalEventKey }, data: { status: "FAILED" } }).catch(() => undefined);
+}
+
+function respondToBillingEventClaim(res: Response, claim: BillingEventClaim): Response | null {
+  if (claim.outcome === "duplicate-succeeded") {
+    return res.json({ received: true, duplicate: true });
+  }
+  if (claim.outcome === "duplicate-processing") {
+    // Não-2xx deliberado: o provedor (Stripe/Asaas) reentrega webhooks que não
+    // recebem 2xx — nunca respondemos 200 para um evento cujo processamento
+    // concorrente ainda não terminou nem falhou.
+    return res.status(409).json({ error: { code: "EVENT_PROCESSING_IN_PROGRESS" } });
+  }
+  return null; // "claimed" — segue para o processamento normal
 }
 
 stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response) => {
@@ -136,10 +232,9 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
       return res.json({ received: true, ignored: "missing-checkout-metadata" });
     }
 
-    const isNew = await recordBillingEventOnce("stripe", event.id, pendingSubscriptionId, event.type, session);
-    if (!isNew) {
-      return res.json({ received: true, duplicate: true });
-    }
+    const claim = await claimBillingEvent("stripe", event.id, pendingSubscriptionId, event.type, session);
+    const claimResponse = respondToBillingEventClaim(res, claim);
+    if (claimResponse) return claimResponse;
 
     try {
       const stripeSubscription = await stripe.subscriptions.retrieve(realSubscriptionId);
@@ -153,8 +248,9 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
         if (moduleCode && moduleCode !== "PLAN_BASE") moduleItemIds[moduleCode] = item.id;
       }
       await activatePendingSubscription(pendingSubscriptionId, realSubscriptionId, currentPeriodEnd, moduleItemIds);
+      await markBillingEventSucceeded("stripe", event.id);
     } catch (err) {
-      await releaseBillingEvent("stripe", event.id);
+      await markBillingEventFailed("stripe", event.id);
       return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
     }
 
@@ -188,14 +284,19 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
     if (!reversedSubscription) {
       return res.json({ received: true, ignored: "unknown-subscription" });
     }
-    const isNewReversal = await recordBillingEventOnce("stripe", event.id, reversedSubscription.id, event.type, event.data.object);
-    if (!isNewReversal) {
-      return res.json({ received: true, duplicate: true });
-    }
+    const reversalClaim = await claimBillingEvent("stripe", event.id, reversedSubscription.id, event.type, event.data.object);
+    const reversalClaimResponse = respondToBillingEventClaim(res, reversalClaim);
+    if (reversalClaimResponse) return reversalClaimResponse;
     try {
-      await handlePaymentReversed(reversedSubscription.tenantId, reversedSubscription.id, event.type === "charge.dispute.created" ? "CHARGEBACK" : "REFUNDED");
+      await handlePaymentReversed(
+        reversedSubscription.tenantId,
+        reversedSubscription.id,
+        event.type === "charge.dispute.created" ? "CHARGEBACK" : "REFUNDED",
+        new Date(event.created * 1000),
+      );
+      await markBillingEventSucceeded("stripe", event.id);
     } catch (err) {
-      await releaseBillingEvent("stripe", event.id);
+      await markBillingEventFailed("stripe", event.id);
       return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
     }
     return res.json({ received: true });
@@ -217,39 +318,70 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
     return res.json({ received: true, ignored: "unknown-subscription" });
   }
 
-  const isNew = await recordBillingEventOnce("stripe", event.id, subscription.id, event.type, event.data.object);
-  if (!isNew) {
-    return res.json({ received: true, duplicate: true });
-  }
+  const claim = await claimBillingEvent("stripe", event.id, subscription.id, event.type, event.data.object);
+  const claimResponse = respondToBillingEventClaim(res, claim);
+  if (claimResponse) return claimResponse;
+
+  const eventAt = new Date(event.created * 1000);
 
   try {
     switch (event.type) {
       case "invoice.payment_failed":
-        await handlePaymentFailure(subscription.tenantId, subscription.id, object.id);
+        await handlePaymentFailure(subscription.tenantId, subscription.id, object.id, eventAt);
         break;
       case "invoice.paid":
-        await handlePaymentRecovered(subscription.tenantId, subscription.id);
+        // Confirmação real de pagamento (fatura efetivamente paga) — a fonte
+        // preferencial para reativar, nunca apenas o status estrutural da assinatura.
+        await handlePaymentRecovered(subscription.tenantId, subscription.id, eventAt);
         break;
       case "customer.subscription.updated": {
-        const status = (event.data.object as { status?: string }).status;
-        // Só recupera se o Stripe reporta a assinatura saudável — um update com status past_due/unpaid não pode reativar o tenant.
+        const subscriptionObject = event.data.object as import("stripe").Stripe.Subscription;
+        const status = subscriptionObject.status;
         if (status === "active") {
-          await handlePaymentRecovered(subscription.tenantId, subscription.id);
+          // CORREÇÃO DE AUDITORIA (fa-billing-outoforder-active-reactivation): o status
+          // estrutural "active" do objeto Subscription do Stripe não é, por si só, uma
+          // confirmação de pagamento — pode refletir um estado transitório ou chegar
+          // fora de ordem (ex.: gerado ANTES de um estorno subsequente, mas entregue
+          // DEPOIS pela fila do Stripe). Antes de reativar, confirma que a invoice mais
+          // recente desta assinatura está de fato paga; `handlePaymentRecovered` ainda
+          // aplica a checagem monotônica de `eventAt` contra `lastFinancialEventAt`
+          // como segunda camada de defesa contra reentrega fora de ordem.
+          const latestInvoiceId =
+            typeof subscriptionObject.latest_invoice === "string"
+              ? subscriptionObject.latest_invoice
+              : subscriptionObject.latest_invoice?.id;
+          const latestInvoice = latestInvoiceId ? await stripe.invoices.retrieve(latestInvoiceId) : null;
+          if (latestInvoice?.status === "paid") {
+            await handlePaymentRecovered(subscription.tenantId, subscription.id, eventAt);
+          } else {
+            log.warn(
+              { subscriptionId: subscription.id, latestInvoiceStatus: latestInvoice?.status },
+              "customer.subscription.updated reportou status active sem confirmação de pagamento da invoice mais recente — reativação adiada até invoice.paid",
+            );
+          }
+        } else if (status === "past_due" || status === "incomplete" || status === "paused") {
+          // CORREÇÃO DE AUDITORIA (fa-billing-stripe-pastdue-unhandled): até aqui,
+          // past_due/incomplete/paused caíam no default sem nenhuma ação — o tenant só
+          // entrava em PAST_DUE se `invoice.payment_failed` chegasse separadamente (sem
+          // garantia de ordem/entrega). Agora qualquer um destes três status já aciona a
+          // régua de dunning (grace period), mesmo que o evento de fatura nunca chegue.
+          await handleSubscriptionPastDue(subscription.tenantId, subscription.id, eventAt);
         } else if (status === "canceled" || status === "unpaid" || status === "incomplete_expired") {
           // GAP DE AUDITORIA FECHADO: cancelamento/status terminal reportado pelo
           // Stripe suspende IMEDIATAMENTE, sem esperar grace period/varredura diária.
-          await handleSubscriptionCanceled(subscription.tenantId, subscription.id);
+          await handleSubscriptionCanceled(subscription.tenantId, subscription.id, eventAt);
         }
         break;
       }
       case "customer.subscription.deleted":
-        await handleSubscriptionCanceled(subscription.tenantId, subscription.id);
+        await handleSubscriptionCanceled(subscription.tenantId, subscription.id, eventAt);
         break;
       default:
         break; // evento reconhecido mas sem ação de billing mapeada
     }
+    await markBillingEventSucceeded("stripe", event.id);
   } catch (err) {
-    await releaseBillingEvent("stripe", event.id);
+    await markBillingEventFailed("stripe", event.id);
     return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
   }
 
@@ -318,10 +450,9 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
     // `externalReference` que `checkout.routes.ts` grava como sendo o id LOCAL da
     // Subscription pendente (ver `createAsaasCheckout({ externalReference: ... })`).
     if (payment.externalReference && (eventType === "PAYMENT_RECEIVED" || eventType === "PAYMENT_CONFIRMED")) {
-      const isNewPending = await recordBillingEventOnce("asaas", `${eventType}:${payment.id}`, payment.externalReference, eventType, req.body);
-      if (!isNewPending) {
-        return res.json({ received: true, duplicate: true });
-      }
+      const pendingClaim = await claimBillingEvent("asaas", `${eventType}:${payment.id}`, payment.externalReference, eventType, req.body);
+      const pendingClaimResponse = respondToBillingEventClaim(res, pendingClaim);
+      if (pendingClaimResponse) return pendingClaimResponse;
       try {
         const nextDueDate = payment.nextDueDate ? new Date(payment.nextDueDate) : null;
         const currentPeriodEnd = nextDueDate
@@ -331,8 +462,9 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
         if (!activated) {
           return res.json({ received: true, ignored: "unknown-pending-subscription" });
         }
+        await markBillingEventSucceeded("asaas", `${eventType}:${payment.id}`);
       } catch (err) {
-        await releaseBillingEvent("asaas", `${eventType}:${payment.id}`);
+        await markBillingEventFailed("asaas", `${eventType}:${payment.id}`);
         return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
       }
       return res.json({ received: true });
@@ -340,36 +472,43 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
     return res.json({ received: true, ignored: "unknown-subscription" });
   }
 
-  const isNew = await recordBillingEventOnce("asaas", `${eventType}:${payment.id}`, subscription.id, eventType, req.body);
-  if (!isNew) {
-    return res.json({ received: true, duplicate: true });
-  }
+  const claim = await claimBillingEvent("asaas", `${eventType}:${payment.id}`, subscription.id, eventType, req.body);
+  const claimResponse = respondToBillingEventClaim(res, claim);
+  if (claimResponse) return claimResponse;
+
+  // NOTA: o payload de webhook do Asaas não expõe um timestamp de evento granular
+  // equivalente ao `event.created` do Stripe — usamos o instante de recebimento como
+  // melhor aproximação disponível. A checagem monotônica em dunning.service.ts ainda
+  // se aplica (nunca regride um estado mais recente), apenas com resolução menor que
+  // a do Stripe para este provedor especificamente.
+  const eventAt = new Date();
 
   try {
     switch (eventType) {
       case "PAYMENT_OVERDUE":
       case "PAYMENT_FAILED":
-        await handlePaymentFailure(subscription.tenantId, subscription.id, payment.id);
+        await handlePaymentFailure(subscription.tenantId, subscription.id, payment.id, eventAt);
         break;
       case "PAYMENT_RECEIVED":
       case "PAYMENT_CONFIRMED":
-        await handlePaymentRecovered(subscription.tenantId, subscription.id);
+        await handlePaymentRecovered(subscription.tenantId, subscription.id, eventAt);
         break;
       // GAP DE AUDITORIA FECHADO (mega-audit rodada 9): reembolso/chargeback do
       // Asaas não tinha tratamento algum — o tenant continuava ACTIVE mesmo com o
       // dinheiro já devolvido ao cliente.
       case "PAYMENT_REFUNDED":
-        await handlePaymentReversed(subscription.tenantId, subscription.id, "REFUNDED");
+        await handlePaymentReversed(subscription.tenantId, subscription.id, "REFUNDED", eventAt);
         break;
       case "PAYMENT_CHARGEBACK_REQUESTED":
       case "PAYMENT_CHARGEBACK_DISPUTE":
-        await handlePaymentReversed(subscription.tenantId, subscription.id, "CHARGEBACK");
+        await handlePaymentReversed(subscription.tenantId, subscription.id, "CHARGEBACK", eventAt);
         break;
       default:
         break;
     }
+    await markBillingEventSucceeded("asaas", `${eventType}:${payment.id}`);
   } catch (err) {
-    await releaseBillingEvent("asaas", `${eventType}:${payment.id}`);
+    await markBillingEventFailed("asaas", `${eventType}:${payment.id}`);
     return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
   }
 
