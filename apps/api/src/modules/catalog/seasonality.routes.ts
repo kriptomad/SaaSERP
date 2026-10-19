@@ -42,7 +42,7 @@ seasonalityRouter.get("/seasonality-windows", requireAuth, requireModule("GIFT_P
   if (!(await hasPermission(role, userId, "stock:product:read"))) {
     return forbidden(res, "Seu nível de acesso não permite consultar janelas de sazonalidade.");
   }
-  const windows = await prisma.seasonalityWindow.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" } });
+  const windows = await prisma.seasonalityWindow.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" }, take: 500 });
   return res.json({ success: true, data: windows, error: null });
 });
 
@@ -153,7 +153,7 @@ seasonalityRouter.get("/seasonality-windows/clearance-report", requireAuth, requ
   }
 
   const now = new Date();
-  const windows = await prisma.seasonalityWindow.findMany({ where: { tenantId, active: true } });
+  const windows = await prisma.seasonalityWindow.findMany({ where: { tenantId, active: true }, take: 200 });
   if (windows.length === 0) {
     return res.json({ success: true, data: [], error: null });
   }
@@ -161,6 +161,7 @@ seasonalityRouter.get("/seasonality-windows/clearance-report", requireAuth, requ
   const categories = [...new Set(windows.map((w) => w.category))];
   const products = await prisma.product.findMany({
     where: { tenantId, active: true, category: { in: categories } },
+    take: 500, // teto defensivo — relatório gerencial, não uma listagem completa de catálogo
   });
 
   const twelveMonthsAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);

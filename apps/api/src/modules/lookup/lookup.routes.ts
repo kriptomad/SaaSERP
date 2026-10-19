@@ -6,19 +6,40 @@
 // no momento do cadastro), mas protegidas por rate limit por IP — sem isso, estas
 // rotas virariam um proxy anônimo e gratuito para rastrear CNPJs/CEPs em massa às
 // custas da Filitech.
-import { Router } from "express";
+import { Request, Router } from "express";
 import { enforceRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
 import { lookupCep, InvalidCepFormatError, CepNotFoundError, ViaCepUnavailableError } from "../../lib/viacep-client";
 import { lookupCnpj, InvalidCnpjFormatError, CnpjNotFoundError, BrasilApiUnavailableError } from "../../lib/brasilapi-client";
+import { verifySessionToken } from "../auth/jwt.service";
 
 export const lookupRouter = Router();
 
 const LOOKUP_RATE_LIMIT_MAX = 30;
 const LOOKUP_RATE_LIMIT_WINDOW_SECONDS = 60;
 
+// GAP DE AUDITORIA FECHADO: a chave de rate limit era SÓ o IP — qualquer IP
+// compartilhado (NAT de operadora móvel, proxy corporativo) fazia um único
+// usuário legítimo esgotar o balde para todos os outros atrás do mesmo IP, sem
+// nenhum isolamento por tenant. Este router é montado ANTES de `authMiddleware`
+// (ver server.ts, usado também no onboarding pré-login), então nunca há
+// `req.session`; aqui tentamos, best-effort e sem nunca lançar, extrair um
+// `tenantId` de um JWT eventualmente presente no header (ex.: uso futuro deste
+// mesmo endpoint por uma tela já autenticada) para também escopar por tenant
+// quando essa informação estiver disponível — cai de volta para IP puro quando não.
+function resolveOptionalTenantId(req: Request): string | undefined {
+  const header = req.headers.authorization;
+  if (!header?.startsWith("Bearer ")) return undefined;
+  try {
+    return verifySessionToken(header.slice("Bearer ".length)).tenantId;
+  } catch {
+    return undefined;
+  }
+}
+
 lookupRouter.get("/lookup/cep/:cep", async (req, res) => {
   try {
-    await enforceRateLimit(`lookup:cep:${req.ip}`, LOOKUP_RATE_LIMIT_MAX, LOOKUP_RATE_LIMIT_WINDOW_SECONDS);
+    const tenantId = resolveOptionalTenantId(req);
+    await enforceRateLimit(`lookup:cep:${tenantId ?? "anon"}:${req.ip}`, LOOKUP_RATE_LIMIT_MAX, LOOKUP_RATE_LIMIT_WINDOW_SECONDS);
     const address = await lookupCep(req.params.cep);
     return res.json({ success: true, data: address, error: null });
   } catch (err) {
@@ -40,7 +61,8 @@ lookupRouter.get("/lookup/cep/:cep", async (req, res) => {
 
 lookupRouter.get("/lookup/cnpj/:cnpj", async (req, res) => {
   try {
-    await enforceRateLimit(`lookup:cnpj:${req.ip}`, LOOKUP_RATE_LIMIT_MAX, LOOKUP_RATE_LIMIT_WINDOW_SECONDS);
+    const tenantId = resolveOptionalTenantId(req);
+    await enforceRateLimit(`lookup:cnpj:${tenantId ?? "anon"}:${req.ip}`, LOOKUP_RATE_LIMIT_MAX, LOOKUP_RATE_LIMIT_WINDOW_SECONDS);
     const data = await lookupCnpj(req.params.cnpj);
     return res.json({ success: true, data, error: null });
   } catch (err) {

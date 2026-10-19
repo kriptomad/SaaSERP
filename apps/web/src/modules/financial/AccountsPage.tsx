@@ -2,7 +2,7 @@
 // Contas a Pagar e a Receber. Contratos de financial.routes.ts:
 //  - POST /accounts-payable/:id/pay | /cancel ; POST /accounts-receivable/:id/receive
 //  - Não há endpoint de cancelamento para recebíveis (lacuna do backend).
-//  - Listagens limitadas a 200 registros pela API (sem paginação server-side).
+//  - Listagem paginada de verdade (page/pageSize/meta.total) — "Carregar mais" na UI.
 import { useMemo, useState } from "react";
 import {
   Alert,
@@ -259,8 +259,19 @@ export function AccountsPage({ kind }: { kind: Kind }) {
   const [creating, setCreating] = useState(false);
   const [pending, setPending] = useState<{ action: "settle" | "cancel"; account: Account } | null>(null);
   const [charging, setCharging] = useState<Account | null>(null);
+  // CORREÇÃO DE AUDITORIA (full-audit, sev. 78): a listagem vinha sempre truncada em
+  // 200 registros sem nenhuma forma de acessar os demais. Agora o backend pagina de
+  // verdade (financial.routes.ts) e esta tela acumula páginas via "Carregar mais".
+  const PAGE_SIZE = 50;
+  const [loadedPages, setLoadedPages] = useState(1);
 
-  const query = useQuery({ queryKey: [cfg.queryKey, status], queryFn: () => api.get<Account[]>(cfg.path, { status: status || undefined }) });
+  const query = useQuery({
+    queryKey: [cfg.queryKey, status, loadedPages],
+    queryFn: () => api.getPaged<Account[]>(cfg.path, { status: status || undefined, page: 1, pageSize: PAGE_SIZE * loadedPages }),
+  });
+  const rows = query.data?.data ?? [];
+  const total = query.data?.meta?.total ?? rows.length;
+  const hasMore = rows.length < total;
 
   const mutation = useMutation({
     mutationFn: ({ action, account }: { action: "settle" | "cancel"; account: Account }) =>
@@ -278,9 +289,9 @@ export function AccountsPage({ kind }: { kind: Kind }) {
   });
 
   const totals = useMemo(() => {
-    const open = (query.data ?? []).filter((a) => a.status === "PENDING" || a.status === "OVERDUE");
+    const open = rows.filter((a) => a.status === "PENDING" || a.status === "OVERDUE");
     return { count: open.length, amount: open.reduce((s, a) => s + toNumber(a.amount), 0) };
-  }, [query.data]);
+  }, [rows]);
 
   const now = Date.now();
 
@@ -288,14 +299,24 @@ export function AccountsPage({ kind }: { kind: Kind }) {
     <Page>
       <PageHeader
         title={cfg.title}
-        subtitle={query.data ? `Em aberto: ${totals.count} conta(s) · ${money(totals.amount)}` : undefined}
+        subtitle={query.data ? `Em aberto: ${totals.count} conta(s) · ${money(totals.amount)} · exibindo ${rows.length} de ${total}` : undefined}
         actions={
           <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreating(true)}>
             Nova conta
           </Button>
         }
       />
-      <TextField select size="small" label="Status" value={status} onChange={(e) => setStatus(e.target.value)} sx={{ mb: 2, minWidth: 200 }}>
+      <TextField
+        select
+        size="small"
+        label="Status"
+        value={status}
+        onChange={(e) => {
+          setStatus(e.target.value);
+          setLoadedPages(1);
+        }}
+        sx={{ mb: 2, minWidth: 200 }}
+      >
         <MenuItem value="">Todos</MenuItem>
         {(Object.keys(STATUS_LABEL) as Status[]).map((s) => (
           <MenuItem key={s} value={s}>
@@ -303,8 +324,8 @@ export function AccountsPage({ kind }: { kind: Kind }) {
           </MenuItem>
         ))}
       </TextField>
-      <QueryState query={query} isEmpty={(d) => d.length === 0} emptyMessage="Nenhuma conta encontrada.">
-        {(rows) => (
+      <QueryState query={query} isEmpty={(d) => d.data.length === 0} emptyMessage="Nenhuma conta encontrada.">
+        {() => (
           <TableContainer component={Paper}>
             <Table size="small">
               <TableHead>
@@ -366,6 +387,13 @@ export function AccountsPage({ kind }: { kind: Kind }) {
           </TableContainer>
         )}
       </QueryState>
+      {hasMore && (
+        <Stack direction="row" justifyContent="center" sx={{ mt: 2 }}>
+          <Button onClick={() => setLoadedPages((p) => p + 1)} disabled={query.isFetching}>
+            {query.isFetching ? "Carregando…" : `Carregar mais (${rows.length} de ${total})`}
+          </Button>
+        </Stack>
+      )}
       {creating && <CreateDialog kind={kind} onClose={() => setCreating(false)} />}
       {charging && <ChargeDialog account={charging} onClose={() => setCharging(null)} />}
       <ConfirmDialog

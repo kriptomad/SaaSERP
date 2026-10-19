@@ -106,7 +106,7 @@ export interface ProductInput {
 }
 
 export const clientsApi = {
-  list: (search?: string) => api.get<Client[]>("/clients", { search }),
+  list: (search?: string, page?: number, pageSize?: number) => api.getPaged<Client[]>("/clients", { search, page, pageSize }),
   create: (input: PartyInput & { creditLimit: number; isReseller?: boolean; isBusinessAccount?: boolean; healthInsurancePlanId?: string | null; healthInsurancePlanMemberId?: string | null }) =>
     api.post<Client>("/clients", input),
   update: (
@@ -151,7 +151,7 @@ export const clientCreditApi = {
 };
 
 export const suppliersApi = {
-  list: (search?: string) => api.get<Supplier[]>("/suppliers", { search }),
+  list: (search?: string, page?: number, pageSize?: number) => api.getPaged<Supplier[]>("/suppliers", { search, page, pageSize }),
   create: (input: PartyInput) => api.post<Supplier>("/suppliers", input),
   update: (id: string, input: Partial<PartyInput>) => api.patch<Supplier>(`/suppliers/${id}`, input),
 };

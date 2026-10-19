@@ -86,11 +86,21 @@ export function PosPage() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [lastSaleMessage, setLastSaleMessage] = useState<string | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
+  // CORREÇÃO DE AUDITORIA (full-audit, sev. 90): antes, uma falha de sincronização
+  // da fila de vendas pendentes era descartada silenciosamente — o caixa fechava o
+  // turno acreditando que tudo estava sincronizado, sem nenhum alerta visível.
+  const [syncError, setSyncError] = useState<string | null>(null);
   // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): idade (ms) do catálogo offline desde
   // o último sync bem-sucedido — null enquanto nunca sincronizou nesta sessão. Usado
   // para alertar o caixa ANTES de fechar vendas com um preço/estoque local velho
   // demais para confiar (ver CATALOG_STALE_THRESHOLD_MS).
   const [catalogAgeMs, setCatalogAgeMs] = useState<number | null>(null);
+  // CORREÇÃO DE AUDITORIA (full-audit, sev. "fa-offline-catalog-stale-no-block"): o
+  // alerta de catálogo desatualizado era meramente informativo — o caixa podia
+  // ignorá-lo e fechar a venda normalmente com preços/estoque potencialmente velhos
+  // demais para confiar. Agora, com a rede indisponível (isOnline=false, sem revalidação
+  // no servidor), é exigida uma confirmação explícita antes de prosseguir.
+  const [staleConfirmOpen, setStaleConfirmOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH");
   // Pagamento Dividido/Split (Capítulo 9) — o cenário real mais comum de PDV físico:
   // parte em dinheiro, parte no cartão (débito OU crédito, nunca os dois juntos nesta
@@ -162,7 +172,9 @@ export function PosPage() {
       .then(() => getOldestCachedProductAge())
       .then(setCatalogAgeMs)
       .catch((error) => setCatalogError((error as Error).message));
-    syncPendingSales().catch(() => undefined);
+    syncPendingSales()
+      .then(() => setSyncError(null))
+      .catch((error) => setSyncError((error as Error).message ?? "Falha ao sincronizar vendas pendentes."));
 
     fetchCurrentCashRegister()
       .then((res) => setCashRegisterId(res.data?.id ?? null))
@@ -445,6 +457,15 @@ export function PosPage() {
   async function handleCloseSale() {
     if (!user || cart.length === 0 || !cashRegisterId) return;
 
+    // Bloqueia o fechamento até confirmação explícita quando o catálogo local está
+    // desatualizado além do limite E não há rede para revalidar no servidor — evita
+    // vender silenciosamente com preço/estoque obsoleto num tablet esquecido offline.
+    if (!isOnline && catalogAgeMs !== null && catalogAgeMs > CATALOG_STALE_THRESHOLD_MS && !staleConfirmOpen) {
+      setStaleConfirmOpen(true);
+      return;
+    }
+    setStaleConfirmOpen(false);
+
     // GAP DE AUDITORIA FECHADO (Pagamento Dividido/Split): `splitCashAmount` vem de um
     // <input type="number"> sem `step`, então o operador pode digitar mais de 2 casas
     // decimais (ex.: "33.339"). Sem arredondar os DOIS lados para centavos ANTES de
@@ -573,6 +594,12 @@ export function PosPage() {
       </Stack>
 
       {catalogError && <Alert severity="warning" sx={{ mb: 2 }}>Catálogo não sincronizado: {catalogError}</Alert>}
+      {syncError && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          Falha ao sincronizar vendas pendentes: {syncError}. As vendas continuam seguras no dispositivo e serão
+          reenviadas automaticamente — mas verifique a conexão com o servidor.
+        </Alert>
+      )}
       {catalogAgeMs !== null && catalogAgeMs > CATALOG_STALE_THRESHOLD_MS && (
         <Alert severity="warning" sx={{ mb: 2 }}>
           Catálogo local desatualizado há {Math.floor(catalogAgeMs / (60 * 60 * 1000))}h — preços e estoque exibidos podem estar
@@ -758,6 +785,25 @@ export function PosPage() {
           </Button>
         </Paper>
       </Stack>
+
+      {/* Gate de catálogo desatualizado offline — bloqueia o fechamento até confirmação
+          explícita do operador (ver handleCloseSale/CATALOG_STALE_THRESHOLD_MS). */}
+      <Dialog open={staleConfirmOpen} onClose={() => setStaleConfirmOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Catálogo local desatualizado</DialogTitle>
+        <DialogContent>
+          <Alert severity="warning">
+            Este dispositivo está offline e o catálogo local não sincroniza há mais de{" "}
+            {Math.floor((catalogAgeMs ?? 0) / (60 * 60 * 1000))}h. Preços e estoque exibidos podem estar incorretos.
+            Deseja continuar mesmo assim?
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setStaleConfirmOpen(false)}>Cancelar</Button>
+          <Button variant="contained" color="warning" onClick={handleCloseSale}>
+            Confirmar e fechar venda
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Farmácia/Drogaria (Capítulo 4.5 — Portaria 344/1998, RDC 1.000/2025): captura
           obrigatória antes de adicionar ao carrinho qualquer item de retenção/controlado.

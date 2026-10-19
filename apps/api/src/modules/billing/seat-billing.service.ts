@@ -71,30 +71,47 @@ export async function calculateSeatBilling(
  * operação de gestão de usuários em si — apenas fica registrada em log para
  * reconciliação manual/próxima tentativa, já que o valor real cobrado é
  * recalculado a cada ciclo de qualquer forma (Capítulo 2.7).
+ *
+ * GAP DE AUDITORIA FECHADO (condição de corrida): duas chamadas quase
+ * simultâneas para o mesmo tenant (ex.: dois webhooks do Stripe chegando fora
+ * de ordem, ou criação + desativação de usuário concorrentes) liam a mesma
+ * contagem de assentos e cada uma chamava `syncSeatQuantityWithStripe`
+ * independentemente — a que terminasse por último "vencia", podendo persistir
+ * `stripeSeatSubscriptionItemId`/quantidade obsoletos. Serializa agora por
+ * tenant com `pg_advisory_xact_lock` (liberado automaticamente ao fim da
+ * transação, mesmo se o processo morrer no meio do caminho) para garantir que
+ * apenas uma reconciliação por tenant rode por vez.
  */
 export async function reconcileSeatBillingWithProvider(prisma: TenantScopedPrismaClient, tenantId: string): Promise<void> {
-  const subscription = await prisma.subscription.findFirst({ where: { tenantId }, orderBy: { createdAt: "desc" } });
-  if (!subscription || subscription.provider !== "stripe") return;
+  await prisma.$transaction(async (tx) => {
+    // `hashtext` reduz o UUID do tenant a um int32 estável — suficiente para o
+    // advisory lock de 64 bits (`pg_advisory_xact_lock(bigint)`), sem precisar
+    // de uma segunda coluna/tabela só para guardar uma chave de lock numérica.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${tenantId}))`;
 
-  const seatPriceParam = await prisma.systemParameter.findUnique({ where: { key: "STRIPE_EXTRA_SEAT_PRICE_ID" } });
-  if (!seatPriceParam?.value) {
-    log.warn({ tenantId }, "STRIPE_EXTRA_SEAT_PRICE_ID não configurado — excedente de assentos não sincronizado com o Stripe");
-    return;
-  }
+    const subscription = await tx.subscription.findFirst({ where: { tenantId }, orderBy: { createdAt: "desc" } });
+    if (!subscription || subscription.provider !== "stripe") return;
 
-  const seatBilling = await calculateSeatBilling(prisma, tenantId);
-
-  try {
-    const itemId = await syncSeatQuantityWithStripe(
-      subscription.externalSubscriptionId,
-      subscription.stripeSeatSubscriptionItemId,
-      seatPriceParam.value,
-      seatBilling.extraSeatCount,
-    );
-    if (itemId !== subscription.stripeSeatSubscriptionItemId) {
-      await prisma.subscription.update({ where: { id: subscription.id }, data: { stripeSeatSubscriptionItemId: itemId } });
+    const seatPriceParam = await tx.systemParameter.findUnique({ where: { key: "STRIPE_EXTRA_SEAT_PRICE_ID" } });
+    if (!seatPriceParam?.value) {
+      log.warn({ tenantId }, "STRIPE_EXTRA_SEAT_PRICE_ID não configurado — excedente de assentos não sincronizado com o Stripe");
+      return;
     }
-  } catch (err) {
-    log.error({ tenantId, err }, "falha ao sincronizar excedente de assentos com o Stripe");
-  }
+
+    const seatBilling = await calculateSeatBilling(tx, tenantId);
+
+    try {
+      const itemId = await syncSeatQuantityWithStripe(
+        subscription.externalSubscriptionId,
+        subscription.stripeSeatSubscriptionItemId,
+        seatPriceParam.value,
+        seatBilling.extraSeatCount,
+      );
+      if (itemId !== subscription.stripeSeatSubscriptionItemId) {
+        await tx.subscription.update({ where: { id: subscription.id }, data: { stripeSeatSubscriptionItemId: itemId } });
+      }
+    } catch (err) {
+      log.error({ tenantId, err }, "falha ao sincronizar excedente de assentos com o Stripe");
+    }
+  });
 }

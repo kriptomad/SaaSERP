@@ -15,14 +15,38 @@
 // comum: requireApiKey (popula req.session) -> tenantContextMiddleware
 // (Capítulo 7.1, injeta tenantId em toda query via Prisma Client Extension)
 // -> tenantLockoutMiddleware (Capítulo 2, 402 se inadimplente).
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireApiKey } from "../../middlewares/api-key-auth.middleware";
 import { tenantContextMiddleware } from "../../middlewares/tenant-context.middleware";
 import { tenantLockoutMiddleware } from "../../middlewares/tenant-lockout.middleware";
+import { enforceRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
 
 export const publicApiRouter = Router();
+
+// GAP DE AUDITORIA FECHADO: `requireApiKey` já aplica um rate limit genérico por
+// IP (ver `api-key-auth.middleware.ts`), mas isso sozinho não escopa por API
+// key/tenant — várias integrações de tenants diferentes atrás do mesmo IP
+// (gateway/proxy corporativo) dividiam o mesmo balde, e uma única API key
+// comprometida usando múltiplos IPs nunca era limitada por tenant. Aplicado
+// DEPOIS de `requireApiKey` (que já populou `req.apiKeyAuth`) em toda rota desta
+// API pública (sales/products/stock-adjust), reaproveitando o MESMO helper
+// `enforceRateLimit` (Redis INCR+TTL) de todo o resto do projeto.
+const PUBLIC_API_RATE_LIMIT_MAX = 120;
+const PUBLIC_API_RATE_LIMIT_WINDOW_SECONDS = 60;
+
+async function rateLimitByApiKey(req: Request, res: Response, next: NextFunction) {
+  try {
+    await enforceRateLimit(`public-api:${req.apiKeyAuth!.apiKeyId}`, PUBLIC_API_RATE_LIMIT_MAX, PUBLIC_API_RATE_LIMIT_WINDOW_SECONDS);
+    next();
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    next(err);
+  }
+}
 
 const PAGE_SIZE_MAX = 100;
 
@@ -51,7 +75,7 @@ class InvalidDateRangeError extends Error {}
 // VENDAS (escopo "sales:read")
 // ─────────────────────────────────────────────────────────────────────────
 
-const salesReadChain = [requireApiKey("sales:read"), tenantContextMiddleware, tenantLockoutMiddleware];
+const salesReadChain = [requireApiKey("sales:read"), rateLimitByApiKey, tenantContextMiddleware, tenantLockoutMiddleware];
 
 publicApiRouter.get("/api/public/v1/sales", ...salesReadChain, async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
@@ -111,8 +135,8 @@ publicApiRouter.get("/api/public/v1/sales/:id", ...salesReadChain, async (req: R
 // PRODUTOS/ESTOQUE (escopos "stock:read"/"stock:write")
 // ─────────────────────────────────────────────────────────────────────────
 
-const stockReadChain = [requireApiKey("stock:read"), tenantContextMiddleware, tenantLockoutMiddleware];
-const stockWriteChain = [requireApiKey("stock:write"), tenantContextMiddleware, tenantLockoutMiddleware];
+const stockReadChain = [requireApiKey("stock:read"), rateLimitByApiKey, tenantContextMiddleware, tenantLockoutMiddleware];
+const stockWriteChain = [requireApiKey("stock:write"), rateLimitByApiKey, tenantContextMiddleware, tenantLockoutMiddleware];
 
 publicApiRouter.get("/api/public/v1/products", ...stockReadChain, async (req: Request, res: Response) => {
   const { tenantId } = req.session!;

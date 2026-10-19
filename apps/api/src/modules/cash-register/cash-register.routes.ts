@@ -14,6 +14,17 @@ import { closeCashRegister, registerCashMovement } from "./close-cash-register.s
 
 export const cashRegisterRouter = Router();
 
+// GAP DE AUDITORIA FECHADO: a abertura de caixa fazia um `findFirst` seguido de um
+// `create` fora de qualquer transação — duas requisições concorrentes do mesmo
+// operador (duplo clique, duas abas, retry de rede) podiam ambas passar pela
+// checagem "nenhum caixa OPEN" antes de qualquer uma commitar, abrindo dois
+// `CashRegister` OPEN simultâneos para o mesmo operador. A checagem + o `create`
+// agora rodam dentro de uma única transação Serializable: o Postgres serializa as
+// duas transações concorrentes e aborta a segunda com erro de serialização (nunca
+// as duas commitando dois caixas abertos), que é tratado abaixo como o mesmo erro
+// de negócio "já possui caixa aberto".
+class CashRegisterAlreadyOpenError extends Error {}
+
 async function hasPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
   const [defaultGrant, override] = await Promise.all([
     prisma.roleDefaultPermission.findUnique({ where: { role_permissionCode: { role: role as any, permissionCode } } }),
@@ -53,25 +64,58 @@ cashRegisterRouter.post("/cash-registers", requireAuth, async (req: Request, res
   // Um operador não pode abrir um segundo caixa enquanto o anterior ainda está
   // OPEN — evita duas gavetas físicas sendo conferidas simultaneamente sob o mesmo
   // operador, o que inviabilizaria o cálculo de divergência da gaveta cega (6.7).
-  const alreadyOpen = await prisma.cashRegister.findFirst({ where: { tenantId, openedById: userId, status: "OPEN" } });
-  if (alreadyOpen) {
-    return res.status(409).json({
-      success: false,
-      data: null,
-      error: { code: "CASH_REGISTER_ALREADY_OPEN", message: "Você já possui um caixa aberto. Feche-o antes de abrir outro." },
-    });
+  // Checagem + criação dentro de uma transação Serializable (nunca um findFirst
+  // solto seguido de create): Postgres detecta e aborta a corrida entre duas
+  // aberturas concorrentes do mesmo operador em vez de permitir que ambas passem
+  // pela checagem antes de qualquer uma commitar.
+  try {
+    const register = await prisma.$transaction(
+      async (tx) => {
+        const alreadyOpen = await tx.cashRegister.findFirst({ where: { tenantId, openedById: userId, status: "OPEN" } });
+        if (alreadyOpen) {
+          throw new CashRegisterAlreadyOpenError("Você já possui um caixa aberto. Feche-o antes de abrir outro.");
+        }
+        return tx.cashRegister.create({
+          data: {
+            tenantId,
+            openedById: userId,
+            openingAmount: new Prisma.Decimal(parsed.data.openingAmount),
+            status: "OPEN",
+          },
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    return res.status(201).json({ success: true, data: register, error: null });
+  } catch (err) {
+    if (err instanceof CashRegisterAlreadyOpenError) {
+      return res.status(409).json({
+        success: false,
+        data: null,
+        error: { code: "CASH_REGISTER_ALREADY_OPEN", message: err.message },
+      });
+    }
+    // Falha de serialização do Postgres (código 40001) na corrida entre duas
+    // aberturas concorrentes do mesmo operador — mesmo resultado de negócio do
+    // caso acima, apenas detectado pelo banco em vez de pela checagem em memória.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2034") {
+      return res.status(409).json({
+        success: false,
+        data: null,
+        error: { code: "CASH_REGISTER_ALREADY_OPEN", message: "Abertura de caixa concorrente detectada. Verifique se já não há um caixa aberto antes de tentar novamente." },
+      });
+    }
+    // Índice único parcial de defesa em profundidade a nível de banco (migration
+    // `cash_registers_open_per_operator_unique_idx`) — mesma resposta de negócio.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return res.status(409).json({
+        success: false,
+        data: null,
+        error: { code: "CASH_REGISTER_ALREADY_OPEN", message: "Você já possui um caixa aberto. Feche-o antes de abrir outro." },
+      });
+    }
+    throw err;
   }
-
-  const register = await prisma.cashRegister.create({
-    data: {
-      tenantId,
-      openedById: userId,
-      openingAmount: new Prisma.Decimal(parsed.data.openingAmount),
-      status: "OPEN",
-    },
-  });
-
-  return res.status(201).json({ success: true, data: register, error: null });
 });
 
 cashRegisterRouter.get("/cash-registers/:id", requireAuth, async (req: Request, res: Response) => {

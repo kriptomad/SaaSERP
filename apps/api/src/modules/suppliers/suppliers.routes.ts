@@ -27,18 +27,26 @@ suppliersRouter.get("/suppliers", requireAuth, async (req: Request, res: Respons
   }
 
   const search = typeof req.query.search === "string" ? req.query.search : null;
-  const suppliers = await prisma.supplier.findMany({
-    where: {
-      tenantId,
-      ...(search
-        ? { OR: [{ name: { contains: search, mode: "insensitive" } }, { document: { contains: search } }] }
-        : {}),
-    },
-    orderBy: { name: "asc" },
-    take: 50,
-  });
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = {
+    tenantId,
+    ...(search
+      ? { OR: [{ name: { contains: search, mode: "insensitive" as const } }, { document: { contains: search } }] }
+      : {}),
+  };
 
-  return res.json({ success: true, data: suppliers, error: null });
+  const [suppliers, total] = await prisma.$transaction([
+    prisma.supplier.findMany({
+      where,
+      orderBy: { name: "asc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.supplier.count({ where }),
+  ]);
+
+  return res.json({ success: true, data: suppliers, error: null, meta: { page, pageSize, total } });
 });
 
 suppliersRouter.get("/suppliers/:id", requireAuth, async (req: Request, res: Response) => {

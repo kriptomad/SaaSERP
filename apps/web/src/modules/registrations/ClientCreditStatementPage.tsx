@@ -38,7 +38,7 @@ function ClientPicker({ value, onChange }: { value: Client | null; onChange: (cl
   const debounced = useDebounced(search.trim());
   const query = useQuery<Client[]>({
     queryKey: ["clients", "credit-picker", debounced],
-    queryFn: () => clientsApi.list(debounced || undefined),
+    queryFn: () => clientsApi.list(debounced || undefined).then((r) => r.data),
   });
 
   return (

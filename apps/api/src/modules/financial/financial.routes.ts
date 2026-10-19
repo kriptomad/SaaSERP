@@ -155,16 +155,29 @@ financialRouter.post("/cost-centers", requireAuth, async (req: Request, res: Res
 financialRouter.get("/accounts-payable", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const status = typeof req.query.status === "string" ? req.query.status : null;
+  const ACCOUNT_PAYABLE_STATUSES = ["PENDING", "PAID", "OVERDUE", "CANCELLED"] as const;
+  const statusRaw = typeof req.query.status === "string" ? req.query.status : null;
+  const status = statusRaw && (ACCOUNT_PAYABLE_STATUSES as readonly string[]).includes(statusRaw) ? (statusRaw as (typeof ACCOUNT_PAYABLE_STATUSES)[number]) : null;
   const supplierId = typeof req.query.supplierId === "string" ? req.query.supplierId : null;
+  // CORREÇÃO DE AUDITORIA (full-audit, sev. 78): antes a listagem vinha sempre
+  // limitada a 200 registros, sem nenhuma forma de o frontend acessar os demais —
+  // contas antigas simplesmente desapareciam da UI. Agora suporta paginação real
+  // via `page`/`pageSize`, com `total` retornado para a UI montar os controles.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { tenantId, ...(status ? { status } : {}), ...(supplierId ? { supplierId } : {}) };
 
-  const payables = await prisma.accountPayable.findMany({
-    where: { tenantId, ...(status ? { status: status as any } : {}), ...(supplierId ? { supplierId } : {}) },
-    include: { supplier: true, chartOfAccount: true, costCenter: true },
-    orderBy: { dueDate: "asc" },
-    take: 200,
-  });
-  return res.json({ success: true, data: payables, error: null });
+  const [payables, total] = await Promise.all([
+    prisma.accountPayable.findMany({
+      where,
+      include: { supplier: true, chartOfAccount: true, costCenter: true },
+      orderBy: { dueDate: "asc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.accountPayable.count({ where }),
+  ]);
+  return res.json({ success: true, data: payables, meta: { page, pageSize, total }, error: null });
 });
 
 const createPayableSchema = z.object({
@@ -272,16 +285,27 @@ financialRouter.post("/accounts-payable/:id/cancel", requireAuth, async (req: Re
 financialRouter.get("/accounts-receivable", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const status = typeof req.query.status === "string" ? req.query.status : null;
+  const ACCOUNT_RECEIVABLE_STATUSES = ["PENDING", "PAID", "OVERDUE", "CANCELLED"] as const;
+  const statusRaw = typeof req.query.status === "string" ? req.query.status : null;
+  const status = statusRaw && (ACCOUNT_RECEIVABLE_STATUSES as readonly string[]).includes(statusRaw) ? (statusRaw as (typeof ACCOUNT_RECEIVABLE_STATUSES)[number]) : null;
   const clientId = typeof req.query.clientId === "string" ? req.query.clientId : null;
+  // CORREÇÃO DE AUDITORIA (full-audit, sev. 78): mesma correção de paginação real
+  // aplicada em /accounts-payable acima.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { tenantId, ...(status ? { status } : {}), ...(clientId ? { clientId } : {}) };
 
-  const receivables = await prisma.accountReceivable.findMany({
-    where: { tenantId, ...(status ? { status: status as any } : {}), ...(clientId ? { clientId } : {}) },
-    include: { client: true, chartOfAccount: true },
-    orderBy: { dueDate: "asc" },
-    take: 200,
-  });
-  return res.json({ success: true, data: receivables, error: null });
+  const [receivables, total] = await Promise.all([
+    prisma.accountReceivable.findMany({
+      where,
+      include: { client: true, chartOfAccount: true },
+      orderBy: { dueDate: "asc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.accountReceivable.count({ where }),
+  ]);
+  return res.json({ success: true, data: receivables, meta: { page, pageSize, total }, error: null });
 });
 
 const createReceivableSchema = z.object({

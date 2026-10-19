@@ -7,6 +7,7 @@
 // rápido" sem virar um motor de busca full-text (fora de escopo desta 1ª
 // implementação).
 import { Router, Request, Response } from "express";
+import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 
@@ -20,9 +21,20 @@ export interface SearchResultItem {
   route: string;
 }
 
+// GAP DE AUDITORIA FECHADO: `q` não tinha teto de tamanho — uma string gigante
+// (ex.: dezenas de KB) virava literal em cada `contains`/`ILIKE` de 4 queries
+// Prisma paralelas, desperdiçando CPU/memória do Postgres por request sem
+// nenhum ganho real de busca (nenhum campo pesquisado aqui chega perto de 200
+// caracteres).
+const searchQuerySchema = z.object({ q: z.string().max(200).optional() });
+
 globalSearchRouter.get("/search", requireAuth, async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
-  const term = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const parsedQuery = searchQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsedQuery.error.message } });
+  }
+  const term = typeof parsedQuery.data.q === "string" ? parsedQuery.data.q.trim() : "";
   if (term.length < 2) {
     return res.json({ success: true, data: [], error: null });
   }

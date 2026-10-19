@@ -198,6 +198,10 @@ recipesRouter.get("/production-batches/loss-report", requireAuth, requireModule(
       ...(to && !Number.isNaN(to.getTime()) ? { producedAt: { lte: to } } : {}),
     },
     include: { finishedProduct: { select: { id: true, name: true, sku: true } } },
+    orderBy: { producedAt: "desc" },
+    // Teto defensivo: sem filtro de período, este relatório agregava TODAS as
+    // fornadas já produzidas pelo tenant desde o início da operação.
+    take: 500,
   });
 
   const byProduct = new Map<string, { productId: string; productName: string; sku: string; totalProduced: Prisma.Decimal; totalLost: Prisma.Decimal; batchCount: number }>();

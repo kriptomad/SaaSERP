@@ -15,6 +15,9 @@ import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { parseNfeXml, matchNfeItemsToCatalog, findSupplierByDocument, InvalidNfeXmlError } from "./nfe-xml-import.service";
 import { isFeatureEnabled } from "../../lib/feature-flags";
+import { createModuleLogger } from "../../lib/logger";
+
+const logger = createModuleLogger("nfe-xml-import");
 
 // Rollout progressivo (Capítulo 15.2) — feature nova (ver nfe-xml-import.service.ts),
 // liberada por padrão para tenants cadastrados pelo painel admin em
@@ -86,10 +89,46 @@ const confirmItemSchema = z.object({
 });
 
 const confirmSchema = z.object({
+  xml: z.string().min(1), // XML original — revalidado aqui contra os valores editados pelo lojista (nunca confiamos apenas no que o front reenvia como "items")
   supplierId: z.string(),
   dueDate: z.coerce.date().optional(),
   items: z.array(confirmItemSchema).min(1),
 });
+
+// Tolerância de arredondamento para considerar quantidade/custo "iguais" ao XML
+// (centavos de diferença por conversão float<->string no front não devem disparar
+// alerta de divergência, mas qualquer coisa além disso é registrada em log de
+// auditoria para investigação — o lojista pode legitimamente ajustar valores
+// (ex.: desconto comercial não refletido na nota), mas a divergência nunca deve
+// passar silenciosa).
+const DIVERGENCE_TOLERANCE = 0.01;
+
+function logConfirmDivergences(tenantId: string, userId: string, parsedItems: ReturnType<typeof parseNfeXml>["items"], confirmedItems: z.infer<typeof confirmItemSchema>[]) {
+  const parsedByCProd = new Map(parsedItems.map((item) => [item.cProd, item]));
+  for (const confirmed of confirmedItems) {
+    const original = parsedByCProd.get(confirmed.cProd);
+    if (!original) {
+      logger.warn({ tenantId, userId, cProd: confirmed.cProd }, "Import de NF-e confirmado com item (cProd) ausente no XML original enviado no preview — possível XML divergente entre preview e confirm.");
+      continue;
+    }
+    const qtyDiff = Math.abs(confirmed.quantity - Number(original.quantity));
+    const costDiff = Math.abs(confirmed.unitCost - Number(original.unitCost));
+    if (qtyDiff > DIVERGENCE_TOLERANCE || costDiff > DIVERGENCE_TOLERANCE) {
+      logger.warn(
+        {
+          tenantId,
+          userId,
+          cProd: confirmed.cProd,
+          xmlQuantity: original.quantity.toString(),
+          confirmedQuantity: confirmed.quantity,
+          xmlUnitCost: original.unitCost.toString(),
+          confirmedUnitCost: confirmed.unitCost,
+        },
+        "Divergência entre quantidade/custo do XML original e valores confirmados no import de NF-e — auditar antes de considerar fraude/erro de digitação.",
+      );
+    }
+  }
+}
 
 nfeXmlImportRouter.post("/purchase-orders/import-nfe/confirm", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireStockWrite(req, res))) return;
@@ -101,14 +140,30 @@ nfeXmlImportRouter.post("/purchase-orders/import-nfe/confirm", requireAuth, asyn
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsedBody.error.message } });
   }
   const { userId, tenantId } = req.session!;
-  const { supplierId, items } = parsedBody.data;
+  const { xml, supplierId, items } = parsedBody.data;
 
-  const supplier = await prisma.supplier.findFirst({ where: { id: supplierId }, select: { id: true } });
+  // Revalida os valores editados pelo lojista contra o XML original (nunca confia
+  // apenas no payload "items" reenviado pelo front) — reinterpreta o mesmo XML cru
+  // já usado no preview e registra em log de auditoria qualquer divergência de
+  // quantidade/custo entre o que a NF-e realmente diz e o que foi confirmado
+  // (CORREÇÃO DE AUDITORIA: antes não havia nenhuma revalidação nesta etapa).
+  let parsedNfeForConfirm;
+  try {
+    parsedNfeForConfirm = parseNfeXml(xml);
+  } catch (error) {
+    if (error instanceof InvalidNfeXmlError) {
+      return res.status(422).json({ success: false, data: null, error: { code: "INVALID_NFE_XML", message: error.message } });
+    }
+    throw error;
+  }
+  logConfirmDivergences(tenantId, userId, parsedNfeForConfirm.items, items);
+
+  const supplier = await prisma.supplier.findFirst({ where: { id: supplierId, tenantId }, select: { id: true } });
   if (!supplier) {
     return res.status(404).json({ success: false, data: null, error: { code: "SUPPLIER_NOT_FOUND", message: "Fornecedor não encontrado neste tenant." } });
   }
   const productIds = [...new Set(items.map((i) => i.productId))];
-  const ownedProducts = await prisma.product.count({ where: { id: { in: productIds } } });
+  const ownedProducts = await prisma.product.count({ where: { id: { in: productIds }, tenantId } });
   if (ownedProducts !== productIds.length) {
     return res.status(404).json({ success: false, data: null, error: { code: "PRODUCT_NOT_FOUND", message: "Um ou mais produtos selecionados não pertencem a este tenant." } });
   }
@@ -117,8 +172,10 @@ nfeXmlImportRouter.post("/purchase-orders/import-nfe/confirm", requireAuth, asyn
     // Mesmo esquema de numeração sequencial de purchase-orders.routes.ts — nunca
     // duplicado em uma função compartilhada para não criar acoplamento entre rotas
     // que evoluem de forma independente, mas a regra ("nunca reaproveitar número
-    // mesmo após cancelamento") é a mesma.
-    const lastOrder = await tx.purchaseOrder.findFirst({ orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
+    // mesmo após cancelamento") é a mesma. CORREÇÃO DE AUDITORIA: a numeração
+    // precisa ser escopada por tenant — sem o filtro, o último número considerado
+    // era o último de QUALQUER tenant, gerando colisão/pulo de numeração.
+    const lastOrder = await tx.purchaseOrder.findFirst({ where: { tenantId }, orderBy: { orderNumber: "desc" }, select: { orderNumber: true } });
     const orderNumber = (lastOrder?.orderNumber ?? 0) + 1;
     return tx.purchaseOrder.create({
       data: {

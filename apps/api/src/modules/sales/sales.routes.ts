@@ -295,6 +295,52 @@ salesRouter.patch("/sales/failed-offline-syncs/:id/resolve", requireAuth, async 
   return res.json({ success: true, data: updated, error: null });
 });
 
+// GAP DE AUDITORIA ENCONTRADO E CORRIGIDO (Capítulo 6.8): lista/resolve os registros
+// de `PendingFiscalRefundReconciliation` criados por refund-sale.service.ts quando o
+// cancelamento fiscal já foi confirmado na SEFAZ, mas a fase local do estorno
+// (estoque/caixa/status da venda) falhou depois — mesmo padrão de visibilidade
+// central de `failed-offline-syncs` acima, para que este estado divergente nunca
+// dependa apenas de alguém monitorando logs em tempo real.
+salesRouter.get("/sales/pending-fiscal-refund-reconciliations", requireAuth, async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "pdv:sale:create"))) {
+    return res
+      .status(403)
+      .json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite ver estornos pendentes de reconciliação fiscal." } });
+  }
+  const onlyUnresolved = req.query.status !== "all";
+  const records = await prisma.pendingFiscalRefundReconciliation.findMany({
+    where: { tenantId, ...(onlyUnresolved ? { resolvedAt: null } : {}) },
+    orderBy: { createdAt: "desc" },
+    take: 200,
+  });
+  return res.json({ success: true, data: records, error: null });
+});
+
+const resolvePendingFiscalRefundReconciliationSchema = z.object({ resolutionNote: z.string().min(3) });
+
+salesRouter.patch("/sales/pending-fiscal-refund-reconciliations/:id/resolve", requireAuth, async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "pdv:sale:create"))) {
+    return res
+      .status(403)
+      .json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite resolver estornos pendentes de reconciliação fiscal." } });
+  }
+  const parsed = resolvePendingFiscalRefundReconciliationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+  }
+  const existing = await prisma.pendingFiscalRefundReconciliation.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!existing) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Registro não encontrado." } });
+  }
+  const updated = await prisma.pendingFiscalRefundReconciliation.update({
+    where: { id: existing.id },
+    data: { resolvedAt: new Date(), resolvedByUserId: userId, resolutionNote: parsed.data.resolutionNote },
+  });
+  return res.json({ success: true, data: updated, error: null });
+});
+
 // GAP DE AUDITORIA ENCONTRADO E CORRIGIDO: refundSale (Capítulo 6.8 — dupla
 // autorização por PIN de gerente contra fraude interna de estorno) existia desde o
 // início como serviço, mas nunca foi exposto por nenhuma rota REST.

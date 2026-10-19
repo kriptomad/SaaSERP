@@ -46,6 +46,18 @@ interface PlatformAdminPendingClaims {
   platformAdminUserId: string;
 }
 
+// GAP DE AUDITORIA FECHADO (Capítulo 14.2) — o enrollment de 2FA agora embute um
+// nonce de uso único (gerado e persistido a cada /2fa/enroll, invalidando
+// qualquer enrollment pendente anterior) para que /2fa/confirm só aceite o token
+// da tentativa de enrollment mais recente, nunca um token ainda não expirado de
+// um re-roll anterior do segredo.
+interface PlatformAdminEnrollClaims extends PlatformAdminPendingClaims {
+  // Ausente no token inicial emitido pelo login (mero "ingresso" para chamar
+  // /2fa/enroll); presente e obrigatório no token reemitido por /2fa/enroll, que é
+  // o único aceito por /2fa/confirm (ver checagem explícita nas rotas).
+  nonce?: string;
+}
+
 function signPendingToken(claims: PlatformAdminPendingClaims, audience: string): string {
   return jwt.sign(claims, PRIVATE_KEY, {
     algorithm: "RS256",
@@ -63,8 +75,8 @@ function verifyPendingToken(token: string, audience: string): PlatformAdminPendi
   }) as PlatformAdminPendingClaims;
 }
 
-export const signTwoFactorEnrollToken = (claims: PlatformAdminPendingClaims) => signPendingToken(claims, "platform-admin-2fa-enroll");
-export const verifyTwoFactorEnrollToken = (token: string) => verifyPendingToken(token, "platform-admin-2fa-enroll");
+export const signTwoFactorEnrollToken = (claims: PlatformAdminEnrollClaims) => signPendingToken(claims, "platform-admin-2fa-enroll");
+export const verifyTwoFactorEnrollToken = (token: string) => verifyPendingToken(token, "platform-admin-2fa-enroll") as PlatformAdminEnrollClaims;
 export const signTwoFactorVerifyToken = (claims: PlatformAdminPendingClaims) => signPendingToken(claims, "platform-admin-2fa-verify");
 export const verifyTwoFactorVerifyToken = (token: string) => verifyPendingToken(token, "platform-admin-2fa-verify");
 

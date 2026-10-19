@@ -16,15 +16,16 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const supportTicketsRouter = Router();
 
 const createTicketSchema = z.object({
-  subject: z.string().min(1),
+  subject: z.string().min(1).max(200),
   category: z.enum(["BILLING", "BUG", "HOW_TO", "INTEGRATION", "OUTAGE"]),
   priority: z.enum(["LOW", "NORMAL", "HIGH", "URGENT"]).default("NORMAL"),
-  body: z.string().min(1),
-  attachmentUrls: z.array(z.string()).default([]),
+  body: z.string().min(1).max(10_000),
+  attachmentUrls: z.array(z.string().max(2048)).max(10).default([]),
 });
 
 // POST /support-tickets — abre um chamado novo, já com a primeira mensagem (o
@@ -50,9 +51,10 @@ supportTicketsRouter.post("/support-tickets", requireAuth, async (req: Request, 
 // GET /support-tickets — lista os chamados do próprio tenant (auto-isolado pela
 // extensão — ver cabeçalho).
 supportTicketsRouter.get("/support-tickets", requireAuth, async (req: Request, res: Response) => {
-  const status = req.query.status as string | undefined;
+  const statusParsed = readEnumQuery(res, req.query.status, ["OPEN", "IN_PROGRESS", "WAITING_CUSTOMER", "RESOLVED", "CLOSED"] as const, "status");
+  if (!statusParsed.ok) return;
   const tickets = await prisma.supportTicket.findMany({
-    where: { ...(status ? { status: status as any } : {}) },
+    where: { ...(statusParsed.value ? { status: statusParsed.value } : {}) },
     orderBy: { createdAt: "desc" },
   });
   return res.json({ success: true, data: tickets, error: null });
@@ -80,7 +82,10 @@ supportTicketsRouter.get("/support-tickets/:id", requireAuth, async (req: Reques
   return res.json({ success: true, data: ticket, error: null });
 });
 
-const addMessageSchema = z.object({ body: z.string().min(1), attachmentUrls: z.array(z.string()).default([]) });
+const addMessageSchema = z.object({
+  body: z.string().min(1).max(10_000),
+  attachmentUrls: z.array(z.string().max(2048)).max(10).default([]),
+});
 
 // POST /support-tickets/:id/messages — lojista responde ao atendimento. Reabre o
 // chamado automaticamente se o suporte tinha marcado "aguardando cliente" e o

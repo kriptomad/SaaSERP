@@ -60,7 +60,7 @@ function foreignReference(res: Response) {
 personalPlanningRouter.get("/personal/recurrence-rules", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const rules = await prisma.personalRecurrenceRule.findMany({ where: { tenantId }, orderBy: { nextOccurrenceAt: "asc" } });
+  const rules = await prisma.personalRecurrenceRule.findMany({ where: { tenantId }, orderBy: { nextOccurrenceAt: "asc" }, take: 500 });
   return res.json({ success: true, data: rules, error: null });
 });
 
@@ -119,6 +119,7 @@ personalPlanningRouter.get("/personal/budgets", requireAuth, async (req: Request
     where: { tenantId, ...(monthReferenceParam ? { monthReference: new Date(monthReferenceParam) } : {}) },
     include: { category: true },
     orderBy: { monthReference: "desc" },
+    take: 500,
   });
 
   // Progresso calculado on-the-fly (Capítulo 22.4) — nunca armazenado, para
@@ -171,7 +172,7 @@ personalPlanningRouter.post("/personal/budgets", requireAuth, async (req: Reques
 personalPlanningRouter.get("/personal/goals", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const goals = await prisma.personalGoal.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" } });
+  const goals = await prisma.personalGoal.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" }, take: 500 });
   return res.json({ success: true, data: goals, error: null });
 });
 
@@ -217,7 +218,7 @@ personalPlanningRouter.patch("/personal/goals/:id", requireAuth, async (req: Req
 personalPlanningRouter.get("/personal/debts", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const debts = await prisma.personalDebt.findMany({ where: { tenantId }, include: { installments: { orderBy: { installmentNumber: "asc" } } }, orderBy: { createdAt: "desc" } });
+  const debts = await prisma.personalDebt.findMany({ where: { tenantId }, include: { installments: { orderBy: { installmentNumber: "asc" } } }, orderBy: { createdAt: "desc" }, take: 500 });
   return res.json({ success: true, data: debts, error: null });
 });
 
@@ -371,7 +372,7 @@ personalPlanningRouter.post("/personal/debts/payoff-simulation", requireAuth, as
 personalPlanningRouter.get("/personal/bills", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const bills = await prisma.personalBill.findMany({ where: { tenantId }, orderBy: { dueDay: "asc" } });
+  const bills = await prisma.personalBill.findMany({ where: { tenantId }, orderBy: { dueDay: "asc" }, take: 500 });
   return res.json({ success: true, data: bills, error: null });
 });
 
@@ -415,6 +416,25 @@ personalPlanningRouter.post("/personal/bills/:id/pay", requireAuth, async (req: 
   }
   const paidAmount = payBody.data.amount ?? bill.amount.toNumber();
 
+  // CORREÇÃO DE AUDITORIA: a rota aceitava um `amount` arbitrário sem relação ao
+  // valor real da conta — como o schema não modela pagamento parcial (não há campo
+  // de saldo remanescente; a conta vira PAID por inteiro independentemente do
+  // valor informado), o valor pago precisa ser exatamente o valor da conta (com
+  // tolerância de 1 centavo para erro de arredondamento de ponto flutuante do
+  // client). Pagamento parcial real exigiria um model novo (fora do escopo desta
+  // correção), então aqui a validação é de igualdade, nunca de "menor ou igual".
+  const amountDifference = new Prisma.Decimal(paidAmount).minus(bill.amount).abs();
+  if (amountDifference.greaterThan(0.01)) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: {
+        code: "AMOUNT_MISMATCH",
+        message: `O valor pago (${paidAmount}) deve ser igual ao valor da conta (${bill.amount.toString()}). Pagamento parcial não é suportado.`,
+      },
+    });
+  }
+
   const result = await prisma.$transaction(async (tx) => {
     const claimed = await tx.personalBill.updateMany({ where: { id: bill.id, tenantId, status: { not: "PAID" } }, data: { status: "PAID", lastPaidAt: new Date() } });
     if (claimed.count === 0) return null;
@@ -427,7 +447,12 @@ personalPlanningRouter.post("/personal/bills/:id/pay", requireAuth, async (req: 
           type: "EXPENSE", amount: paidAmount, transactionDate: new Date(), description: `Pagamento: ${bill.name}`,
         },
       });
-      await tx.personalAccount.update({ where: { id: bill.autoDebitAccountId }, data: { currentBalance: { decrement: paidAmount } } });
+      // CORREÇÃO DE AUDITORIA (FK/tenant isolation): faltava o filtro `tenantId` neste
+      // update — mesmo com `autoDebitAccountId` já validado contra o tenant na criação
+      // da bill (ownsAccountAndCategory), o update direto por `id` sem o filtro é uma
+      // defesa em profundidade ausente (mesmo padrão já exigido em todo o resto do
+      // backend: nenhuma escrita por `id` sem `tenantId` no WHERE).
+      await tx.personalAccount.updateMany({ where: { id: bill.autoDebitAccountId, tenantId }, data: { currentBalance: { decrement: paidAmount } } });
     }
     return { bill: updatedBill, transaction };
   });
@@ -497,7 +522,7 @@ personalPlanningRouter.post("/personal/net-worth-snapshots/recompute", requireAu
 personalPlanningRouter.get("/personal/open-finance-consents", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const consents = await prisma.openFinanceConsent.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" } });
+  const consents = await prisma.openFinanceConsent.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" }, take: 500 });
   return res.json({ success: true, data: consents, error: null });
 });
 

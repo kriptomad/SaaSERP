@@ -43,6 +43,13 @@ export interface PendingSale {
   // timestamp (epoch ms) antes do qual esta venda NÃO deve ser retentada —
   // calculado com backoff exponencial + jitter em `requeueWithBackoff`.
   nextAttemptAt?: number;
+  // CORREÇÃO DE AUDITORIA (full-audit): epoch ms de quando esta venda entrou em
+  // SYNCING. Sem isso, uma aba fechada/processo morto no meio do `fetch` deixava a
+  // venda presa em SYNCING para sempre — nunca mais selecionada por nenhum sync
+  // subsequente (nem pelo próprio service worker, nem pelo fallback do app). Usado
+  // por `recoverAbandonedSyncs` para voltar automaticamente para PENDING qualquer
+  // SYNCING mais velho que `SYNC_LEASE_TIMEOUT_MS`.
+  syncStartedAt?: number;
 }
 
 export interface CatalogSyncState {
@@ -50,10 +57,26 @@ export interface CatalogSyncState {
   value: string; // ISO timestamp — usado como `updatedSince` na próxima chamada a GET /products
 }
 
+// CORREÇÃO DE AUDITORIA (full-audit, sev. 98/96): o service worker (public/service-worker.js)
+// NÃO tem acesso a `localStorage`/`sessionStorage` — por isso, antes desta correção, ele
+// só conseguia sincronizar vendas pendentes repassando a tarefa (via postMessage) para uma
+// aba aberta. Se o operador fechasse o PDV após uma venda offline, a sincronização nunca
+// mais rodava até o app ser reaberto. Este espelho em IndexedDB (lido por raw IndexedDB
+// dentro do SW, sem depender de bundling de Dexie) permite que o PRÓPRIO service worker
+// monte o header Authorization e sincronize diretamente no evento `sync`, mesmo com todas
+// as abas fechadas.
+export interface AuthMirrorState {
+  key: "session";
+  token: string | null;
+  apiBaseUrl: string;
+  updatedAt: number;
+}
+
 class FilitechOfflineDatabase extends Dexie {
   products!: Table<CachedProduct, string>;
   pendingSales!: Table<PendingSale, string>;
   syncState!: Table<CatalogSyncState, string>;
+  authMirror!: Table<AuthMirrorState, string>;
 
   constructor() {
     super("filitech-pos-offline");
@@ -61,6 +84,12 @@ class FilitechOfflineDatabase extends Dexie {
       products: "id, sku, barcode, category",
       pendingSales: "localId, syncStatus, createdAt",
       syncState: "key",
+    });
+    this.version(2).stores({
+      products: "id, sku, barcode, category",
+      pendingSales: "localId, syncStatus, createdAt",
+      syncState: "key",
+      authMirror: "key",
     });
   }
 }

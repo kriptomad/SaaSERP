@@ -31,6 +31,17 @@ export async function accrueLoyaltyPoints(tx: TenantScopedTransactionClient, inp
   const earnedPoints = Math.floor(input.totalAmount.mul(program.pointsPerCurrencyUnit).toNumber());
   if (earnedPoints <= 0) return;
 
+  // CORREÇÃO DE AUDITORIA (idempotência por venda): sem esta checagem, reprocessar
+  // o fechamento da mesma venda (retry de rede, replay de fila, dupla submissão)
+  // creditava pontos de fidelidade uma segunda vez para a mesma `saleId`. A checagem
+  // roda ANTES do upsert de saldo — se já existe um lançamento EARN para esta venda,
+  // o saldo nunca chega a ser incrementado de novo (nunca só "silencia" o erro depois
+  // do incremento já ter sido aplicado). `@@unique([saleId, type])` no schema
+  // (migration 20261114090000) é a defesa de banco para a corrida entre duas
+  // chamadas concorrentes desta função para a mesma venda.
+  const alreadyAccrued = await tx.loyaltyTransaction.findUnique({ where: { saleId_type: { saleId: input.saleId, type: "EARN" } } });
+  if (alreadyAccrued) return;
+
   // O cliente já foi validado como pertencente a este tenant por quem chamou esta
   // função (sales.routes.ts) antes de abrir a transação — aqui apenas upsert da conta.
   const account = await tx.loyaltyAccount.upsert({
@@ -39,13 +50,22 @@ export async function accrueLoyaltyPoints(tx: TenantScopedTransactionClient, inp
     update: { pointsBalance: { increment: earnedPoints } },
   });
 
-  await tx.loyaltyTransaction.create({
-    data: {
-      loyaltyAccountId: account.id,
-      type: "EARN",
-      points: earnedPoints,
-      saleId: input.saleId,
-      expiresAt: program.pointsExpireAfterDays ? addDays(new Date(), program.pointsExpireAfterDays) : null,
-    },
-  });
+  try {
+    await tx.loyaltyTransaction.create({
+      data: {
+        loyaltyAccountId: account.id,
+        type: "EARN",
+        points: earnedPoints,
+        saleId: input.saleId,
+        expiresAt: program.pointsExpireAfterDays ? addDays(new Date(), program.pointsExpireAfterDays) : null,
+      },
+    });
+  } catch (err: any) {
+    // Corrida entre duas chamadas concorrentes para a MESMA venda: a constraint
+    // única do banco (`@@unique([saleId, type])`) rejeita a segunda inserção com
+    // P2002. Propaga o erro para abortar e reverter TODA a transação de fechamento
+    // da venda (close-sale.service.ts), inclusive o incremento de saldo acima —
+    // nunca deixa o saldo incrementado sem o lançamento correspondente.
+    throw err;
+  }
 }

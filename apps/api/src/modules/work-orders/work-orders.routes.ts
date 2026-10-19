@@ -30,6 +30,7 @@ import {
 } from "./bill-and-deliver-work-order.service";
 import { enqueueFiscalEmission } from "../fiscal/queues/fiscal-emission.queue";
 import { notifyTenant } from "../notifications/notify.service";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const workOrdersRouter = Router();
 
@@ -60,13 +61,15 @@ workOrdersRouter.get("/work-orders", requireAuth, requireModule("WORK_ORDER"), a
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite consultar ordens de serviço." } });
   }
 
-  const status = typeof req.query.status === "string" ? req.query.status : null;
+  const statusParsed = readEnumQuery(res, req.query.status, ["RECEIVED", "DIAGNOSING", "AWAITING_APPROVAL", "IN_REPAIR", "READY", "DELIVERED", "CANCELLED"] as const, "status");
+  if (!statusParsed.ok) return;
+  const status = statusParsed.value;
   const assignedTechnicianId = typeof req.query.assignedTechnicianId === "string" ? req.query.assignedTechnicianId : null;
 
   const workOrders = await prisma.workOrder.findMany({
     where: {
       tenantId,
-      ...(status ? { status: status as any } : {}),
+      ...(status ? { status } : {}),
       ...(assignedTechnicianId ? { assignedTechnicianId } : {}),
     },
     include: {

@@ -39,7 +39,7 @@ async function requireFinancialWrite(req: Request, res: Response): Promise<boole
 personalInvestmentsRouter.get("/personal/investments", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const investments = await prisma.personalInvestment.findMany({ where: { tenantId }, orderBy: { assetName: "asc" } });
+  const investments = await prisma.personalInvestment.findMany({ where: { tenantId }, orderBy: { assetName: "asc" }, take: 500 });
   const withMarketValue = investments.map((i) => ({
     ...i,
     marketValue: i.quantity.mul(i.currentPrice),

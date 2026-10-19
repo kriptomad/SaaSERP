@@ -16,6 +16,7 @@ import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { notifyTenant } from "../notifications/notify.service";
 import { lookupVehicleByPlate } from "../integrations/vehicle-plate-lookup.service";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const clientRecordsRouter = Router();
 
@@ -62,7 +63,7 @@ clientRecordsRouter.get("/pets", requireAuth, requireModule("PETSHOP_VET"), asyn
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const ownerId = req.query.ownerId as string | undefined;
-  const pets = await prisma.pet.findMany({ where: { tenantId, ...(ownerId ? { ownerId } : {}) }, orderBy: { name: "asc" } });
+  const pets = await prisma.pet.findMany({ where: { tenantId, ...(ownerId ? { ownerId } : {}) }, orderBy: { name: "asc" }, take: 500 });
   return res.json({ success: true, data: pets, error: null });
 });
 
@@ -150,7 +151,7 @@ const vaccineSchema = z.object({ vaccineName: z.string().min(1), appliedAt: z.st
 clientRecordsRouter.get("/pets/:petId/vaccine-records", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const records = await prisma.vaccineRecord.findMany({ where: { tenantId, petId: req.params.petId }, orderBy: { appliedAt: "desc" } });
+  const records = await prisma.vaccineRecord.findMany({ where: { tenantId, petId: req.params.petId }, orderBy: { appliedAt: "desc" }, take: 200 });
   return res.json({ success: true, data: records, error: null });
 });
 
@@ -181,6 +182,7 @@ clientRecordsRouter.get("/vaccine-records/due-soon", requireAuth, requireModule(
     where: { tenantId, nextDoseDueAt: { not: null, lte: threshold } },
     include: { pet: { select: { id: true, name: true, ownerId: true } } },
     orderBy: { nextDoseDueAt: "asc" },
+    take: 500,
   });
   return res.json({ success: true, data: records, error: null });
 });
@@ -203,6 +205,7 @@ clientRecordsRouter.post("/vaccine-records/notify-due-soon", requireAuth, requir
     where: { tenantId, nextDoseDueAt: { not: null, lte: threshold }, reminderSentAt: null },
     include: { pet: { select: { id: true, name: true, ownerId: true, owner: { select: { name: true, phone: true } } } } },
     orderBy: { nextDoseDueAt: "asc" },
+    take: 500,
   });
   const notified: string[] = [];
   for (const record of records) {
@@ -237,7 +240,7 @@ clientRecordsRouter.get("/vehicles", requireAuth, requireModule("AUTO_REPAIR_SHO
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const { ownerId, licensePlate } = req.query as Record<string, string | undefined>;
-  const vehicles = await prisma.vehicle.findMany({ where: { tenantId, ...(ownerId ? { ownerId } : {}), ...(licensePlate ? { licensePlate } : {}) }, orderBy: { createdAt: "desc" } });
+  const vehicles = await prisma.vehicle.findMany({ where: { tenantId, ...(ownerId ? { ownerId } : {}), ...(licensePlate ? { licensePlate } : {}) }, orderBy: { createdAt: "desc" }, take: 500 });
   return res.json({ success: true, data: vehicles, error: null });
 });
 
@@ -319,8 +322,9 @@ const listingSchema = z.object({
 clientRecordsRouter.get("/vehicle-listings", requireAuth, requireModule("VEHICLE_DEALERSHIP"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const status = req.query.status as string | undefined;
-  const listings = await prisma.vehicleListing.findMany({ where: { tenantId, ...(status ? { status: status as any } : {}) }, orderBy: { createdAt: "desc" } });
+  const statusParsed = readEnumQuery(res, req.query.status, ["AVAILABLE", "RESERVED", "SOLD", "CONSIGNED"] as const, "status");
+  if (!statusParsed.ok) return;
+  const listings = await prisma.vehicleListing.findMany({ where: { tenantId, ...(statusParsed.value ? { status: statusParsed.value } : {}) }, orderBy: { createdAt: "desc" }, take: 500 });
   return res.json({ success: true, data: listings, error: null });
 });
 
@@ -487,7 +491,7 @@ clientRecordsRouter.get("/optical-prescriptions", requireAuth, requireModule("OP
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
   const clientId = req.query.clientId as string | undefined;
-  const prescriptions = await prisma.opticalPrescription.findMany({ where: { tenantId, ...(clientId ? { clientId } : {}) }, orderBy: { registeredAt: "desc" } });
+  const prescriptions = await prisma.opticalPrescription.findMany({ where: { tenantId, ...(clientId ? { clientId } : {}) }, orderBy: { registeredAt: "desc" }, take: 500 });
   return res.json({ success: true, data: prescriptions, error: null });
 });
 

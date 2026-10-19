@@ -175,33 +175,65 @@ carWashQueueRouter.get("/car-wash-queue/today", requireAuth, requireModule("CAR_
 // PATCH /appointments/:id/status do módulo de agenda para esses casos).
 const STATUS_SEQUENCE = ["SCHEDULED", "IN_PROGRESS", "COMPLETED"] as const;
 
+class CannotAdvanceError extends Error {}
+
 carWashQueueRouter.patch("/car-wash-queue/:appointmentId/advance-status", requireAuth, requireModule("CAR_WASH_QUEUE"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const { tenantId } = req.session!;
   const appointment = await prisma.appointment.findFirst({ where: { id: req.params.appointmentId, tenantId } });
   if (!appointment) return fail(res, 404, "NOT_FOUND", "Atendimento não encontrado na fila.");
-  const currentIndex = STATUS_SEQUENCE.indexOf(appointment.status as (typeof STATUS_SEQUENCE)[number]);
-  if (currentIndex === -1 || currentIndex === STATUS_SEQUENCE.length - 1) {
-    return fail(res, 409, "CANNOT_ADVANCE", "Este atendimento já está concluído, cancelado ou em um status fora da sequência da fila.");
-  }
-  const nextStatus = STATUS_SEQUENCE[currentIndex + 1];
 
-  // Mesmo débito de ClientServicePackage já aplicado em
-  // scheduling.routes.ts PATCH /appointments/:id/status ao concluir —
-  // replicado aqui para que avançar pela fila produza o mesmo efeito colateral.
-  if (nextStatus === "COMPLETED") {
-    const candidatePackages = await prisma.clientServicePackage.findMany({
-      where: { tenantId, clientId: appointment.clientId, serviceId: appointment.serviceId },
-      orderBy: { purchasedAt: "asc" },
+  try {
+    // CORREÇÃO DE AUDITORIA (condição de corrida/double-consume): leitura do
+    // pacote de sessões (`ClientServicePackage`) e o avanço de status eram feitos
+    // FORA de uma transação — duas chamadas concorrentes de avanço para o mesmo
+    // cliente/serviço (ex.: dois atendentes clicando "concluir" quase ao mesmo
+    // tempo em dois agendamentos distintos do mesmo pacote) podiam ambas ler o
+    // mesmo saldo de sessões restantes ANTES de qualquer uma commitar o
+    // decremento, debitando a mesma sessão duas vezes. Agora tudo roda em uma
+    // única transação com `SELECT ... FOR UPDATE` travando fisicamente tanto a
+    // linha do agendamento quanto as linhas candidatas do pacote até o commit —
+    // mesmo padrão de lock pessimista já usado em liquor-ledger.routes.ts.
+    const updated = await prisma.$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw<{ status: string; clientId: string; serviceId: string }[]>`
+        SELECT status, "clientId", "serviceId"
+        FROM appointments
+        WHERE id = ${appointment.id} AND "tenantId" = ${tenantId}
+        FOR UPDATE
+      `;
+      const current = lockedRows[0];
+      if (!current) throw new CannotAdvanceError("Atendimento não encontrado na fila.");
+      const currentIndex = STATUS_SEQUENCE.indexOf(current.status as (typeof STATUS_SEQUENCE)[number]);
+      if (currentIndex === -1 || currentIndex === STATUS_SEQUENCE.length - 1) {
+        throw new CannotAdvanceError("Este atendimento já está concluído, cancelado ou em um status fora da sequência da fila.");
+      }
+      const nextStatus = STATUS_SEQUENCE[currentIndex + 1];
+
+      if (nextStatus === "COMPLETED") {
+        const candidatePackages = await tx.$queryRaw<
+          { id: string; sessionsUsed: number; totalSessions: number; expiresAt: Date | null }[]
+        >`
+          SELECT id, "sessionsUsed", "totalSessions", "expiresAt"
+          FROM client_service_packages
+          WHERE "tenantId" = ${tenantId} AND "clientId" = ${current.clientId} AND "serviceId" = ${current.serviceId}
+          ORDER BY "purchasedAt" ASC
+          FOR UPDATE
+        `;
+        const activePackage = candidatePackages.find((p) => p.sessionsUsed < p.totalSessions && (!p.expiresAt || p.expiresAt > new Date()));
+        if (activePackage) {
+          await tx.clientServicePackage.update({ where: { id: activePackage.id }, data: { sessionsUsed: { increment: 1 } } });
+        }
+      }
+
+      return tx.appointment.update({ where: { id: appointment.id }, data: { status: nextStatus } });
     });
-    const activePackage = candidatePackages.find((p) => p.sessionsUsed < p.totalSessions && (!p.expiresAt || p.expiresAt > new Date()));
-    if (activePackage) {
-      await prisma.clientServicePackage.update({ where: { id: activePackage.id }, data: { sessionsUsed: { increment: 1 } } });
+    return res.json({ success: true, data: updated, error: null });
+  } catch (err) {
+    if (err instanceof CannotAdvanceError) {
+      return fail(res, 409, "CANNOT_ADVANCE", err.message);
     }
+    throw err;
   }
-
-  const updated = await prisma.appointment.update({ where: { id: appointment.id }, data: { status: nextStatus } });
-  return res.json({ success: true, data: updated, error: null });
 });
 
 // Capítulo 11.11 — "Tempo médio de atendimento": GAP DE SCHEMA DOCUMENTADO —

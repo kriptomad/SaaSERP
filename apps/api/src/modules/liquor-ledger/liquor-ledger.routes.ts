@@ -146,6 +146,15 @@ liquorLedgerRouter.get("/liquor-ledger/overdue", requireAuth, requireModule("LIQ
     where: { tenantId },
     orderBy: { createdAt: "asc" },
     include: { client: { select: { id: true, name: true, phone: true } } },
+    // CORREÇÃO DE AUDITORIA: relatório de atraso lia TODO o histórico de
+    // lançamentos do tenant sem nenhum teto/paginação — em um tenant antigo com
+    // muitos anos de movimentação de cascos isso cresce sem limite. O algoritmo
+    // FIFO precisa da ordem cronológica completa para ser correto, então o teto
+    // aqui é uma última camada de defesa (volume realista mesmo para uma adega
+    // de grande porte), não um filtro de negócio — se este teto for atingido, o
+    // relatório deve ser re-executado com um filtro de cliente/produto mais
+    // específico (não implementado nesta rodada).
+    take: 50000,
   });
 
   type Group = {
@@ -200,7 +209,12 @@ liquorLedgerRouter.get("/liquor-ledger/overdue", requireAuth, requireModule("LIQ
   const data = outstanding
     .map((g) => {
       const product = productById.get(g.productId);
-      const replacementUnitPrice = product ? Number(product.unitPrice) : null;
+      // CORREÇÃO DE AUDITORIA: cálculo monetário fazia `Number(product.unitPrice)
+      // * outstandingQty` em ponto flutuante — trocado por `Prisma.Decimal` para
+      // preservar a precisão decimal exata do preço (mesmo padrão usado no resto
+      // do módulo financeiro).
+      const replacementUnitPrice = product ? product.unitPrice : null;
+      const suggestedReplacementCharge = replacementUnitPrice !== null ? replacementUnitPrice.mul(g.outstandingQty).toDecimalPlaces(2) : null;
       return {
         clientId: g.clientId,
         clientName: g.client.name,
@@ -210,7 +224,7 @@ liquorLedgerRouter.get("/liquor-ledger/overdue", requireAuth, requireModule("LIQ
         outstandingQty: g.outstandingQty,
         oldestBorrowedAt: g.oldestCreatedAt,
         ageDays: g.ageDays,
-        suggestedReplacementCharge: replacementUnitPrice !== null ? Number((replacementUnitPrice * g.outstandingQty).toFixed(2)) : null,
+        suggestedReplacementCharge,
       };
     })
     .sort((a, b) => b.ageDays - a.ageDays);
@@ -241,8 +255,19 @@ liquorLedgerRouter.post("/liquor-ledger/entries", requireAuth, requireModule("LI
 
   const client = await prisma.client.findFirst({ where: { id: clientId, tenantId }, select: { id: true } });
   if (!client) return notFound(res, "Cliente não encontrado.");
-  const product = await prisma.product.findFirst({ where: { id: productId, tenantId }, select: { id: true } });
+  const product = await prisma.product.findFirst({ where: { id: productId, tenantId }, select: { id: true, isReturnableContainer: true } });
   if (!product) return notFound(res, "Produto não encontrado.");
+  // CORREÇÃO DE AUDITORIA: o lançamento manual aceitava QUALQUER produto, mesmo
+  // sem `isReturnableContainer=true` — permitindo abrir conta-corrente de casco
+  // para um produto que não é vasilhame retornável (dado sem sentido de negócio,
+  // nunca teria devolução física correspondente).
+  if (!product.isReturnableContainer) {
+    return res.status(409).json({
+      success: false,
+      data: null,
+      error: { code: "NOT_RETURNABLE_CONTAINER", message: "Este produto não está marcado como vasilhame retornável (isReturnableContainer=false)." },
+    });
+  }
 
   if (saleId) {
     const sale = await prisma.sale.findFirst({ where: { id: saleId, tenantId }, select: { id: true } });

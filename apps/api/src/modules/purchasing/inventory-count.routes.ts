@@ -14,6 +14,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const inventoryCountRouter = Router();
 
@@ -46,9 +47,10 @@ async function requireStockWrite(req: Request, res: Response): Promise<boolean> 
 inventoryCountRouter.get("/inventory-counts", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireStockRead(req, res))) return;
   const { tenantId } = req.session!;
-  const status = req.query.status as string | undefined;
+  const statusParsed = readEnumQuery(res, req.query.status, ["OPEN", "RECONCILING", "APPROVED", "CANCELLED"] as const, "status");
+  if (!statusParsed.ok) return;
   const counts = await prisma.inventoryCount.findMany({
-    where: { tenantId, ...(status ? { status: status as any } : {}) },
+    where: { tenantId, ...(statusParsed.value ? { status: statusParsed.value } : {}) },
     orderBy: { startedAt: "desc" },
   });
   return res.json({ success: true, data: counts, error: null });

@@ -24,6 +24,7 @@ import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
+import { isTenantStorageKey } from "../../lib/storage-key";
 
 export const prescriptionRecordsRouter = Router();
 
@@ -71,12 +72,38 @@ prescriptionRecordsRouter.post("/prescription-records", requireAuth, requireModu
     include: { product: { select: { id: true, name: true, requiresPrescriptionRetention: true } }, prescriptionRecord: true },
   });
   if (!saleItem) return notFound(res, "Item de venda não encontrado neste tenant.");
+  if (!saleItem.product) return notFound(res, "Produto do item de venda não encontrado.");
   if (saleItem.prescriptionRecord) {
     return res.status(409).json({
       success: false,
       data: null,
       error: { code: "PRESCRIPTION_ALREADY_RECORDED", message: "Este item de venda já possui uma receita retida registrada." },
     });
+  }
+  // CORREÇÃO DE AUDITORIA: a rota aceitava registrar retenção de receita para
+  // QUALQUER item de venda, mesmo de produto sem exigência regulatória de
+  // retenção (`Product.requiresPrescriptionRetention=false`) — permitindo criar
+  // um `PrescriptionRecord` sem lastro, o que polui o livro SNGPC/relatórios de
+  // compliance com dados irrelevantes. Só produtos que realmente exigem retenção
+  // (Lista B/tarja preta/psicotrópicos) podem gerar este registro.
+  if (!saleItem.product.requiresPrescriptionRetention) {
+    return res.status(409).json({
+      success: false,
+      data: null,
+      error: {
+        code: "RETENTION_NOT_REQUIRED",
+        message: `O produto "${saleItem.product.name}" não exige retenção de receita (requiresPrescriptionRetention=false).`,
+      },
+    });
+  }
+  // CORREÇÃO DE AUDITORIA: `retainedDocumentStorageKey` chegava do client sem
+  // nenhuma validação de pertencimento ao tenant — um tenant malicioso poderia
+  // gravar a chave de objeto de OUTRO tenant no R2 e, mais tarde, um relatório
+  // que gere URL assinada de leitura a partir deste registro acabaria expondo o
+  // arquivo do tenant alheio. Mesma trava usada em todo o resto do sistema para
+  // ponteiros de storage recebidos do cliente.
+  if (input.retainedDocumentStorageKey && !isTenantStorageKey(input.retainedDocumentStorageKey, tenantId)) {
+    return validationError(res, { retainedDocumentStorageKey: ["Chave de armazenamento inválida para este tenant."] });
   }
 
   const record = await prisma.prescriptionRecord.create({
@@ -110,11 +137,23 @@ prescriptionRecordsRouter.get("/prescription-records", requireAuth, requireModul
   if (!parsed.success) return validationError(res, parsed.error.flatten());
   const { clientId, productId } = parsed.data;
 
+  // CORREÇÃO DE AUDITORIA: os dois spreads abaixo usavam a MESMA chave de nível
+  // superior ("saleItem"); quando ambos os filtros eram informados juntos, o
+  // segundo spread (clientId) sobrescrevia silenciosamente o primeiro
+  // (productId) — ou seja, o filtro de produto era descartado sempre que
+  // clientId também estava presente na query. Mesclado em um único objeto
+  // `saleItem` para que os dois filtros coexistam corretamente.
   const records = await prisma.prescriptionRecord.findMany({
     where: {
       tenantId,
-      ...(productId ? { saleItem: { productId } } : {}),
-      ...(clientId ? { saleItem: { sale: { clientId } } } : {}),
+      ...(productId || clientId
+        ? {
+            saleItem: {
+              ...(productId ? { productId } : {}),
+              ...(clientId ? { sale: { clientId } } : {}),
+            },
+          }
+        : {}),
     },
     include: {
       saleItem: {
@@ -252,6 +291,12 @@ prescriptionRecordsRouter.get("/pharmacy/sngpc-ledger", requireAuth, requireModu
   const movements = await prisma.stockMovement.findMany({
     where: { tenantId, productId: { in: controlledProductIds }, createdAt: { gte: periodStart, lt: periodEnd } },
     orderBy: { createdAt: "asc" },
+    // CORREÇÃO DE AUDITORIA: relatório mensal sem nenhum teto — um tenant com
+    // altíssimo volume de controlados (ou produto mal cadastrado gerando
+    // movimentações em excesso) poderia estourar a resposta. Já é escopado por
+    // produto controlado + mês único; o teto abaixo é só a última camada de
+    // defesa (mesmo padrão usado em outras rotas de relatório do sistema).
+    take: 10000,
   });
 
   // Referências cruzadas para o documento de origem de cada linha do livro — exigido

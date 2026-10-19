@@ -104,6 +104,12 @@ clientCreditPaymentsRouter.post("/clients/:id/credit-payments", requireAuth, asy
     // check-and-update atômico de productVariant.updateMany em
     // product-variants.routes.ts/stock-adjust — a quantidade decrementada no WHERE
     // nunca excede o saldo disponível da própria linha).
+    // CORREÇÃO DE AUDITORIA: `Serializable` + a re-checagem do saldo dentro do
+    // próprio WHERE do `updateMany` (nunca lido antes e decrementado depois, fora
+    // da query) garantem que dois pagamentos concorrentes para o mesmo cliente
+    // nunca decrementem o saldo com base em um valor já desatualizado — a segunda
+    // transação sempre revalida `creditBalanceUsed` contra o estado mais recente
+    // já commitado pela primeira, nunca contra uma leitura em memória obsoleta.
     const claimed = await tx.client.updateMany({
       where: { id: client.id, tenantId, creditBalanceUsed: { gte: new Prisma.Decimal(amount) } },
       data: { creditBalanceUsed: { decrement: amount } },
@@ -131,7 +137,7 @@ clientCreditPaymentsRouter.post("/clients/:id/credit-payments", requireAuth, asy
       select: { creditLimit: true, creditBalanceUsed: true },
     });
     return { payment, client: updatedClient };
-  });
+  }, { isolationLevel: "Serializable" });
 
   return res.status(201).json({ success: true, data: result, error: null });
 });

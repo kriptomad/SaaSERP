@@ -21,7 +21,7 @@
 //      (nunca criamos Product automaticamente — cadastro de produto exige decisões
 //      de precificação/NCM/categoria que não vêm completas na XML de compra).
 import { XMLParser } from "fast-xml-parser";
-import { TenantScopedPrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedPrismaClient, getCurrentTenantId } from "@filitech/db";
 
 export interface ParsedNfeSupplier {
   cnpj: string;
@@ -33,9 +33,9 @@ export interface ParsedNfeItem {
   ean: string | null;
   description: string;
   ncm: string | null;
-  quantity: number;
-  unitCost: number;
-  totalValue: number;
+  quantity: Prisma.Decimal;
+  unitCost: Prisma.Decimal;
+  totalValue: Prisma.Decimal;
   // Preenchido pelo casamento contra o catálogo do tenant (nunca pela própria XML).
   matchedProductId: string | null;
   matchedBy: "BARCODE" | "SKU" | null;
@@ -47,7 +47,7 @@ export interface ParsedNfe {
   series: string | null;
   issueDate: string | null;
   supplier: ParsedNfeSupplier;
-  totalValue: number;
+  totalValue: Prisma.Decimal;
   items: ParsedNfeItem[];
 }
 
@@ -59,9 +59,16 @@ function onlyDigits(value: unknown): string {
   return String(value ?? "").replace(/\D/g, "");
 }
 
-function toNumber(value: unknown): number {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
+// Conversão fiscal (quantidade/custo/valor total) sempre em Prisma.Decimal — nunca
+// `Number`, que introduz erro de ponto flutuante em valores monetários/fiscais
+// (CORREÇÃO DE AUDITORIA: a versão anterior usava `Number` para esses três campos).
+function toDecimal(value: unknown): Prisma.Decimal {
+  const raw = String(value ?? "0").trim();
+  try {
+    return new Prisma.Decimal(raw === "" ? "0" : raw);
+  } catch {
+    return new Prisma.Decimal(0);
+  }
 }
 
 // Parse puro (sem acesso a banco) — separado para poder ser testado isoladamente e
@@ -107,9 +114,9 @@ export function parseNfeXml(xmlContent: string): ParsedNfe {
       ean,
       description: String(prod.xProd ?? ""),
       ncm: prod.NCM ? String(prod.NCM) : null,
-      quantity: toNumber(prod.qCom),
-      unitCost: toNumber(prod.vUnCom),
-      totalValue: toNumber(prod.vProd),
+      quantity: toDecimal(prod.qCom),
+      unitCost: toDecimal(prod.vUnCom),
+      totalValue: toDecimal(prod.vProd),
       matchedProductId: null,
       matchedBy: null,
     };
@@ -123,7 +130,7 @@ export function parseNfeXml(xmlContent: string): ParsedNfe {
     series: ide.serie ? String(ide.serie) : null,
     issueDate: ide.dhEmi ? String(ide.dhEmi) : null,
     supplier,
-    totalValue: toNumber(total.vNF),
+    totalValue: toDecimal(total.vNF),
     items,
   };
 }
@@ -131,14 +138,15 @@ export function parseNfeXml(xmlContent: string): ParsedNfe {
 // Casa cada item contra o catálogo do tenant (barcode > sku). Modifica `parsed.items`
 // in-place e retorna o mesmo objeto, por conveniência do chamador.
 export async function matchNfeItemsToCatalog(prisma: TenantScopedPrismaClient, parsed: ParsedNfe): Promise<ParsedNfe> {
+  const tenantId = getCurrentTenantId();
   const barcodes = [...new Set(parsed.items.map((i) => i.ean).filter((v): v is string => Boolean(v)))];
   const skus = [...new Set(parsed.items.map((i) => i.cProd).filter(Boolean))];
 
   const [byBarcode, bySku] = await Promise.all([
     barcodes.length > 0
-      ? prisma.product.findMany({ where: { barcode: { in: barcodes } }, select: { id: true, barcode: true } })
+      ? prisma.product.findMany({ where: { barcode: { in: barcodes }, tenantId }, select: { id: true, barcode: true } })
       : Promise.resolve([]),
-    skus.length > 0 ? prisma.product.findMany({ where: { sku: { in: skus } }, select: { id: true, sku: true } }) : Promise.resolve([]),
+    skus.length > 0 ? prisma.product.findMany({ where: { sku: { in: skus }, tenantId }, select: { id: true, sku: true } }) : Promise.resolve([]),
   ]);
 
   const barcodeMap = new Map(byBarcode.map((p) => [p.barcode as string, p.id]));
@@ -164,6 +172,7 @@ export async function matchNfeItemsToCatalog(prisma: TenantScopedPrismaClient, p
 // revisão humana), apenas sugere para o front pré-selecionar.
 export async function findSupplierByDocument(prisma: TenantScopedPrismaClient, cnpj: string): Promise<{ id: string; name: string } | null> {
   if (!cnpj) return null;
-  const supplier = await prisma.supplier.findFirst({ where: { document: cnpj }, select: { id: true, name: true } });
+  const tenantId = getCurrentTenantId();
+  const supplier = await prisma.supplier.findFirst({ where: { document: cnpj, tenantId }, select: { id: true, name: true } });
   return supplier;
 }

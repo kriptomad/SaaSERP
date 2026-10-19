@@ -127,7 +127,7 @@ reportsRouter.get("/report-datasets", requireAuth, async (req: Request, res: Res
 reportsRouter.get("/report-definitions", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const definitions = await prisma.reportDefinition.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" } });
+  const definitions = await prisma.reportDefinition.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" }, take: 500 });
   return res.json({ success: true, data: definitions, error: null });
 });
 
@@ -276,7 +276,7 @@ reportsRouter.get("/report-definitions/:id/export", requireAuth, async (req: Req
 reportsRouter.get("/scheduled-reports", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const schedules = await prisma.scheduledReport.findMany({ where: { tenantId } });
+  const schedules = await prisma.scheduledReport.findMany({ where: { tenantId }, take: 500 });
   return res.json({ success: true, data: schedules, error: null });
 });
 

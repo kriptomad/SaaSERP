@@ -12,7 +12,7 @@ export function useProductsLookup() {
 }
 
 export function useSuppliersLookup() {
-  return useQuery<Supplier[]>({ queryKey: ["suppliers", ""], queryFn: () => suppliersApi.list() });
+  return useQuery<Supplier[]>({ queryKey: ["suppliers", ""], queryFn: () => suppliersApi.list().then((r) => r.data) });
 }
 
 export interface Professional {
@@ -50,7 +50,10 @@ export function ClientPicker({
 }) {
   const [input, setInput] = useState("");
   const debounced = useDebounced(input.trim());
-  const query = useQuery<Client[]>({ queryKey: ["clients", debounced], queryFn: () => clientsApi.list(debounced || undefined) });
+  const query = useQuery<Client[]>({
+    queryKey: ["clients", debounced],
+    queryFn: () => clientsApi.list(debounced || undefined).then((r) => r.data),
+  });
 
   return (
     <Autocomplete

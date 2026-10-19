@@ -44,8 +44,13 @@ healthInsuranceBillingRouter.get("/health-insurance-plans/:planId/unbilled-sales
   const { tenantId } = req.session!;
   const plan = await prisma.healthInsurancePlan.findFirst({ where: { id: req.params.planId, tenantId } });
   if (!plan) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Convênio não encontrado." } });
+  // CORREÇÃO DE AUDITORIA: a listagem/faturamento considerava qualquer venda com
+  // `healthInsurancePlanId` preenchido, mesmo que o pagamento real não tenha sido
+  // HEALTH_INSURANCE (ex.: venda à vista com o convênio só anotado para
+  // referência de cadastro do paciente) — faturando ao convênio uma venda que
+  // nunca deveria entrar na conta corrente dele.
   const sales = await prisma.sale.findMany({
-    where: { tenantId, healthInsurancePlanId: plan.id, healthInsuranceReceivableId: null, status: "PAID" },
+    where: { tenantId, healthInsurancePlanId: plan.id, healthInsuranceReceivableId: null, status: "PAID", paymentMethod: "HEALTH_INSURANCE" },
     include: { client: { select: { id: true, name: true } } },
     orderBy: { createdAt: "asc" },
   });
@@ -69,12 +74,32 @@ healthInsuranceBillingRouter.post("/health-insurance-plans/:planId/close-billing
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const sales = await tx.sale.findMany({
-        where: { tenantId, healthInsurancePlanId: plan.id, healthInsuranceReceivableId: null, status: "PAID" },
-        select: { id: true, totalAmount: true },
-      });
-      if (sales.length === 0) throw new Error("NO_UNBILLED_SALES");
-      const totalAmount = sales.reduce((sum, s) => sum.plus(s.totalAmount), new Prisma.Decimal(0));
+      // CORREÇÃO DE AUDITORIA (condição de corrida — faturas consolidadas
+      // duplicadas): o `SELECT` original não travava as linhas candidatas;
+      // duas chamadas concorrentes de `close-billing` para o mesmo convênio
+      // podiam ambas ler o MESMO conjunto de vendas ainda não faturadas antes
+      // de qualquer uma commitar, cada uma criando sua própria
+      // `AccountReceivable` com o mesmo total — a segunda `updateMany` (que usa
+      // o mesmo WHERE `healthInsuranceReceivableId: null` como guarda) não
+      // encontraria mais nenhuma linha para reivindicar (a primeira já as
+      // marcou), resultando numa fatura "fantasma" sem nenhuma venda
+      // realmente vinculada. `SELECT ... FOR UPDATE` trava fisicamente as
+      // linhas candidatas até o commit: a segunda transação só prossegue após
+      // a primeira commitar, e aí reavalia o mesmo WHERE já sem encontrar
+      // nenhuma venda pendente — falhando de forma segura com
+      // NO_UNBILLED_SALES em vez de criar uma fatura duplicada.
+      const lockedSales = await tx.$queryRaw<{ id: string; totalAmount: string }[]>`
+        SELECT id, "totalAmount"::text AS "totalAmount"
+        FROM sales
+        WHERE "tenantId" = ${tenantId}
+          AND "healthInsurancePlanId" = ${plan.id}
+          AND "healthInsuranceReceivableId" IS NULL
+          AND status = 'PAID'
+          AND "paymentMethod" = 'HEALTH_INSURANCE'
+        FOR UPDATE
+      `;
+      if (lockedSales.length === 0) throw new Error("NO_UNBILLED_SALES");
+      const totalAmount = lockedSales.reduce((sum, s) => sum.plus(new Prisma.Decimal(s.totalAmount)), new Prisma.Decimal(0));
 
       const receivable = await tx.accountReceivable.create({
         data: {
@@ -91,12 +116,13 @@ healthInsuranceBillingRouter.post("/health-insurance-plans/:planId/close-billing
       // leitura acima, dentro da MESMA transação — mesmo padrão de claim atômico já
       // usado no débito de crediário (close-sale.service.ts) para nunca faturar
       // duas vezes a mesma venda em caso de corrida com outra chamada concorrente.
+      // Agora reforçado pelo lock explícito acima.
       await tx.sale.updateMany({
-        where: { id: { in: sales.map((s) => s.id) }, tenantId, healthInsuranceReceivableId: null },
+        where: { id: { in: lockedSales.map((s) => s.id) }, tenantId, healthInsuranceReceivableId: null },
         data: { healthInsuranceReceivableId: receivable.id },
       });
 
-      return { receivable, billedSalesCount: sales.length, totalAmount };
+      return { receivable, billedSalesCount: lockedSales.length, totalAmount };
     });
     return res.status(201).json({ success: true, data: result, error: null });
   } catch (err: any) {

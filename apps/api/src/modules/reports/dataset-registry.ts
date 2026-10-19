@@ -45,6 +45,15 @@ export interface DatasetJoinDefinition {
   table: string; // nome real da tabela no Postgres (`@@map`)
   alias: string; // alias único dentro do dataset, nunca "t" (reservado à tabela base)
   on: string;
+  // CORREÇÃO DE AUDITORIA (bug real confirmado): um join 1:N em relação à tabela
+  // base (ex.: "sales" -> "sale_items", uma venda tem N itens) duplicava métricas
+  // da tabela base (`SUM(t."totalAmount")`) uma vez POR LINHA JUNTADA, inflando o
+  // faturamento reportado sempre que o relatório combinava uma dimensão/métrica de
+  // item com uma métrica de venda. `fanOut: true` marca explicitamente esse tipo de
+  // join — o executor (execute-report-definition.ts) usa essa marcação para
+  // deduplicar métricas da tabela base via ROW_NUMBER() antes de agregar, nunca
+  // somando o mesmo valor de venda mais de uma vez.
+  fanOut?: boolean;
 }
 
 export interface DatasetDefinition {
@@ -75,11 +84,11 @@ export const DATASET_REGISTRY: Record<string, DatasetDefinition> = {
     joins: {
       // Capítulo 18.1.1 — permite relatórios "vendas por categoria de produto" /
       // "vendas por produto", antes impossíveis neste motor. `sale_items` é
-      // 1:N em relação a `sales`; o GROUP BY sempre inclui a dimensão derivada
-      // destes joins, então a agregação de métricas de `sales` (ex. totalAmount)
-      // passa a ser por LINHA DE ITEM quando este join é usado — documentado na
-      // própria descrição do dataset exposta pela UI (reports.routes.ts).
-      sale_items: { table: "sale_items", alias: "si", on: `si."saleId" = t.id` },
+      // 1:N em relação a `sales` (`fanOut: true`) — o executor deduplica
+      // automaticamente qualquer métrica da tabela base (totalAmount.sum,
+      // discountAmount.sum, sales.count) para que ela nunca seja somada mais de
+      // uma vez por venda só porque a venda tem múltiplos itens.
+      sale_items: { table: "sale_items", alias: "si", on: `si."saleId" = t.id`, fanOut: true },
       products: { table: "products", alias: "p", on: `p.id = si."productId"` },
     },
     allowedDimensions: {

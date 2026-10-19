@@ -14,10 +14,11 @@
 // (mesmo domínio financeiro do Capítulo 17, sem código RBAC novo).
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prisma } from "@filitech/db";
+import { prisma, Prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { parseOfxTransactions, InvalidOfxContentError } from "../../lib/ofx-parser";
 import { pluggySyncQueue } from "../../lib/queue";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const bankReconciliationRouter = Router();
 
@@ -159,14 +160,17 @@ bankReconciliationRouter.post("/bank-accounts/:id/sync-now", requireAuth, async 
 bankReconciliationRouter.get("/bank-transactions", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const { bankAccountId, status } = req.query as { bankAccountId?: string; status?: string };
+  const { bankAccountId } = req.query as { bankAccountId?: string };
+  const statusParsed = readEnumQuery(res, req.query.status, ["UNMATCHED", "SUGGESTED", "MATCHED", "IGNORED"] as const, "status");
+  if (!statusParsed.ok) return;
   const transactions = await prisma.bankTransaction.findMany({
     where: {
       tenantId,
       ...(bankAccountId ? { bankAccountId } : {}),
-      ...(status ? { reconciliationStatus: status as any } : {}),
+      ...(statusParsed.value ? { reconciliationStatus: statusParsed.value } : {}),
     },
     orderBy: { transactionDate: "desc" },
+    take: 500, // CORREÇÃO DE AUDITORIA: listagem antes era unbounded
   });
   return res.json({ success: true, data: transactions, error: null });
 });
@@ -185,50 +189,67 @@ const TOLERANCE_CENTS = 1;
 bankReconciliationRouter.post("/bank-transactions/suggest-matches", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const { tenantId } = req.session!;
-  const unmatched = await prisma.bankTransaction.findMany({ where: { tenantId, reconciliationStatus: "UNMATCHED" } });
+  // CORREÇÃO DE AUDITORIA: listagem antes era unbounded (todas as transações
+  // UNMATCHED do tenant de uma vez) e cada uma disparava 1 query extra de AP ou AR
+  // dentro do loop sequencial (N+1 clássico). Agora a leitura de candidatos
+  // (AccountPayable/AccountReceivable em aberto) é feita em lote, uma única vez,
+  // e o casamento é todo em memória — nenhuma query de leitura extra por transação.
+  const unmatched = await prisma.bankTransaction.findMany({ where: { tenantId, reconciliationStatus: "UNMATCHED" }, take: 500 });
 
+  const [payableCandidates, receivableCandidates] = await Promise.all([
+    prisma.accountPayable.findMany({ where: { tenantId, status: { in: ["PENDING", "OVERDUE"] } }, take: 2000 }),
+    prisma.accountReceivable.findMany({ where: { tenantId, status: { in: ["PENDING", "OVERDUE"] } }, take: 2000 }),
+  ]);
+
+  // CORREÇÃO DE AUDITORIA: comparação de valores monetários usava `Number`/
+  // `Math.abs`/`.toFixed(2)` (ponto flutuante, pode introduzir erro de
+  // arredondamento em conciliação bancária) — agora tudo em Prisma.Decimal.
+  const tolerance = new Prisma.Decimal(TOLERANCE_CENTS).dividedBy(100);
+  const usedPayableIds = new Set<string>();
+  const usedReceivableIds = new Set<string>();
   let suggestedCount = 0;
+  const updates: Promise<unknown>[] = [];
+
   for (const tx of unmatched) {
     const windowStart = new Date(tx.transactionDate.getTime() - TOLERANCE_DAYS * 24 * 60 * 60 * 1000);
     const windowEnd = new Date(tx.transactionDate.getTime() + TOLERANCE_DAYS * 24 * 60 * 60 * 1000);
-    const absAmount = Math.abs(Number(tx.amount));
-    const minAmount = (absAmount - TOLERANCE_CENTS / 100).toFixed(2);
-    const maxAmount = (absAmount + TOLERANCE_CENTS / 100).toFixed(2);
+    const amount = new Prisma.Decimal(tx.amount);
+    const absAmount = amount.abs();
+    const minAmount = absAmount.minus(tolerance);
+    const maxAmount = absAmount.plus(tolerance);
 
-    if (Number(tx.amount) < 0) {
-      const candidate = await prisma.accountPayable.findFirst({
-        where: {
-          tenantId,
-          status: { in: ["PENDING", "OVERDUE"] },
-          dueDate: { gte: windowStart, lte: windowEnd },
-          amount: { gte: minAmount, lte: maxAmount },
-        },
-      });
+    if (amount.isNegative()) {
+      const candidate = payableCandidates.find(
+        (ap) =>
+          !usedPayableIds.has(ap.id) &&
+          ap.dueDate >= windowStart &&
+          ap.dueDate <= windowEnd &&
+          new Prisma.Decimal(ap.amount).gte(minAmount) &&
+          new Prisma.Decimal(ap.amount).lte(maxAmount),
+      );
       if (candidate) {
-        await prisma.bankTransaction.update({
-          where: { id: tx.id },
-          data: { reconciliationStatus: "SUGGESTED", matchedAccountPayableId: candidate.id },
-        });
+        usedPayableIds.add(candidate.id);
+        updates.push(prisma.bankTransaction.update({ where: { id: tx.id }, data: { reconciliationStatus: "SUGGESTED", matchedAccountPayableId: candidate.id } }));
         suggestedCount += 1;
       }
     } else {
-      const candidate = await prisma.accountReceivable.findFirst({
-        where: {
-          tenantId,
-          status: { in: ["PENDING", "OVERDUE"] },
-          dueDate: { gte: windowStart, lte: windowEnd },
-          amount: { gte: minAmount, lte: maxAmount },
-        },
-      });
+      const candidate = receivableCandidates.find(
+        (ar) =>
+          !usedReceivableIds.has(ar.id) &&
+          ar.dueDate >= windowStart &&
+          ar.dueDate <= windowEnd &&
+          new Prisma.Decimal(ar.amount).gte(minAmount) &&
+          new Prisma.Decimal(ar.amount).lte(maxAmount),
+      );
       if (candidate) {
-        await prisma.bankTransaction.update({
-          where: { id: tx.id },
-          data: { reconciliationStatus: "SUGGESTED", matchedAccountReceivableId: candidate.id },
-        });
+        usedReceivableIds.add(candidate.id);
+        updates.push(prisma.bankTransaction.update({ where: { id: tx.id }, data: { reconciliationStatus: "SUGGESTED", matchedAccountReceivableId: candidate.id } }));
         suggestedCount += 1;
       }
     }
   }
+
+  await Promise.all(updates);
 
   return res.json({ success: true, data: { evaluated: unmatched.length, suggested: suggestedCount }, error: null });
 });

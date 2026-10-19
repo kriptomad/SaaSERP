@@ -218,12 +218,22 @@ loyaltyRouter.post("/loyalty/accounts/:clientId/redeem", requireAuth, async (req
     });
   }
 
-  if (saleId) {
-    const sale = await prisma.sale.findFirst({ where: { id: saleId, tenantId }, select: { id: true } });
-    if (!sale) return notFound(res, "Venda informada não encontrada.");
-  }
-
   const result = await prisma.$transaction(async (tx) => {
+    // CORREÇÃO DE AUDITORIA: o resgate não validava que a venda informada
+    // pertencia ao MESMO cliente, que ainda estava ABERTA (uma venda já PAID/
+    // CANCELLED/REFUNDED não pode mais receber desconto), nem que já não havia
+    // sido usada para um resgate anterior (idempotência) — tudo dentro da MESMA
+    // transação do débito de pontos, para que a checagem nunca fique obsoleta por
+    // uma corrida entre o SELECT de validação e o INSERT do lançamento.
+    if (saleId) {
+      const sale = await tx.sale.findFirst({ where: { id: saleId, tenantId }, select: { id: true, clientId: true, status: true } });
+      if (!sale) return { invalidSale: "NOT_FOUND" as const };
+      if (sale.clientId !== client.id) return { invalidSale: "CLIENT_MISMATCH" as const };
+      if (sale.status !== "OPEN") return { invalidSale: "SALE_NOT_OPEN" as const };
+      const alreadyRedeemed = await tx.loyaltyTransaction.findUnique({ where: { saleId_type: { saleId, type: "REDEEM" } } });
+      if (alreadyRedeemed) return { invalidSale: "ALREADY_REDEEMED" as const };
+    }
+
     const account = await tx.loyaltyAccount.findUnique({ where: { clientId: client.id } });
     if (!account) return { insufficient: true as const };
 
@@ -243,6 +253,16 @@ loyaltyRouter.post("/loyalty/accounts/:clientId/redeem", requireAuth, async (req
     return { insufficient: false as const, transaction, pointsBalance: fresh.pointsBalance, discountValue };
   });
 
+  if ("invalidSale" in result) {
+    if (result.invalidSale === "NOT_FOUND") return notFound(res, "Venda informada não encontrada.");
+    if (result.invalidSale === "CLIENT_MISMATCH") {
+      return res.status(400).json({ success: false, data: null, error: { code: "SALE_CLIENT_MISMATCH", message: "A venda informada não pertence a este cliente." } });
+    }
+    if (result.invalidSale === "SALE_NOT_OPEN") {
+      return res.status(409).json({ success: false, data: null, error: { code: "SALE_NOT_OPEN", message: "A venda informada não está mais aberta para receber descontos." } });
+    }
+    return res.status(409).json({ success: false, data: null, error: { code: "SALE_ALREADY_REDEEMED", message: "Esta venda já foi usada em um resgate de pontos anterior." } });
+  }
   if (result.insufficient) {
     return res.status(409).json({ success: false, data: null, error: { code: "INSUFFICIENT_POINTS", message: "Saldo de pontos insuficiente para este resgate." } });
   }
@@ -306,6 +326,7 @@ loyaltyRouter.get("/referrals", requireAuth, async (req: Request, res: Response)
     where: { referralCodeId: code.id },
     include: { referredTenant: { select: { tradeName: true } } },
     orderBy: { createdAt: "desc" },
+    take: 500,
   });
   return res.json({ success: true, data: referrals, error: null });
 });

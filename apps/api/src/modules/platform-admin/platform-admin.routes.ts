@@ -31,6 +31,7 @@ import { invalidateTenantModuleCache } from "../../middlewares/gatekeeper.middle
 import { signSessionToken } from "../auth/jwt.service";
 import { webhookDeliveryQueue } from "../../lib/queue";
 import type { WebhookDeliveryJobData } from "../../lib/webhook-dispatch";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const platformAdminRouter = Router();
 
@@ -65,9 +66,12 @@ platformAdminRouter.get("/platform-admin/tenants", requirePlatformAdminAuth, asy
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
   }
-  const { status, search, page, pageSize } = parsed.data;
+  const { search, page, pageSize } = parsed.data;
+  const statusParsed = readEnumQuery(res, req.query.status, ["TRIAL", "ACTIVE", "PAST_DUE", "SUSPENDED", "CANCELLED"] as const, "status");
+  if (!statusParsed.ok) return;
+  const status = statusParsed.value;
   const where: import("@filitech/db").Prisma.TenantWhereInput = {
-    ...(status ? { status: status as any } : {}),
+    ...(status ? { status } : {}),
     ...(search ? { OR: [{ legalName: { contains: search, mode: "insensitive" as const } }, { tradeName: { contains: search, mode: "insensitive" as const } }, { slug: { contains: search, mode: "insensitive" as const } }] } : {}),
   };
   // GAP DE AUDITORIA FECHADO (Rodada 11): `take: 100` sem paginação truncava
@@ -508,10 +512,12 @@ platformAdminRouter.patch("/platform-admin/feature-flags/:id", requirePlatformAd
 // ─────────────────────────────────────────────────────────────────────────
 
 platformAdminRouter.get("/platform-admin/support-tickets", requirePlatformAdminAuth, async (req: Request, res: Response) => {
-  const { status, assignedToMe } = req.query as { status?: string; assignedToMe?: string };
+  const { assignedToMe } = req.query as { assignedToMe?: string };
+  const statusParsed = readEnumQuery(res, req.query.status, ["OPEN", "IN_PROGRESS", "WAITING_CUSTOMER", "RESOLVED", "CLOSED"] as const, "status");
+  if (!statusParsed.ok) return;
   const tickets = await prisma.supportTicket.findMany({
     where: {
-      ...(status ? { status: status as any } : {}),
+      ...(statusParsed.value ? { status: statusParsed.value } : {}),
       ...(assignedToMe === "true" ? { assignedToPlatformAdminUserId: req.platformAdminSession!.platformAdminUserId } : {}),
     },
     orderBy: { createdAt: "desc" },

@@ -34,9 +34,47 @@ export interface SyncResult {
 }
 
 export async function syncPendingSales(): Promise<SyncResult> {
+  // CORREÇÃO DE AUDITORIA (full-audit, sev. 93): duas abas (ou o service worker +
+  // uma aba) podiam selecionar a MESMA venda PENDING simultaneamente e disparar dois
+  // POST /sales concorrentes para ela. A API é protegida por `Idempotency-Key`, mas
+  // isso ainda gerava tráfego/race desnecessário e, em caso de bug de idempotência em
+  // qualquer caminho do backend, duplicidade real de venda. Web Locks API serializa
+  // TODAS as execuções de `syncPendingSales` (nesta aba e em outras abas/no próprio
+  // service worker, quando suportado) em um único lock nomeado — nunca duas rodam ao
+  // mesmo tempo. Navegadores sem suporte (Safari antigo) caem no fallback direto.
+  if (typeof navigator !== "undefined" && "locks" in navigator) {
+    return (navigator as unknown as { locks: { request<T>(name: string, fn: () => Promise<T>): Promise<T> } }).locks.request(
+      "filitech-sync-pending-sales",
+      () => runSyncPendingSales(),
+    );
+  }
+  return runSyncPendingSales();
+}
+
+// CORREÇÃO DE AUDITORIA (full-audit, sev. 95/94): antes de selecionar as vendas a
+// sincronizar, recupera qualquer venda presa em SYNCING há mais tempo que o lease —
+// sinal de que a aba/processo que a pegou morreu/fechou no meio do fetch (sem isso, a
+// venda nunca mais era selecionada por NENHUM disparo de sync subsequente).
+const SYNC_LEASE_TIMEOUT_MS = 2 * 60_000; // 2 minutos — generoso para latência real de rede/API
+
+async function recoverAbandonedSyncs(): Promise<void> {
+  const cutoff = Date.now() - SYNC_LEASE_TIMEOUT_MS;
+  const abandoned = await offlineDb.pendingSales
+    .where("syncStatus")
+    .equals("SYNCING")
+    .filter((sale) => (sale.syncStartedAt ?? 0) <= cutoff)
+    .toArray();
+  for (const sale of abandoned) {
+    await offlineDb.pendingSales.update(sale.localId, { syncStatus: "PENDING", syncStartedAt: undefined });
+  }
+}
+
+async function runSyncPendingSales(): Promise<SyncResult> {
   const token = getStoredToken();
   const result: SyncResult = { synced: [], failed: [], stillPending: [] };
   if (!token) return result;
+
+  await recoverAbandonedSyncs();
 
   const pending = (await offlineDb.pendingSales.where("syncStatus").anyOf("PENDING", "SYNCING").toArray()).filter(
     // Respeita o backoff agendado — uma venda que acabou de falhar não é
@@ -46,7 +84,7 @@ export async function syncPendingSales(): Promise<SyncResult> {
   );
 
   for (const sale of pending) {
-    await offlineDb.pendingSales.update(sale.localId, { syncStatus: "SYNCING" });
+    await offlineDb.pendingSales.update(sale.localId, { syncStatus: "SYNCING", syncStartedAt: Date.now() });
     try {
       const response = await fetch(`${API_BASE_URL}/sales`, {
         method: "POST",

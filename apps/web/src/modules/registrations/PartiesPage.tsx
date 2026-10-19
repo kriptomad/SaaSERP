@@ -44,6 +44,8 @@ const COPY = {
   supplier: { title: "Fornecedores", singular: "fornecedor", queryKey: "suppliers" },
 } as const;
 
+const PAGE_SIZE = 50;
+
 interface FormState {
   name: string;
   document: string;
@@ -215,17 +217,25 @@ function PartiesPage({ kind }: { kind: Kind }) {
   const debounced = useDebounced(search.trim());
   const [editing, setEditing] = useState<Party | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [loadedPages, setLoadedPages] = useState(1);
 
-  const query = useQuery<Party[]>({
-    queryKey: [copy.queryKey, debounced],
-    queryFn: () => (kind === "client" ? clientsApi.list(debounced || undefined) : suppliersApi.list(debounced || undefined)),
+  const query = useQuery({
+    queryKey: [copy.queryKey, debounced, loadedPages],
+    queryFn: () =>
+      kind === "client"
+        ? clientsApi.list(debounced || undefined, 1, PAGE_SIZE * loadedPages)
+        : suppliersApi.list(debounced || undefined, 1, PAGE_SIZE * loadedPages),
   });
+
+  const rows = (query.data?.data ?? []) as Party[];
+  const total = query.data?.meta?.total ?? rows.length;
+  const hasMore = rows.length < total;
 
   return (
     <Page>
       <PageHeader
         title={copy.title}
-        subtitle="A listagem mostra até 50 registros por busca (limite da API)."
+        subtitle={`Exibindo ${rows.length} de ${total} registros.`}
         actions={
           <Button
             variant="contained"
@@ -244,7 +254,10 @@ function PartiesPage({ kind }: { kind: Kind }) {
         size="small"
         label={kind === "client" ? "Buscar por nome, CPF/CNPJ ou telefone" : "Buscar por nome ou CPF/CNPJ"}
         value={search}
-        onChange={(e) => setSearch(e.target.value)}
+        onChange={(e) => {
+          setSearch(e.target.value);
+          setLoadedPages(1);
+        }}
         sx={{ mb: 2 }}
         InputProps={{
           startAdornment: (
@@ -254,8 +267,8 @@ function PartiesPage({ kind }: { kind: Kind }) {
           ),
         }}
       />
-      <QueryState query={query} isEmpty={(d) => d.length === 0} emptyMessage={`Nenhum ${copy.singular} encontrado.`}>
-        {(rows) => (
+      <QueryState query={query} isEmpty={(d) => d.data.length === 0} emptyMessage={`Nenhum ${copy.singular} encontrado.`}>
+        {() => (
           <TableContainer component={Paper}>
             <Table size="small">
               <TableHead>
@@ -301,6 +314,13 @@ function PartiesPage({ kind }: { kind: Kind }) {
           </TableContainer>
         )}
       </QueryState>
+      {hasMore && (
+        <Stack direction="row" justifyContent="center" sx={{ mt: 2 }}>
+          <Button onClick={() => setLoadedPages((p) => p + 1)} disabled={query.isFetching}>
+            {query.isFetching ? "Carregando…" : `Carregar mais (${rows.length} de ${total})`}
+          </Button>
+        </Stack>
+      )}
       {dialogOpen && (
         <PartyDialog
           key={editing?.id ?? "new"}

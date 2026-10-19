@@ -35,22 +35,34 @@ export function useSseStream(
 ): void {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
+  // CORREÇÃO DE AUDITORIA (full-audit, sev. 64): `getToken` estava nas dependências
+  // do efeito — consumidores que passassem uma função inline (nova referência a cada
+  // render) causavam abort/reconexão do stream a cada render do componente pai, mesmo
+  // sem `path`/`enabled` terem mudado. Agora é lido via ref, nunca recria o efeito.
+  const getTokenRef = useRef(getToken);
+  getTokenRef.current = getToken;
 
   useEffect(() => {
     if (!enabled) return;
     const controller = new AbortController();
     let stopped = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryCount = 0;
 
     async function connect() {
-      const token = getToken();
+      const token = getTokenRef.current();
       if (!token) return;
       try {
         const response = await fetch(`${resolveApiBaseUrl()}${path}`, {
           headers: { Authorization: `Bearer ${token}` },
           signal: controller.signal,
         });
+        if (response.status === 401 || response.status === 403) {
+          // Sessão inválida/expirada: reconectar sem um token novo só manteria o erro.
+          return;
+        }
         if (!response.ok || !response.body) throw new Error(`SSE HTTP ${response.status}`);
+        retryCount = 0;
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -80,8 +92,12 @@ export function useSseStream(
         }
       } catch (error) {
         if (controller.signal.aborted || stopped) return;
-        // Reconecta com backoff fixo; nunca derruba a UI por falha de rede transitória.
-        retryTimer = setTimeout(connect, 5_000);
+        // Reconecta com backoff exponencial + jitter (teto de 60s) — evita que todos
+        // os clientes reconectem no mesmo instante exato numa indisponibilidade da API.
+        const baseDelayMs = Math.min(5_000 * 2 ** retryCount, 60_000);
+        retryCount += 1;
+        const jitterMs = baseDelayMs * 0.3 * Math.random();
+        retryTimer = setTimeout(connect, baseDelayMs + jitterMs);
       }
     }
 
@@ -93,5 +109,5 @@ export function useSseStream(
       if (retryTimer) clearTimeout(retryTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, enabled, getToken]);
+  }, [path, enabled]);
 }

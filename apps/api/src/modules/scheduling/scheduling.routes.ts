@@ -12,6 +12,7 @@ import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireAnyModule } from "../../middlewares/gatekeeper.middleware";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const schedulingRouter = Router();
 
@@ -41,7 +42,8 @@ const serviceSchema = z.object({
 schedulingRouter.get("/services", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:service:read"))) return forbid(res, "Seu nível de acesso não permite consultar o catálogo de serviços.");
-  const services = await prisma.service.findMany({ where: { tenantId }, orderBy: { name: "asc" } });
+  // CORREÇÃO DE AUDITORIA: listagem sem `take` podia crescer sem limite junto com o catálogo.
+  const services = await prisma.service.findMany({ where: { tenantId }, orderBy: { name: "asc" }, take: 500 });
   return res.json({ success: true, data: services, error: null });
 });
 
@@ -67,12 +69,22 @@ schedulingRouter.patch("/services/:id", requireAuth, requireAnyModule(["SALON_BO
 
 // ───────────────────────── ProfessionalWorkingHours (expediente — base da Agenda Online pública) ─────────────────────────
 
-const workingHoursSchema = z.object({
-  professionalId: z.string().min(1),
-  dayOfWeek: z.number().int().min(0).max(6),
-  startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "startTime deve estar no formato HH:mm"),
-  endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "endTime deve estar no formato HH:mm"),
-});
+const workingHoursSchema = z
+  .object({
+    professionalId: z.string().min(1),
+    dayOfWeek: z.number().int().min(0).max(6),
+    startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "startTime deve estar no formato HH:mm"),
+    endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "endTime deve estar no formato HH:mm"),
+  })
+  // CORREÇÃO DE AUDITORIA: o regex só validava o FORMATO HH:mm, nunca que o expediente
+  // fazia sentido (startTime < endTime) — "endTime": "08:00", "startTime": "18:00" passava
+  // despercebido e gerava uma Agenda Online pública sem nenhum horário livre o dia todo.
+  // Comparação lexicográfica de string é segura aqui porque o regex acima já garante
+  // exatamente o formato "HH:mm" de 2 dígitos para ambos os campos.
+  .refine((data) => data.startTime < data.endTime, {
+    message: "startTime deve ser anterior a endTime.",
+    path: ["endTime"],
+  });
 
 schedulingRouter.get("/professional-working-hours", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
@@ -81,6 +93,7 @@ schedulingRouter.get("/professional-working-hours", requireAuth, requireAnyModul
   const entries = await prisma.professionalWorkingHours.findMany({
     where: { tenantId, ...(professionalId ? { professionalId } : {}) },
     orderBy: [{ professionalId: "asc" }, { dayOfWeek: "asc" }],
+    take: 500,
   });
   return res.json({ success: true, data: entries, error: null });
 });
@@ -125,16 +138,19 @@ const createAppointmentSchema = z.object({
 schedulingRouter.get("/appointments", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:appointment:read"))) return forbid(res, "Seu nível de acesso não permite consultar a agenda.");
-  const { professionalId, from, to, status } = req.query as Record<string, string | undefined>;
+  const { professionalId, from, to } = req.query as Record<string, string | undefined>;
+  const statusParsed = readEnumQuery(res, req.query.status, ["SCHEDULED", "CONFIRMED", "IN_PROGRESS", "COMPLETED", "CANCELLED", "NO_SHOW"] as const, "status");
+  if (!statusParsed.ok) return;
   const appointments = await prisma.appointment.findMany({
     where: {
       tenantId,
       ...(professionalId ? { professionalId } : {}),
-      ...(status ? { status: status as any } : {}),
+      ...(statusParsed.value ? { status: statusParsed.value } : {}),
       ...(from || to ? { scheduledAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}),
     },
     include: { client: { select: { id: true, name: true } }, service: true, professional: { select: { id: true, name: true } }, pet: true, vehicle: true },
     orderBy: { scheduledAt: "asc" },
+    take: 1000,
   });
   return res.json({ success: true, data: appointments, error: null });
 });
@@ -150,11 +166,17 @@ schedulingRouter.get("/appointments/:id", requireAuth, requireAnyModule(["SALON_
   return res.json({ success: true, data: appointment, error: null });
 });
 
-// Anti-duplo-agendamento: a constraint real que impede a colisão é o
-// `@@unique([tenantId, professionalId, scheduledAt])` do schema — este handler
-// apenas traduz a violação dessa constraint em um erro 409 legível, nunca
-// reimplementando a checagem manualmente (que teria race condition entre o
-// SELECT de verificação e o INSERT, Capítulo 6.3).
+// CORREÇÃO DE AUDITORIA: o `@@unique([tenantId, professionalId, scheduledAt])` do
+// schema só impede o MESMO instante exato — dois agendamentos às 10:00 e 10:15
+// para o mesmo profissional, cada um com 30min de duração, se sobrepõem na
+// prática (10:00-10:30 x 10:15-10:45) e passavam incólumes por essa constraint.
+// A checagem real de sobreposição considera [scheduledAt, scheduledAt+duration)
+// de cada lado e roda dentro de uma transação com advisory lock por
+// profissional — fecha a race condition entre o SELECT de verificação e o
+// INSERT que a trava `@@unique` sozinha não cobre (dois agendamentos em
+// horários diferentes, mas sobrepostos, não disparam violação de unicidade).
+class AppointmentOverlapError extends Error {}
+
 schedulingRouter.post("/appointments", requireAuth, requireAnyModule(["SALON_BOOKING", "CAR_WASH_QUEUE", "PETSHOP_VET"]), async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:appointment:write"))) return forbid(res, "Seu nível de acesso não permite criar agendamentos.");
@@ -179,24 +201,51 @@ schedulingRouter.post("/appointments", requireAuth, requireAnyModule(["SALON_BOO
   if (parsed.data.petId && !pet) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Pet não encontrado." } });
   if (parsed.data.vehicleId && !vehicle) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Veículo não encontrado." } });
 
+  const durationMinutes = parsed.data.durationMinutes ?? service.estimatedDurationMinutes;
+  const newStart = new Date(parsed.data.scheduledAt);
+  const newEnd = new Date(newStart.getTime() + durationMinutes * 60000);
+
   try {
-    const appointment = await prisma.appointment.create({
-      data: {
-        tenantId,
-        clientId: parsed.data.clientId,
-        serviceId: parsed.data.serviceId,
-        professionalId: parsed.data.professionalId,
-        petId: parsed.data.petId,
-        vehicleId: parsed.data.vehicleId,
-        scheduledAt: new Date(parsed.data.scheduledAt),
-        durationMinutes: parsed.data.durationMinutes ?? service.estimatedDurationMinutes,
-        source: parsed.data.source ?? "INTERNAL",
-      },
+    const appointment = await prisma.$transaction(async (tx) => {
+      // Advisory lock escopado por tenant+profissional: serializa a checagem de
+      // sobreposição + criação para o MESMO profissional entre transações
+      // concorrentes (liberado automaticamente no fim da transação).
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${tenantId}:${parsed.data.professionalId}`}))`;
+
+      // Candidatos: qualquer agendamento ativo do profissional que comece antes do
+      // fim do novo intervalo — o filtro final de sobreposição real (fim do
+      // existente > início do novo) é feito em memória, pois Prisma não expressa
+      // `scheduledAt + durationMinutes > $1` nativamente no where.
+      const candidates = await tx.appointment.findMany({
+        where: {
+          tenantId,
+          professionalId: parsed.data.professionalId,
+          status: { notIn: ["CANCELLED", "NO_SHOW"] },
+          scheduledAt: { lt: newEnd },
+        },
+        select: { scheduledAt: true, durationMinutes: true },
+      });
+      const hasOverlap = candidates.some((c) => new Date(c.scheduledAt.getTime() + c.durationMinutes * 60000) > newStart);
+      if (hasOverlap) throw new AppointmentOverlapError();
+
+      return tx.appointment.create({
+        data: {
+          tenantId,
+          clientId: parsed.data.clientId,
+          serviceId: parsed.data.serviceId,
+          professionalId: parsed.data.professionalId,
+          petId: parsed.data.petId,
+          vehicleId: parsed.data.vehicleId,
+          scheduledAt: newStart,
+          durationMinutes,
+          source: parsed.data.source ?? "INTERNAL",
+        },
+      });
     });
     return res.status(201).json({ success: true, data: appointment, error: null });
   } catch (err: any) {
-    if (err?.code === "P2002") {
-      return res.status(409).json({ success: false, data: null, error: { code: "PROFESSIONAL_ALREADY_BOOKED", message: "Este profissional já possui um agendamento exatamente neste horário." } });
+    if (err instanceof AppointmentOverlapError || err?.code === "P2002") {
+      return res.status(409).json({ success: false, data: null, error: { code: "PROFESSIONAL_ALREADY_BOOKED", message: "Este profissional já possui um agendamento que se sobrepõe a este horário." } });
     }
     throw err;
   }
@@ -212,21 +261,36 @@ schedulingRouter.patch("/appointments/:id/status", requireAuth, requireAnyModule
   const appointment = await prisma.appointment.findFirst({ where: { id: req.params.id, tenantId } });
   if (!appointment) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Agendamento não encontrado." } });
 
-  // Ao concluir um atendimento vinculado a um pacote pré-pago (Capítulo 4.2),
-  // debita uma sessão do ClientServicePackage ativo do cliente para o mesmo
-  // serviço — nunca cobra novamente nem ignora o pacote contratado.
-  if (parsed.data.status === "COMPLETED") {
-    const candidatePackages = await prisma.clientServicePackage.findMany({
-      where: { tenantId, clientId: appointment.clientId, serviceId: appointment.serviceId },
-      orderBy: { purchasedAt: "asc" },
-    });
-    const activePackage = candidatePackages.find((p) => p.sessionsUsed < p.totalSessions && (!p.expiresAt || p.expiresAt > new Date()));
-    if (activePackage) {
-      await prisma.clientServicePackage.update({ where: { id: activePackage.id }, data: { sessionsUsed: { increment: 1 } } });
+  const updated = await prisma.$transaction(async (tx) => {
+    if (parsed.data.status === "COMPLETED") {
+      // CORREÇÃO DE AUDITORIA (idempotência de transição de estado): o `updateMany`
+      // com `status: { not: "COMPLETED" }` no WHERE só "ganha" a corrida quando o
+      // status anterior ainda não era COMPLETED — reenviar COMPLETED repetidamente
+      // (ex.: duplo clique, retry de rede) nunca mais debita o pacote de sessões
+      // do cliente uma segunda vez, mesmo sob requisições concorrentes.
+      const claimed = await tx.appointment.updateMany({
+        where: { id: appointment.id, tenantId, status: { not: "COMPLETED" } },
+        data: { status: "COMPLETED" },
+      });
+      if (claimed.count > 0) {
+        // Ao concluir um atendimento vinculado a um pacote pré-pago (Capítulo 4.2),
+        // debita uma sessão do ClientServicePackage ativo do cliente para o mesmo
+        // serviço — nunca cobra novamente nem ignora o pacote contratado.
+        const candidatePackages = await tx.clientServicePackage.findMany({
+          where: { tenantId, clientId: appointment.clientId, serviceId: appointment.serviceId },
+          orderBy: { purchasedAt: "asc" },
+        });
+        const activePackage = candidatePackages.find((p) => p.sessionsUsed < p.totalSessions && (!p.expiresAt || p.expiresAt > new Date()));
+        if (activePackage) {
+          await tx.clientServicePackage.update({ where: { id: activePackage.id }, data: { sessionsUsed: { increment: 1 } } });
+        }
+      }
+    } else {
+      await tx.appointment.update({ where: { id: appointment.id }, data: { status: parsed.data.status } });
     }
-  }
+    return tx.appointment.findFirstOrThrow({ where: { id: appointment.id, tenantId } });
+  });
 
-  const updated = await prisma.appointment.update({ where: { id: appointment.id }, data: { status: parsed.data.status } });
   return res.json({ success: true, data: updated, error: null });
 });
 
@@ -243,7 +307,7 @@ schedulingRouter.get("/client-service-packages", requireAuth, requireAnyModule([
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "scheduling:service:read"))) return forbid(res, "Seu nível de acesso não permite consultar pacotes de sessões.");
   const clientId = req.query.clientId as string | undefined;
-  const packages = await prisma.clientServicePackage.findMany({ where: { tenantId, ...(clientId ? { clientId } : {}) }, include: { service: true }, orderBy: { purchasedAt: "desc" } });
+  const packages = await prisma.clientServicePackage.findMany({ where: { tenantId, ...(clientId ? { clientId } : {}) }, include: { service: true }, orderBy: { purchasedAt: "desc" }, take: 500 });
   return res.json({ success: true, data: packages, error: null });
 });
 
@@ -287,6 +351,7 @@ schedulingRouter.get("/service-commissions", requireAuth, requireAnyModule(["SAL
     },
     include: { professional: { select: { id: true, name: true } }, service: { select: { id: true, name: true } }, sale: { select: { id: true, createdAt: true } } },
     orderBy: { createdAt: "desc" },
+    take: 1000,
   });
   const totalCommission = entries.reduce((acc, e) => acc.plus(e.commissionAmount), new Prisma.Decimal(0));
   return res.json({ success: true, data: { entries, totalCommission }, error: null });

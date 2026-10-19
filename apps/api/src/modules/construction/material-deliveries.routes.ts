@@ -15,6 +15,7 @@ import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const materialDeliveriesRouter = Router();
 
@@ -69,6 +70,14 @@ materialDeliveriesRouter.post("/material-deliveries", requireAuth, requireModule
   if (input.saleId) {
     const sale = await prisma.sale.findFirst({ where: { id: input.saleId, tenantId } });
     if (!sale) return fail(res, 404, "NOT_FOUND", "Venda não encontrada.");
+    // CORREÇÃO DE AUDITORIA: a venda vinculada (`saleId`) não era checada
+    // contra o `clientId` informado — permitindo registrar a entrega de
+    // material em nome de um cliente diferente de quem realmente comprou
+    // (`sale.clientId`), uma inconsistência que quebraria a rastreabilidade
+    // financeira da entrega.
+    if (sale.clientId !== input.clientId) {
+      return fail(res, 409, "CLIENT_MISMATCH", "O clientId informado não corresponde ao cliente real da venda vinculada.");
+    }
   }
 
   const delivery = await prisma.materialDelivery.create({
@@ -90,9 +99,10 @@ materialDeliveriesRouter.post("/material-deliveries", requireAuth, requireModule
 materialDeliveriesRouter.get("/material-deliveries", requireAuth, requireModule("CONSTRUCTION_BULK_UNITS"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  const statusParsed = readEnumQuery(res, req.query.status, ["PENDING", "IN_TRANSIT", "DELIVERED", "CANCELLED"] as const, "status");
+  if (!statusParsed.ok) return;
   const deliveries = await prisma.materialDelivery.findMany({
-    where: { tenantId, ...(status ? { status: status as any } : {}) },
+    where: { tenantId, ...(statusParsed.value ? { status: statusParsed.value } : {}) },
     include: { client: { select: { id: true, name: true, phone: true } } },
     orderBy: { scheduledAt: "asc" },
     take: 200,

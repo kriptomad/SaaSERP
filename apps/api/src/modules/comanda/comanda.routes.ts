@@ -24,10 +24,14 @@ import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireAnyModule } from "../../middlewares/gatekeeper.middleware";
 import { calculateTax, calculateIss } from "../fiscal/tax-engine.service";
 import { resolveTaxReformPhase } from "../fiscal/tax-reform-phase.service";
-import { consumeRecipeForComandaItem, MissingIngredientStockError } from "../../services/production/consume-recipe-for-comanda-item.service";
+import { consumeRecipeForComandaItemWithinTx, MissingIngredientStockError } from "../../services/production/consume-recipe-for-comanda-item.service";
 import { enqueueFiscalEmission } from "../fiscal/queues/fiscal-emission.queue";
+import { createModuleLogger } from "../../lib/logger";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const comandaRouter = Router();
+
+const logger = createModuleLogger("comanda");
 
 // GAP DE AUDITORIA FECHADO (Capítulo 2.6/11.1): "Comanda Eletrônica" é a tela
 // operacional central do módulo pago IFOOD_INTEGRATION (Lanchonete/Restaurante),
@@ -77,9 +81,10 @@ comandaRouter.post("/restaurant-tables", requireAuth, async (req: Request, res: 
 comandaRouter.get("/comandas", requireAuth, async (req: Request, res: Response) => {
   const { userId, role, tenantId } = req.session!;
   if (!(await hasPermission(role, userId, "pdv:comanda:read"))) return forbid(res, "Seu nível de acesso não permite consultar comandas.");
-  const status = req.query.status as string | undefined;
+  const statusParsed = readEnumQuery(res, req.query.status, ["OPEN", "CLOSED", "CANCELLED"] as const, "status");
+  if (!statusParsed.ok) return;
   const comandas = await prisma.comanda.findMany({
-    where: { tenantId, ...(status ? { status: status as any } : {}) },
+    where: { tenantId, ...(statusParsed.value ? { status: statusParsed.value } : {}) },
     include: { table: true, client: { select: { id: true, name: true } }, items: true },
     orderBy: { openedAt: "desc" },
   });
@@ -134,39 +139,62 @@ comandaRouter.post("/comandas/:id/items", requireAuth, async (req: Request, res:
     const professional = await prisma.user.findFirst({ where: { id: parsed.data.professionalId, tenantId } });
     if (!professional) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "professionalId não pertence a este tenant." } });
   }
-  const item = await prisma.comandaItem.create({
-    data: {
-      tenantId,
-      comandaId: comanda.id,
-      productId: parsed.data.productId,
-      serviceId: parsed.data.serviceId,
-      professionalId: parsed.data.professionalId,
-      quantity: parsed.data.quantity,
-      unitPrice: parsed.data.unitPrice,
-    },
-  });
 
-  // Capítulo 11.1 — baixa de insumos da Ficha Técnica disparada no LANÇAMENTO do
-  // item na comanda (não no fechamento): "o insumo é consumido na produção do
-  // prato". Falha de estoque de insumo não deve impedir o lançamento do item em
-  // si (o prato já está sendo preparado/entregue ao cliente) — fica registrado
-  // como aviso para o operador resolver o estoque depois, nunca um rollback do
-  // pedido já feito ao cliente.
-  let recipeWarning: string | null = null;
-  if (parsed.data.productId) {
-    try {
-      await consumeRecipeForComandaItem(prisma, { tenantId, comandaItemId: item.id });
-    } catch (err) {
-      if (err instanceof MissingIngredientStockError) {
-        recipeWarning = err.message;
-      } else {
-        throw err;
+  // GAP DE AUDITORIA FECHADO: a criação do item e a baixa de insumo da ficha
+  // técnica eram duas operações separadas e não-atômicas — se o processo caísse
+  // entre as duas (ou a baixa falhasse por um erro que não fosse
+  // `MissingIngredientStockError`), o item ficava criado sem NUNCA ter tentado
+  // baixar o insumo, e sem nenhum registro do porquê. Agora ambas rodam dentro da
+  // mesma transação Serializable (mesmo isolamento usado pelo núcleo de baixa de
+  // ficha técnica, que depende de `FOR UPDATE` para não sobre-consumir o mesmo
+  // insumo em lançamentos concorrentes).
+  //
+  // DECISÃO DE NEGÓCIO MANTIDA (documentada, Capítulo 11.1): insumo insuficiente
+  // NÃO impede o lançamento do item — o prato já está sendo preparado/entregue ao
+  // cliente, e um rollback aqui descartaria um pedido já aceito. O que muda: a
+  // falha agora é sempre PERSISTIDA em `ComandaItem.recipeConsumptionWarning`
+  // (nunca apenas um `warning` efêmero na resposta HTTP do momento do lançamento)
+  // e logada de forma estruturada, nunca silenciosa.
+  const { item, recipeWarning } = await prisma.$transaction(
+    async (tx) => {
+      const createdItem = await tx.comandaItem.create({
+        data: {
+          tenantId,
+          comandaId: comanda.id,
+          productId: parsed.data.productId,
+          serviceId: parsed.data.serviceId,
+          professionalId: parsed.data.professionalId,
+          quantity: parsed.data.quantity,
+          unitPrice: parsed.data.unitPrice,
+        },
+      });
+
+      let warning: string | null = null;
+      if (parsed.data.productId) {
+        try {
+          await consumeRecipeForComandaItemWithinTx(tx, { tenantId, comandaItemId: createdItem.id });
+        } catch (err) {
+          if (err instanceof MissingIngredientStockError) {
+            warning = err.message;
+            logger.warn(
+              { tenantId, comandaItemId: createdItem.id, productId: parsed.data.productId, err: err.message },
+              "Comanda: insumo insuficiente para baixar a ficha técnica deste item — item lançado mesmo assim (decisão de negócio documentada), aviso persistido no próprio item",
+            );
+            await tx.comandaItem.update({ where: { id: createdItem.id }, data: { recipeConsumptionWarning: warning } });
+          } else {
+            throw err;
+          }
+        }
       }
-    }
-  }
 
-  return res.status(201).json({ success: true, data: item, error: null, warning: recipeWarning });
+      return { item: createdItem, recipeWarning: warning };
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+  );
+
+  return res.status(201).json({ success: true, data: { ...item, recipeConsumptionWarning: recipeWarning }, error: null, warning: recipeWarning });
 });
+
 
 // Envia um item ao KDS (Kitchen Display System) via SSE (Capítulo 8.3) — este
 // endpoint apenas marca `sentToKdsAt`; o broadcast real pelo canal SSE do tenant

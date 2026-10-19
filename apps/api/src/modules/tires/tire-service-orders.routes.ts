@@ -24,6 +24,8 @@ import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
+import { zodDecimal } from "../../lib/zod-decimal";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const tireServiceOrdersRouter = Router();
 
@@ -73,7 +75,16 @@ const createSchema = z.object({
     .array(
       z.object({
         type: z.enum(["MOUNTING", "BALANCING", "ALIGNMENT"]),
-        unitPrice: z.coerce.number().nonnegative(),
+        // CORREÇÃO DE AUDITORIA: `z.coerce.number()` convertia o preço informado
+        // pelo client para `number` (float IEEE-754) antes de chegar à coluna
+        // `@db.Decimal(12,2)` — risco de erro de arredondamento monetário.
+        // `zodDecimal` converte direto para `Prisma.Decimal`, preservando a
+        // precisão exata do valor (mesmo padrão usado no resto do módulo
+        // financeiro). O preço de mão de obra é sempre definido na abertura da
+        // O.S. (não há "catálogo" de serviço para validar contra — decisão de
+        // negócio documentada no topo do arquivo), mas ainda validado como
+        // não-negativo e não-NaN pelo próprio helper.
+        unitPrice: zodDecimal(),
       }),
     )
     .min(1),
@@ -81,8 +92,13 @@ const createSchema = z.object({
     .array(
       z.object({
         productId: z.string().min(1),
-        quantity: z.coerce.number().positive(),
-        unitPrice: z.coerce.number().nonnegative(),
+        quantity: zodDecimal({ positive: true }),
+        // Preço do pneu pode ser customizado na O.S. (desconto/negociação
+        // pontual) — decisão de negócio intencional, não um bug; ainda assim
+        // validado como não-negativo e não-NaN pelo helper `zodDecimal` em vez
+        // de aceitar qualquer `number` client-supplied sem checagem de
+        // precisão decimal.
+        unitPrice: zodDecimal(),
         dotCodes: z.array(z.string().min(1)).optional(), // um DOT por pneu físico instalado, quando rastreável por série
       }),
     )
@@ -147,6 +163,28 @@ tireServiceOrdersRouter.post("/tire-service-orders", requireAuth, requireModule(
       // Vincula cada pneu físico (DOT) instalado a esta O.S. — cria o `ProductSerial`
       // se ainda não existir (primeiro recebimento rastreado deste pneu específico).
       for (const dotCode of tire.dotCodes ?? []) {
+        // CORREÇÃO DE AUDITORIA: o upsert anterior reatribuía `workOrderId`
+        // silenciosamente mesmo quando o DOT já estava vinculado a OUTRA O.S.
+        // ainda ativa (ex.: digitação errada do DOT reaproveitando o pneu de um
+        // cliente diferente que ainda está em atendimento) — "roubando" o
+        // vínculo físico sem nenhum aviso. Agora valida que o serial, se já
+        // existir, não pertence a uma O.S. ativa diferente da atual antes de
+        // seguir com o upsert.
+        const existingSerial = await tx.productSerial.findUnique({
+          where: { tenantId_serialNumber: { tenantId, serialNumber: dotCode } },
+          include: { workOrder: { select: { id: true, status: true } } },
+        });
+        const INACTIVE_STATUSES = new Set(["DELIVERED", "CANCELLED"]);
+        if (
+          existingSerial?.workOrderId &&
+          existingSerial.workOrderId !== workOrder.id &&
+          existingSerial.workOrder &&
+          !INACTIVE_STATUSES.has(existingSerial.workOrder.status)
+        ) {
+          throw new Error(
+            `O DOT "${dotCode}" já está vinculado a outra ordem de serviço ativa (${existingSerial.workOrderId}).`,
+          );
+        }
         await tx.productSerial.upsert({
           where: { tenantId_serialNumber: { tenantId, serialNumber: dotCode } },
           create: { tenantId, productId: tire.productId, serialNumber: dotCode, status: "IN_USE", workOrderId: workOrder.id },
@@ -168,9 +206,10 @@ tireServiceOrdersRouter.post("/tire-service-orders", requireAuth, requireModule(
 tireServiceOrdersRouter.get("/tire-service-orders", requireAuth, requireModule("TIRE_WARRANTY"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  const statusParsed = readEnumQuery(res, req.query.status, ["RECEIVED", "DIAGNOSING", "AWAITING_APPROVAL", "IN_REPAIR", "READY", "DELIVERED", "CANCELLED"] as const, "status");
+  if (!statusParsed.ok) return;
   const orders = await prisma.workOrder.findMany({
-    where: { tenantId, workOrderType: "TIRE_SHOP", ...(status ? { status: status as any } : {}) },
+    where: { tenantId, workOrderType: "TIRE_SHOP", ...(statusParsed.value ? { status: statusParsed.value } : {}) },
     include: { items: true, client: { select: { id: true, name: true, phone: true } }, Vehicle: true, productSerials: true },
     orderBy: { createdAt: "desc" },
     take: 100,
@@ -196,6 +235,21 @@ tireServiceOrdersRouter.get("/tire-service-orders/:id", requireAuth, requireModu
 
 const statusSchema = z.object({ status: z.enum(["IN_REPAIR", "READY", "DELIVERED", "CANCELLED"]) });
 
+// CORREÇÃO DE AUDITORIA: a rota aceitava QUALQUER transição de status (ex.:
+// RECEIVED → DELIVERED direto, ou DELIVERED → IN_REPAIR de volta), sem nenhuma
+// máquina de estados — mesmo padrão de gap já corrigido em outros módulos
+// (construction-quotes.routes.ts, personalization.routes.ts). Fluxo real da
+// borracharia: RECEIVED → IN_REPAIR → READY → DELIVERED; CANCELLED é permitido
+// a partir de qualquer estado que ainda não tenha sido entregue; nenhuma
+// transição é permitida a partir de um estado terminal (DELIVERED/CANCELLED).
+const TIRE_ORDER_VALID_TRANSITIONS: Record<string, string[]> = {
+  RECEIVED: ["IN_REPAIR", "CANCELLED"],
+  IN_REPAIR: ["READY", "CANCELLED"],
+  READY: ["DELIVERED", "CANCELLED"],
+  DELIVERED: [],
+  CANCELLED: [],
+};
+
 tireServiceOrdersRouter.patch("/tire-service-orders/:id/status", requireAuth, requireModule("TIRE_WARRANTY"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
   const parsed = statusSchema.safeParse(req.body);
@@ -203,6 +257,11 @@ tireServiceOrdersRouter.patch("/tire-service-orders/:id/status", requireAuth, re
   const { tenantId } = req.session!;
   const existing = await prisma.workOrder.findFirst({ where: { id: req.params.id, tenantId, workOrderType: "TIRE_SHOP" } });
   if (!existing) return fail(res, 404, "NOT_FOUND", "Ordem de serviço de pneus não encontrada.");
+
+  const allowed = TIRE_ORDER_VALID_TRANSITIONS[existing.status] ?? [];
+  if (!allowed.includes(parsed.data.status)) {
+    return fail(res, 409, "INVALID_TRANSITION", `Não é possível mudar de ${existing.status} para ${parsed.data.status}.`);
+  }
 
   const updated = await prisma.workOrder.update({
     where: { id: existing.id },

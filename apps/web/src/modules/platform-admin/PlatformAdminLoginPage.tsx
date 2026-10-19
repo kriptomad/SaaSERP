@@ -37,12 +37,16 @@ export function PlatformAdminLoginPage() {
       }>("/platform-admin/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
 
       if (result.data.stage === "2FA_ENROLLMENT_REQUIRED") {
-        const enrollResult = await platformAdminRequest<{ data: { otpAuthUrl: string } }>(
+        const enrollResult = await platformAdminRequest<{ data: { otpAuthUrl: string; enrollToken: string } }>(
           "/platform-admin/auth/2fa/enroll",
           { method: "POST" },
           result.data.enrollToken,
         );
-        setStage({ name: "2fa-enroll", enrollToken: result.data.enrollToken!, otpAuthUrl: enrollResult.data.otpAuthUrl });
+        // GAP DE AUDITORIA FECHADO: /2fa/confirm só aceita o token REEMITIDO por
+        // /2fa/enroll (vinculado ao nonce desta rodada de enrollment), nunca o
+        // token original do login — usar o original aqui falharia com
+        // ENROLLMENT_SUPERSEDED_OR_EXPIRED.
+        setStage({ name: "2fa-enroll", enrollToken: enrollResult.data.enrollToken, otpAuthUrl: enrollResult.data.otpAuthUrl });
       } else {
         setStage({ name: "2fa-verify", verifyToken: result.data.verifyToken! });
       }

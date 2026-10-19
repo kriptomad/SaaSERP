@@ -100,6 +100,16 @@ workOrderReportsRouter.get("/work-order-reports/commissions", requireAuth, requi
     },
     take: 2000,
   });
+  // CORREÇÃO DE AUDITORIA: `take: 2000` truncava silenciosamente o cálculo de
+  // comissão sempre que o período consultado tinha mais de 2000 O.S. entregues —
+  // o relatório parecia completo, mas subestimava a comissão de quem trabalhou
+  // mais. `truncated: true` avisa explicitamente o consumidor da API (e um log de
+  // warning registra o evento no servidor) sempre que o limite é atingido.
+  const truncated = delivered.length === 2000;
+  if (truncated) {
+    // eslint-disable-next-line no-console
+    console.warn(`[work-order-reports] /commissions truncado em 2000 O.S. entregues (tenantId=${tenantId}); comissão pode estar subestimada para o período solicitado.`);
+  }
 
   const byTechnician = new Map<
     string,
@@ -130,7 +140,7 @@ workOrderReportsRouter.get("/work-order-reports/commissions", requireAuth, requi
   });
   computedRows.sort((a, b) => b.commissionValue - a.commissionValue);
 
-  return res.json({ success: true, data: { from: from ?? null, to: to ?? null, technicians: computedRows }, error: null });
+  return res.json({ success: true, data: { from: from ?? null, to: to ?? null, technicians: computedRows, truncated }, error: null });
 });
 
 workOrderReportsRouter.get("/work-order-reports/commissions/rules", requireAuth, requireModule("WORK_ORDER"), async (req: Request, res: Response) => {
@@ -174,12 +184,17 @@ workOrderReportsRouter.put("/work-order-reports/commissions/rules", requireAuth,
     return res.json({ success: true, data: rule, error: null });
   }
 
-  // Regra padrão do tenant: `technicianId` é nulo, então não há @@unique que o Prisma
-  // possa usar num upsert — busca manual + create/update evita duplicar a linha padrão.
-  const existingDefault = await prisma.technicianCommissionRule.findFirst({ where: { tenantId, technicianId: null } });
-  const rule = existingDefault
-    ? await prisma.technicianCommissionRule.update({ where: { id: existingDefault.id }, data: { commissionPercent } })
-    : await prisma.technicianCommissionRule.create({ data: { tenantId, technicianId: null, commissionPercent } });
+  // Regra padrão do tenant: `technicianId` é nulo e o Postgres permite múltiplas linhas
+  // com `technicianId = null` mesmo sob `@unique` (NULL nunca colide com NULL) — o antigo
+  // find-then-create/update fora de transação permitia duas requisições PUT concorrentes
+  // criarem duas regras padrão duplicadas. Serializa com advisory lock + transação.
+  const rule = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${tenantId} || ':technician-commission-rule-default'))`;
+    const existingDefault = await tx.technicianCommissionRule.findFirst({ where: { tenantId, technicianId: null } });
+    return existingDefault
+      ? tx.technicianCommissionRule.update({ where: { id: existingDefault.id }, data: { commissionPercent } })
+      : tx.technicianCommissionRule.create({ data: { tenantId, technicianId: null, commissionPercent } });
+  });
   return res.json({ success: true, data: rule, error: null });
 });
 
@@ -286,6 +301,14 @@ workOrderReportsRouter.get("/work-order-reports/kpis", requireAuth, requireModul
     }),
     prisma.workOrder.count({ where: { tenantId, status: { notIn: ["DELIVERED", "CANCELLED"] } } }),
   ]);
+  // CORREÇÃO DE AUDITORIA: mesmo gap do endpoint de comissões — `take: 2000`
+  // truncava silenciosamente os indicadores (ticket médio, tempo de ciclo) sem
+  // avisar o consumidor.
+  const truncated = delivered.length === 2000;
+  if (truncated) {
+    // eslint-disable-next-line no-console
+    console.warn(`[work-order-reports] /kpis truncado em 2000 O.S. entregues (tenantId=${tenantId}); indicadores podem não refletir o período completo solicitado.`);
+  }
 
   let totalCycleHours = 0;
   let totalLaborValue = 0;
@@ -328,6 +351,7 @@ workOrderReportsRouter.get("/work-order-reports/kpis", requireAuth, requireModul
       avgLaborTicket,
       avgPartsTicket,
       deliveredByTechnician: Array.from(perTechnician.values()).sort((a, b) => b.deliveredCount - a.deliveredCount),
+      truncated,
     },
     error: null,
   });

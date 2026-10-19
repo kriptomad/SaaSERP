@@ -20,6 +20,8 @@ import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
+import { zodDecimal } from "../../lib/zod-decimal";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const constructionQuotesRouter = Router();
 
@@ -54,9 +56,13 @@ async function requireWrite(req: Request, res: Response): Promise<boolean> {
 const itemSchema = z.object({
   productId: z.string().min(1).nullable().optional(),
   description: z.string().min(1),
-  quantity: z.coerce.number().positive(),
+  // CORREÇÃO DE AUDITORIA: `z.coerce.number()` convertia quantidade/preço do
+  // client para `number` (float) antes de chegar às colunas
+  // `@db.Decimal(12,3)`/`@db.Decimal(12,2)` — trocado por `zodDecimal` para
+  // preservar a precisão exata do valor informado.
+  quantity: zodDecimal({ positive: true }),
   unit: z.string().min(1),
-  unitPrice: z.coerce.number().nonnegative(),
+  unitPrice: zodDecimal(),
 });
 
 const createSchema = z.object({
@@ -76,6 +82,21 @@ constructionQuotesRouter.post("/construction-quotes", requireAuth, requireModule
 
   const client = await prisma.client.findFirst({ where: { id: input.clientId, tenantId } });
   if (!client) return fail(res, 404, "NOT_FOUND", "Cliente não encontrado.");
+
+  // CORREÇÃO DE AUDITORIA: `productId` dos itens chegava do client sem
+  // nenhuma validação de pertencimento ao tenant — um orçamento poderia
+  // referenciar um produto de OUTRO tenant (vazamento de referência
+  // cross-tenant), mesmo que o item em si não dependa de `Product` para
+  // existir (campo opcional).
+  const productIds = [...new Set(input.items.map((item) => item.productId).filter((id): id is string => Boolean(id)))];
+  if (productIds.length > 0) {
+    const products = await prisma.product.findMany({ where: { id: { in: productIds }, tenantId }, select: { id: true } });
+    const foundIds = new Set(products.map((p) => p.id));
+    const missing = productIds.filter((id) => !foundIds.has(id));
+    if (missing.length > 0) {
+      return fail(res, 404, "NOT_FOUND", `Produto(s) não encontrado(s) neste tenant: ${missing.join(", ")}.`);
+    }
+  }
 
   const quote = await prisma.constructionQuote.create({
     data: {
@@ -103,10 +124,11 @@ constructionQuotesRouter.post("/construction-quotes", requireAuth, requireModule
 constructionQuotesRouter.get("/construction-quotes", requireAuth, requireModule("CONSTRUCTION_BULK_UNITS"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  const statusParsed = readEnumQuery(res, req.query.status, ["DRAFT", "SENT", "APPROVED", "REJECTED", "CONVERTED", "EXPIRED"] as const, "status");
+  if (!statusParsed.ok) return;
   const clientId = typeof req.query.clientId === "string" ? req.query.clientId : undefined;
   const quotes = await prisma.constructionQuote.findMany({
-    where: { tenantId, ...(status ? { status: status as any } : {}), ...(clientId ? { clientId } : {}) },
+    where: { tenantId, ...(statusParsed.value ? { status: statusParsed.value } : {}), ...(clientId ? { clientId } : {}) },
     include: { items: true, client: { select: { id: true, name: true, phone: true } } },
     orderBy: { createdAt: "desc" },
     take: 100,

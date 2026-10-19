@@ -389,6 +389,9 @@ const OWNER_PERMISSIONS = [
   "pdv:sale:cancel",
   "pdv:cash-register:open",
   "pdv:cash-register:close",
+  // Capítulo 23.5 — TEF/maquininha de cartão: operação financeira sensível do
+  // caixa (iniciar/confirmar/cancelar cobrança na adquirente).
+  "pdv:cash-register:tef-payment",
   "stock:product:read",
   "stock:product:write",
   "stock:movement:read",
@@ -410,6 +413,7 @@ const OWNER_PERMISSIONS = [
   "financial:*:write",
   "fiscal:document:read",
   "fiscal:document:issue",
+  "fiscal:document:write",
   "fiscal:document:cancel",
   "fiscal:ibs-cbs-regime:manage",
   "billing:subscription:read",
@@ -470,10 +474,23 @@ const OWNER_PERMISSIONS = [
   "personalization:order:read",
   "personalization:order:write",
 ];
+
+// CORREÇÃO DE BUG PRÉ-EXISTENTE (bloqueante): esta constante estava sem a
+// declaração `const MANAGER_PERMISSIONS = [` — um literal de array solto,
+// iniciado por um elemento de string sem `[` de abertura correspondente ao
+// `];` de fechamento abaixo, o que é um erro de sintaxe TypeScript e quebrava
+// a compilação de TODO o `seed.ts` (logo, `ROLE_PERMISSION_MATRIX.MANAGER`,
+// referenciado mais abaixo, nunca resolvia). Corrigido tocando apenas a linha
+// de declaração ausente — nenhum item de permissão foi alterado/removido.
+const MANAGER_PERMISSIONS = [
   "pdv:sale:create",
   "pdv:sale:cancel",
   "pdv:cash-register:open",
   "pdv:cash-register:close",
+  // Capítulo 23.5 — TEF/maquininha de cartão: operação financeira sensível do
+  // caixa (confirmar/cancelar cobrança na adquirente), mesmo nível de acesso
+  // de quem já abre/fecha caixa.
+  "pdv:cash-register:tef-payment",
   "stock:product:read",
   "stock:product:write",
   "stock:movement:read",
@@ -495,6 +512,7 @@ const OWNER_PERMISSIONS = [
   "financial:*:write",
   "fiscal:document:read",
   "fiscal:document:issue",
+  "fiscal:document:write",
   "fiscal:ibs-cbs-regime:manage",
   "settings:tenant:read",
   "settings:users:manage",
@@ -556,6 +574,9 @@ const CASHIER_PERMISSIONS = [
   "pdv:sale:create",
   "pdv:cash-register:open",
   "pdv:cash-register:close",
+  // Capítulo 23.5 — TEF/maquininha de cartão: o próprio caixa opera o
+  // pagamento por cartão no dia a dia do balcão.
+  "pdv:cash-register:tef-payment",
   "stock:product:read",
   "crm:client:read",
   "pdv:comanda:read",

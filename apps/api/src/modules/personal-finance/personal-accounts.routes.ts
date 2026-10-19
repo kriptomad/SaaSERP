@@ -74,6 +74,7 @@ personalAccountsRouter.get("/personal/accounts", requireAuth, async (req: Reques
   const accounts = await prisma.personalAccount.findMany({
     where: { tenantId, ...(includeArchived ? {} : { archivedAt: null }) },
     orderBy: { createdAt: "asc" },
+    take: 500,
   });
   return res.json({ success: true, data: accounts, error: null });
 });
@@ -162,7 +163,7 @@ personalAccountsRouter.post("/personal/accounts/:id/reconcile", requireAuth, asy
 personalAccountsRouter.get("/personal/categories", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireFinancialRead(req, res))) return;
   const { tenantId } = req.session!;
-  const categories = await prisma.personalCategory.findMany({ where: { tenantId, active: true }, orderBy: { name: "asc" } });
+  const categories = await prisma.personalCategory.findMany({ where: { tenantId, active: true }, orderBy: { name: "asc" }, take: 500 });
   return res.json({ success: true, data: categories, error: null });
 });
 
@@ -279,6 +280,20 @@ personalAccountsRouter.post("/personal/transactions", requireAuth, async (req: R
     || !(await ownedIds("personalCategory", [input.categoryId], tenantId))
     || !(await ownedIds("user", (splits ?? []).map((s) => s.userId), tenantId))) {
     return foreignReference(res);
+  }
+
+  // CORREÇÃO DE AUDITORIA: nada impedia uma transação INCOME usar uma categoria
+  // EXPENSE (e vice-versa) — ex.: um gasto de "Supermercado" (categoria EXPENSE)
+  // lançado como receita, inflando indevidamente o total de ganhos do mês.
+  if (input.categoryId) {
+    const category = await prisma.personalCategory.findFirst({ where: { id: input.categoryId, tenantId }, select: { type: true } });
+    if (!category || category.type !== input.type) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        error: { code: "CATEGORY_TYPE_MISMATCH", message: "O tipo da categoria selecionada não é compatível com o tipo da transação (INCOME/EXPENSE)." },
+      });
+    }
   }
 
   const transaction = await prisma.$transaction(async (tx) => {

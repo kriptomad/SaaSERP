@@ -6,10 +6,12 @@
 // (ciência via Distribuição DFe, confirmação no recebimento de mercadoria) já
 // disparam sozinhas em `fetch-incoming-nfe.worker.ts`/`purchase-orders.routes.ts`.
 //
-// Permissão: reaproveita "stock:product:read"/"stock:product:write" — mesmo domínio
-// RBAC do módulo de Compras (Capítulo 17.8), já que notas de compra recebidas e
-// eventos fiscais sobre documentos emitidos pelo próprio tenant afetam diretamente o
-// mesmo fluxo de estoque/custo.
+// Permissão: eventos fiscais pós-emissão (manifestação do destinatário, CC-e) usam
+// "fiscal:document:read"/"fiscal:document:write" — o mesmo domínio RBAC fiscal já
+// usado pelo Contador/Owner em outras rotas do módulo (Capítulo 21.19), nunca a
+// permissão de estoque ("stock:product:write"), que tem um escopo mais amplo e
+// semanticamente errado para um ato que responsabiliza o tenant perante a SEFAZ
+// (CORREÇÃO DE AUDITORIA: a versão anterior reaproveitava "stock:product:write").
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
@@ -92,7 +94,11 @@ const manualManifestSchema = z.object({
 // (automática no recebimento de mercadoria) nunca passam por esta rota.
 fiscalDocumentsRouter.post("/fiscal/notas-recebidas/:id/manifestar", requireAuth, async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "stock:product:write"))) {
+  // CORREÇÃO DE AUDITORIA: exigia "stock:product:write" (permissão de estoque),
+  // um escopo incorreto para um ato fiscal que responsabiliza o tenant perante a
+  // SEFAZ — "fiscal:document:write" é a permissão fiscal correta (mesmo domínio
+  // de "fiscal:document:read" usada no GET acima).
+  if (!(await hasPermission(role, userId, "fiscal:document:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite manifestar-se sobre notas fiscais recebidas." } });
   }
   const parsed = manualManifestSchema.safeParse(req.body);
@@ -128,13 +134,20 @@ fiscalDocumentsRouter.post("/fiscal/notas-recebidas/:id/manifestar", requireAuth
   }
 });
 
-const correctionLetterSchema = z.object({ correctionText: z.string() });
+const correctionLetterSchema = z.object({
+  // Mesmo limite de 1000 caracteres do evento 110110 da SEFAZ, já validado também
+  // em issue-correction-letter.service.ts (nunca confiar só no Zod: o serviço é a
+  // fonte de verdade, mas o limite aqui evita round-trip desnecessário ao banco).
+  correctionText: z.string().min(15).max(1000),
+});
 
 // POST /fiscal/documents/:id/correction-letter — Carta de Correção Eletrônica (CC-e),
 // aplicável apenas a NF-e modelo 55 (NFE_SAIDA) — ver issue-correction-letter.service.ts.
 fiscalDocumentsRouter.post("/fiscal/documents/:id/correction-letter", requireAuth, async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
-  if (!(await hasPermission(role, userId, "stock:product:write"))) {
+  // CORREÇÃO DE AUDITORIA: mesma troca de permissão do endpoint de manifestação
+  // acima — "fiscal:document:write" é o escopo correto para um evento fiscal.
+  if (!(await hasPermission(role, userId, "fiscal:document:write"))) {
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite emitir Carta de Correção." } });
   }
   const parsed = correctionLetterSchema.safeParse(req.body);

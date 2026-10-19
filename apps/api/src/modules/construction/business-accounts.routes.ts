@@ -115,7 +115,7 @@ businessAccountsRouter.post("/business-accounts/:clientId/generate-monthly-invoi
 
   const parsedQuery = monthQuerySchema.safeParse(req.query);
   if (!parsedQuery.success) return validationError(res, parsedQuery.error.flatten());
-  const { label } = resolveMonthRange(parsedQuery.data.month);
+  const { start, end, label } = resolveMonthRange(parsedQuery.data.month);
 
   const client = await prisma.client.findFirst({ where: { id: req.params.clientId, tenantId } });
   if (!client) return notFound(res, "Cliente não encontrado.");
@@ -126,25 +126,44 @@ businessAccountsRouter.post("/business-accounts/:clientId/generate-monthly-invoi
       error: { code: "NOT_BUSINESS_ACCOUNT", message: "Este cliente não é uma conta profissional (isBusinessAccount=false)." },
     });
   }
-  if (client.creditBalanceUsed.lte(0)) {
-    return res.status(400).json({
-      success: false,
-      data: null,
-      error: { code: "NOTHING_TO_INVOICE", message: "Este cliente não possui saldo de crediário pendente para faturar." },
-    });
-  }
-
-  const amount = client.creditBalanceUsed;
-  const dueDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      // Guarda de concorrência: só zera se o saldo ainda for exatamente o que lemos
-      // (mesmo padrão `updateMany` com where-guard usado em purchase-orders.routes.ts
-      // e documentado como referência em close-sale.service.ts).
+      // CORREÇÃO DE AUDITORIA: a fatura era gerada a partir de
+      // `client.creditBalanceUsed` inteiro — o saldo ACUMULADO de TODO o
+      // histórico de crediário do cliente, nunca escopado ao mês realmente
+      // informado em `?month=AAAA-MM` (usado só como rótulo textual da
+      // descrição, sem nenhuma relação com o valor cobrado). Isso faturava
+      // vendas de meses anteriores (já deveriam ter sido faturadas em sua
+      // própria competência) sob o rótulo do mês corrente, e também não batia
+      // com o extrato exibido por `GET .../monthly-statement` (que já filtra
+      // corretamente por `createdAt` dentro do mês). Agora o valor da fatura é
+      // a soma real das vendas STORE_CREDIT deste cliente DENTRO do mês
+      // informado — mesma consulta usada pelo extrato acima — travadas com
+      // `FOR UPDATE` para evitar duas faturas concorrentes contando a mesma
+      // venda.
+      const lockedSales = await tx.$queryRaw<{ id: string; totalAmount: string }[]>`
+        SELECT id, "totalAmount"::text AS "totalAmount"
+        FROM sales
+        WHERE "tenantId" = ${tenantId}
+          AND "clientId" = ${client.id}
+          AND "paymentMethod" = 'STORE_CREDIT'
+          AND "createdAt" >= ${start}
+          AND "createdAt" <= ${end}
+        FOR UPDATE
+      `;
+      if (lockedSales.length === 0) {
+        throw new Error("NOTHING_TO_INVOICE");
+      }
+      const amount = lockedSales.reduce((sum, s) => sum.plus(new Prisma.Decimal(s.totalAmount)), new Prisma.Decimal(0));
+      const dueDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+      // Guarda de concorrência: só debita se o saldo utilizado ainda comportar
+      // o valor exato desta competência (mesmo padrão `updateMany` com
+      // where-guard usado em purchase-orders.routes.ts).
       const claimed = await tx.client.updateMany({
-        where: { id: client.id, tenantId, creditBalanceUsed: amount },
-        data: { creditBalanceUsed: new Prisma.Decimal(0) },
+        where: { id: client.id, tenantId, creditBalanceUsed: { gte: amount } },
+        data: { creditBalanceUsed: { decrement: amount } },
       });
       if (claimed.count === 0) {
         throw new Error("CONCURRENT_BALANCE_CHANGE");
@@ -167,6 +186,13 @@ businessAccountsRouter.post("/business-accounts/:clientId/generate-monthly-invoi
 
     return res.status(201).json({ success: true, data: result, error: null });
   } catch (err: any) {
+    if (err?.message === "NOTHING_TO_INVOICE") {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        error: { code: "NOTHING_TO_INVOICE", message: "Este cliente não possui vendas de crediário neste mês para faturar." },
+      });
+    }
     if (err?.message === "CONCURRENT_BALANCE_CHANGE") {
       return res.status(409).json({
         success: false,

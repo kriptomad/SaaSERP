@@ -113,6 +113,10 @@ platformAdminAuthRouter.post("/platform-admin/auth/login", async (req: Request, 
   return res.json({ success: true, data: { stage: "2FA_VERIFICATION_REQUIRED", verifyToken }, error: null });
 });
 
+// Janela de validade do nonce de enrollment — igual ao TTL do próprio JWT de
+// enrollment (10min): não faz sentido um ser mais longo que o outro.
+const TOTP_ENROLL_NONCE_TTL_MINUTES = 10;
+
 platformAdminAuthRouter.post("/platform-admin/auth/2fa/enroll", async (req: Request, res: Response) => {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
@@ -133,13 +137,33 @@ platformAdminAuthRouter.post("/platform-admin/auth/2fa/enroll", async (req: Requ
   const secret = authenticator.generateSecret();
   const otpAuthUrl = authenticator.keyuri(admin.email, "Filitech ERP Admin", secret);
 
+  // GAP DE AUDITORIA FECHADO: cada chamada a /2fa/enroll gera um novo segredo —
+  // sem um nonce vinculado a ESTA rodada específica, um token de enrollment ainda
+  // não expirado continuava "válido" para /2fa/confirm mesmo depois de outra
+  // rodada de enrollment ter sobrescrito o segredo (ex.: duas abas, ou um
+  // enrollToken vazado usado em paralelo pelo atacante). O nonce é sobrescrito a
+  // cada chamada — isso invalida IMEDIATAMENTE qualquer enrollment pendente
+  // anterior, mesmo que o JWT dele ainda não tenha expirado.
+  const nonce = randomUUID();
+  const nonceExpiresAt = new Date(Date.now() + TOTP_ENROLL_NONCE_TTL_MINUTES * 60_000);
+
   const { payload, encryptionKeyId } = encryptEnvelope({ secret });
   await prisma.platformAdminUser.update({
     where: { id: admin.id },
-    data: { totpSecretEncrypted: `${encryptionKeyId}:${payload.toString("base64")}`, totpConfirmedAt: null },
+    data: {
+      totpSecretEncrypted: `${encryptionKeyId}:${payload.toString("base64")}`,
+      totpConfirmedAt: null,
+      totpEnrollNonce: nonce,
+      totpEnrollNonceExpiresAt: nonceExpiresAt,
+    },
   });
 
-  return res.json({ success: true, data: { otpAuthUrl }, error: null });
+  // Reemite o token de enrollment com o nonce embutido — este é o único token que
+  // /2fa/confirm aceita a partir de agora; o token original do login (sem nonce)
+  // só serve para iniciar esta chamada.
+  const enrollToken = signTwoFactorEnrollToken({ platformAdminUserId: admin.id, nonce });
+
+  return res.json({ success: true, data: { otpAuthUrl, enrollToken }, error: null });
 });
 
 const confirmSchema = z.object({ totpCode: z.string().length(6) });
@@ -149,7 +173,7 @@ platformAdminAuthRouter.post("/platform-admin/auth/2fa/confirm", async (req: Req
   if (!header?.startsWith("Bearer ")) {
     return res.status(401).json({ success: false, data: null, error: { code: "UNAUTHENTICATED", message: "Token de enrollment ausente." } });
   }
-  let claims: { platformAdminUserId: string };
+  let claims: { platformAdminUserId: string; nonce?: string };
   try {
     claims = verifyTwoFactorEnrollToken(header.slice("Bearer ".length));
   } catch {
@@ -166,6 +190,26 @@ platformAdminAuthRouter.post("/platform-admin/auth/2fa/confirm", async (req: Req
     return res.status(409).json({ success: false, data: null, error: { code: "2FA_NOT_ENROLLED", message: "Inicie o enrollment (/2fa/enroll) antes de confirmar." } });
   }
 
+  // Só aceita o token reemitido pela última chamada a /2fa/enroll — nunca o token
+  // original do login (sem nonce) nem o nonce de uma rodada de enrollment já
+  // superada por um re-roll mais recente do segredo.
+  if (
+    !claims.nonce ||
+    !admin.totpEnrollNonce ||
+    claims.nonce !== admin.totpEnrollNonce ||
+    !admin.totpEnrollNonceExpiresAt ||
+    admin.totpEnrollNonceExpiresAt <= new Date()
+  ) {
+    return res.status(409).json({
+      success: false,
+      data: null,
+      error: {
+        code: "ENROLLMENT_SUPERSEDED_OR_EXPIRED",
+        message: "Este enrollment expirou ou foi substituído por uma nova tentativa. Reinicie o enrollment em /2fa/enroll.",
+      },
+    });
+  }
+
   const [encryptionKeyId, payloadBase64] = admin.totpSecretEncrypted.split(":");
   const { secret } = decryptEnvelope(Buffer.from(payloadBase64, "base64"), encryptionKeyId) as { secret: string };
 
@@ -177,7 +221,10 @@ platformAdminAuthRouter.post("/platform-admin/auth/2fa/confirm", async (req: Req
   const hashedBackupCodes = await Promise.all(rawBackupCodes.map((code) => hashPassword(code)));
 
   await prisma.$transaction([
-    prisma.platformAdminUser.update({ where: { id: admin.id }, data: { totpConfirmedAt: new Date() } }),
+    prisma.platformAdminUser.update({
+      where: { id: admin.id },
+      data: { totpConfirmedAt: new Date(), totpEnrollNonce: null, totpEnrollNonceExpiresAt: null },
+    }),
     prisma.twoFactorBackupCode.deleteMany({ where: { platformAdminUserId: admin.id } }),
     prisma.twoFactorBackupCode.createMany({
       data: hashedBackupCodes.map((codeHash) => ({ platformAdminUserId: admin.id, codeHash })),

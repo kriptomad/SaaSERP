@@ -20,6 +20,22 @@ import { isTenantStorageKey } from "./storage-key";
 
 const PRESIGNED_UPLOAD_EXPIRES_SECONDS = 5 * 60; // 5 min — suficiente para o upload direto do navegador, curto o bastante para não deixar a URL viva por muito tempo.
 const PRESIGNED_DOWNLOAD_EXPIRES_SECONDS = 15 * 60; // 15 min — tempo de visualizar/baixar uma foto/XML no painel.
+// GAP DE AUDITORIA FECHADO: categorias `publicReadable` (hoje só `avatars`) usavam a
+// URL pública do Custom Domain (`R2_PUBLIC_BASE_URL`) SEM NENHUMA assinatura/expiração
+// — uma vez vazada (log, cache de proxy, extensão de navegador), a URL continuava
+// servindo a imagem PARA SEMPRE, sem nenhuma forma de revogação. Substituído por uma
+// URL assinada de leitura com expiração de 7 dias: como o chamador real
+// (`public-online-store.routes.ts`, logo da vitrine) já gera este link do zero a cada
+// carregamento de página (nunca persiste/cacheia o valor da URL em banco), um link
+// mais longo mas EXPIRÁVEL funciona de forma idêntica para quem exibe a imagem —
+// nenhuma funcionalidade de exibição quebra. O único efeito colateral aceito
+// conscientemente é a perda de cacheabilidade de CDN/edge POR URL IDÊNTICA entre
+// visitantes diferentes (cada presign gera uma assinatura única), já que a allowlist
+// de mimetype/extensão + o isolamento por tenant continuam sendo a defesa primária;
+// a "renovação" citada na auditoria é automática — a cada nova chamada a
+// `presignObjectDownload` (cada carregamento de página) gera-se uma nova URL válida
+// por mais 7 dias, nunca reaproveitando uma já emitida.
+const PRESIGNED_PUBLIC_ASSET_EXPIRES_SECONDS = 7 * 24 * 60 * 60;
 
 /** Categorias de objeto permitidas (Capítulo 3) — grava a allowlist de extensão/mimetype por categoria para nunca aceitar upload arbitrário.
  * `publicReadable` controla se `presignObjectDownload` pode servir esta categoria via
@@ -124,6 +140,49 @@ function sanitizeFileName(fileName: string): string {
   return safe.slice(-120) || "arquivo";
 }
 
+// GAP DE AUDITORIA FECHADO: `presignObjectUpload` só validava o MIME type declarado
+// pelo cliente contra a allowlist da categoria, mas nunca conferia se a EXTENSÃO do
+// nome do arquivo era condizente — um upload malicioso podia declarar
+// `mimeType: "image/jpeg"` (passando pela allowlist) enquanto o nome real do arquivo
+// era `malware.html`/`shell.php`, que muitos navegadores/proxies/visualizadores de
+// terceiros inferem pela EXTENSÃO, não pelo `Content-Type` assinado no PUT (que o R2
+// só valida contra o header enviado, nunca contra o conteúdo real do arquivo).
+// Mapeamento deliberadamente estrito: cada MIME type permitido por alguma categoria
+// de `STORAGE_CATEGORIES` lista as únicas extensões aceitas para ele.
+const MIME_TYPE_ALLOWED_EXTENSIONS: Record<string, string[]> = {
+  "image/jpeg": [".jpg", ".jpeg"],
+  "image/png": [".png"],
+  "image/webp": [".webp"],
+  "text/xml": [".xml"],
+  "application/xml": [".xml"],
+  "text/plain": [".txt"],
+  "text/csv": [".csv"],
+  "application/vnd.ms-excel": [".xls"],
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+  "application/zip": [".zip"],
+  "application/pdf": [".pdf"],
+  // Binário opaco já cifrado (dump de banco, Capítulo 10.3) — sem extensão IANA real,
+  // mas ainda assim restrito a um conjunto fechado de sufixos esperados.
+  "application/octet-stream": [".enc", ".bin"],
+};
+
+function assertExtensionMatchesMimeType(fileName: string, mimeType: string): void {
+  const allowedExtensions = MIME_TYPE_ALLOWED_EXTENSIONS[mimeType];
+  if (!allowedExtensions) {
+    // Mimetype não mapeado aqui não deveria nem ter passado pela allowlist de
+    // categoria (fail-closed): trata como inconsistência para nunca aceitar por
+    // omissão um tipo que esquecemos de mapear.
+    throw new Error(`Tipo de arquivo "${mimeType}" não possui extensão(ões) permitida(s) mapeada(s).`);
+  }
+  const lowerFileName = fileName.toLowerCase();
+  const matches = allowedExtensions.some((ext) => lowerFileName.endsWith(ext));
+  if (!matches) {
+    throw new Error(
+      `Extensão do arquivo "${fileName}" não é condizente com o tipo declarado "${mimeType}" (esperado: ${allowedExtensions.join(", ")}).`,
+    );
+  }
+}
+
 export interface PresignUploadInput {
   tenantId: string;
   category: StorageCategory;
@@ -152,6 +211,7 @@ export async function presignObjectUpload(input: PresignUploadInput): Promise<Pr
   if (!categoryDef.allowedMimeTypes.includes(input.mimeType as never)) {
     throw new Error(`Tipo de arquivo não permitido para "${input.category}": ${input.mimeType}. Permitidos: ${categoryDef.allowedMimeTypes.join(", ")}.`);
   }
+  assertExtensionMatchesMimeType(input.fileName, input.mimeType);
   if (input.fileSizeBytes <= 0 || input.fileSizeBytes > categoryDef.maxBytes) {
     throw new Error(`Tamanho de arquivo inválido para "${input.category}": ${input.fileSizeBytes} bytes (máximo: ${categoryDef.maxBytes} bytes).`);
   }
@@ -183,12 +243,17 @@ export async function presignObjectDownload(tenantId: string, storageKey: string
   const { client, config } = await getR2Client();
 
   const category = categoryOfStorageKey(storageKey);
-  if (config.publicBaseUrl && category && STORAGE_CATEGORIES[category].publicReadable) {
-    // Bucket com Custom Domain público (Capítulo 3) — nenhuma necessidade de assinar;
-    // a própria URL pública já é estável e cacheável por CDN. Restrito a categorias
-    // marcadas `publicReadable: true` (hoje só `avatars`) — nunca XMLs fiscais, fotos
-    // de O.S./cliente, documentos contábeis ou exportações completas de dados.
-    return { downloadUrl: `${config.publicBaseUrl.replace(/\/$/, "")}/${storageKey}`, expiresInSeconds: 0 };
+  if (category && STORAGE_CATEGORIES[category].publicReadable) {
+    // Ver nota em `PRESIGNED_PUBLIC_ASSET_EXPIRES_SECONDS` acima — substituída a URL
+    // pública eterna/sem assinatura do Custom Domain (`R2_PUBLIC_BASE_URL`) por uma
+    // URL assinada de leitura com expiração de 7 dias, renovada automaticamente a
+    // cada nova chamada desta função (ex.: cada carregamento da página da vitrine
+    // virtual gera uma URL nova). `R2_PUBLIC_BASE_URL` deixa de ser usado para
+    // construir a URL de avatar — mantido na config só para eventual uso futuro de
+    // outras finalidades de CDN, nunca mais para servir leitura sem assinatura.
+    const command = new GetObjectCommand({ Bucket: config.bucket, Key: storageKey });
+    const downloadUrl = await getSignedUrl(client, command, { expiresIn: PRESIGNED_PUBLIC_ASSET_EXPIRES_SECONDS });
+    return { downloadUrl, expiresInSeconds: PRESIGNED_PUBLIC_ASSET_EXPIRES_SECONDS };
   }
 
   const command = new GetObjectCommand({ Bucket: config.bucket, Key: storageKey });

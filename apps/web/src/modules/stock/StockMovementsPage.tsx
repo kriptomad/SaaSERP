@@ -1,7 +1,7 @@
 // apps/web/src/modules/stock/StockMovementsPage.tsx
-// Histórico de StockMovement (a API limita a 200 mais recentes, sem paginação).
-import { useMemo } from "react";
-import { Box, Chip, MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField } from "@mui/material";
+// Histórico de StockMovement, paginado (carregamento incremental).
+import { useMemo, useState } from "react";
+import { Box, Button, Chip, MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { MOVEMENT_LABEL, stockApi, type StockMovementType } from "./api";
@@ -9,28 +9,37 @@ import { Page, PageHeader, QueryState } from "../../shared/ui/PageLayout";
 import { ProductPicker, useProductsLookup } from "../../shared/lookups";
 import { formatDateTime, qty, toNumber } from "../../shared/ui/format";
 
+const PAGE_SIZE = 50;
+
 export function StockMovementsPage() {
   const [params, setParams] = useSearchParams();
   const productId = params.get("productId");
   const type = params.get("type") ?? "";
+  const [loadedPages, setLoadedPages] = useState(1);
   const products = useProductsLookup();
   const productNames = useMemo(() => new Map((products.data ?? []).map((p) => [p.id, p.name])), [products.data]);
 
   const query = useQuery({
-    queryKey: ["stock-movements", productId, type],
-    queryFn: () => stockApi.movements({ productId: productId ?? undefined, type: type || undefined }),
+    queryKey: ["stock-movements", productId, type, loadedPages],
+    queryFn: () =>
+      stockApi.movements({ productId: productId ?? undefined, type: type || undefined, page: 1, pageSize: PAGE_SIZE * loadedPages }),
   });
+
+  const rows = query.data?.data ?? [];
+  const total = query.data?.meta?.total ?? rows.length;
+  const hasMore = rows.length < total;
 
   function update(key: string, value: string | null) {
     const next = new URLSearchParams(params);
     if (value) next.set(key, value);
     else next.delete(key);
     setParams(next, { replace: true });
+    setLoadedPages(1);
   }
 
   return (
     <Page>
-      <PageHeader title="Movimentações de estoque" subtitle="Até 200 movimentações mais recentes." />
+      <PageHeader title="Movimentações de estoque" subtitle={`Exibindo ${rows.length} de ${total} movimentações.`} />
       <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ mb: 2 }}>
         <Box sx={{ flex: 2 }}>
           <ProductPicker value={productId} onChange={(p) => update("productId", p?.id ?? null)} label="Filtrar por produto" />
@@ -44,8 +53,8 @@ export function StockMovementsPage() {
           ))}
         </TextField>
       </Stack>
-      <QueryState query={query} isEmpty={(d) => d.length === 0} emptyMessage="Nenhuma movimentação encontrada para o filtro.">
-        {(rows) => (
+      <QueryState query={query} isEmpty={(d) => d.data.length === 0} emptyMessage="Nenhuma movimentação encontrada para o filtro.">
+        {() => (
           <TableContainer component={Paper}>
             <Table size="small">
               <TableHead>
@@ -77,6 +86,14 @@ export function StockMovementsPage() {
           </TableContainer>
         )}
       </QueryState>
+      {hasMore && (
+        <Stack direction="row" justifyContent="center" sx={{ mt: 2 }}>
+          <Button onClick={() => setLoadedPages((p) => p + 1)} disabled={query.isFetching}>
+            {query.isFetching ? "Carregando…" : `Carregar mais (${rows.length} de ${total})`}
+          </Button>
+        </Stack>
+      )}
     </Page>
   );
 }
+

@@ -17,7 +17,7 @@
 // (que teria TOCTOU), a violação do Postgres é traduzida em 409 SLOT_ALREADY_TAKEN.
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prismaUnscoped as prisma } from "@filitech/db";
+import { Prisma, prismaUnscoped as prisma } from "@filitech/db";
 import { isTenantLocked } from "../../middlewares/tenant-lockout.middleware";
 import { enforceRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
 
@@ -54,6 +54,17 @@ function notFoundTenant(res: Response) {
 }
 
 publicBookingRouter.get("/public-booking/:tenantSlug", async (req: Request, res: Response) => {
+  // GAP DE AUDITORIA FECHADO: a rota "landing" (primeira chamada de qualquer
+  // visitante, inclusive bots) era a ÚNICA rota pública deste router sem nenhum
+  // rate limit — mesmo padrão de scraping já fechado nas rotas abaixo.
+  try {
+    await enforceRateLimit(`public-booking:${req.params.tenantSlug}:read:${req.ip}`, PUBLIC_BOOKING_READ_RATE_LIMIT_MAX, PUBLIC_BOOKING_READ_RATE_LIMIT_WINDOW_SECONDS);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
+  }
   const tenant = await resolveTenantBySlug(req.params.tenantSlug);
   if (!tenant) return notFoundTenant(res);
   return res.json({ success: true, data: { id: tenant.id, name: tenant.tradeName }, error: null });
@@ -107,9 +118,9 @@ publicBookingRouter.get("/public-booking/:tenantSlug/professionals", async (req:
 });
 
 const slotsQuerySchema = z.object({
-  professionalId: z.string().min(1),
-  serviceId: z.string().min(1),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "date deve estar no formato YYYY-MM-DD"),
+  professionalId: z.string().min(1).max(100),
+  serviceId: z.string().min(1).max(100),
+  date: z.string().max(10).regex(/^\d{4}-\d{2}-\d{2}$/, "date deve estar no formato YYYY-MM-DD"),
 });
 
 const SLOT_STEP_MINUTES = 15; // granularidade de geração de slots candidatos, independente da duração do serviço
@@ -194,11 +205,11 @@ publicBookingRouter.get("/public-booking/:tenantSlug/slots", async (req: Request
 });
 
 const createPublicAppointmentSchema = z.object({
-  professionalId: z.string().min(1),
-  serviceId: z.string().min(1),
-  scheduledAt: z.string().datetime(),
-  clientName: z.string().min(1),
-  clientPhone: z.string().min(8),
+  professionalId: z.string().min(1).max(100),
+  serviceId: z.string().min(1).max(100),
+  scheduledAt: z.string().max(40).datetime(),
+  clientName: z.string().min(1).max(200),
+  clientPhone: z.string().min(8).max(32),
 });
 
 publicBookingRouter.post("/public-booking/:tenantSlug/appointments", async (req: Request, res: Response) => {
@@ -222,31 +233,85 @@ publicBookingRouter.post("/public-booking/:tenantSlug/appointments", async (req:
   if (!service) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Serviço não encontrado." } });
   if (!professional) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Profissional não encontrado." } });
 
-  try {
-    const appointment = await prisma.$transaction(async (tx) => {
-      // Upsert de Client por telefone (documento) — cliente novo vindo da agenda
-      // pública nunca precisa de cadastro completo prévio (fricção mínima).
-      const client = await tx.client.upsert({
-        where: { tenantId_document: { tenantId: tenant.id, document: parsed.data.clientPhone } },
-        create: { tenantId: tenant.id, name: parsed.data.clientName, phone: parsed.data.clientPhone, document: parsed.data.clientPhone },
-        update: { name: parsed.data.clientName, phone: parsed.data.clientPhone },
-      });
+  // GAP DE AUDITORIA FECHADO: esta rota só checava existência de serviço/
+  // profissional — nunca revalidava de verdade se o horário pedido cabia no
+  // expediente cadastrado (`ProfessionalWorkingHours`) nem se sobrepunha outro
+  // agendamento já existente cuja duração ultrapassasse o instante exato do novo
+  // (o `@@unique([tenantId, professionalId, scheduledAt])` só protege colisão de
+  // timestamp IDÊNTICO, nunca sobreposição de intervalos). Mesmo algoritmo de
+  // sobreposição já usado em `/slots` acima, reaplicado aqui no momento da escrita.
+  const scheduledAt = new Date(parsed.data.scheduledAt);
+  const durationMinutes = service.estimatedDurationMinutes;
+  const appointmentEnd = new Date(scheduledAt.getTime() + durationMinutes * 60_000);
+  const dayOfWeek = scheduledAt.getDay();
 
-      return tx.appointment.create({
-        data: {
-          tenantId: tenant.id,
-          clientId: client.id,
-          professionalId: parsed.data.professionalId,
-          serviceId: parsed.data.serviceId,
-          scheduledAt: new Date(parsed.data.scheduledAt),
-          durationMinutes: service.estimatedDurationMinutes,
-          source: "PUBLIC_BOOKING",
-        },
-      });
-    });
+  const workingHours = await prisma.professionalWorkingHours.findUnique({
+    where: { tenantId_professionalId_dayOfWeek: { tenantId: tenant.id, professionalId: professional.id, dayOfWeek } },
+  });
+  if (!workingHours) {
+    return res.status(422).json({ success: false, data: null, error: { code: "OUTSIDE_WORKING_HOURS", message: "Profissional não possui expediente cadastrado para este dia." } });
+  }
+  const startMinutes = parseHHMM(workingHours.startTime);
+  const endMinutes = parseHHMM(workingHours.endTime);
+  const scheduledMinutes = scheduledAt.getHours() * 60 + scheduledAt.getMinutes();
+  if (scheduledMinutes < startMinutes || scheduledMinutes + durationMinutes > endMinutes) {
+    return res.status(422).json({ success: false, data: null, error: { code: "OUTSIDE_WORKING_HOURS", message: "Horário fora do expediente do profissional." } });
+  }
+
+  const dayStart = new Date(scheduledAt.getFullYear(), scheduledAt.getMonth(), scheduledAt.getDate(), 0, 0, 0, 0);
+  const dayEnd = new Date(scheduledAt.getFullYear(), scheduledAt.getMonth(), scheduledAt.getDate(), 23, 59, 59, 999);
+
+  try {
+    const appointment = await prisma.$transaction(
+      async (tx) => {
+        // Revalidação de sobreposição DENTRO da mesma transação Serializable que
+        // faz a escrita — nunca um SELECT fora da transação seguido de um INSERT
+        // separado (TOCTOU clássico entre duas requisições concorrentes para o
+        // mesmo profissional/horário que não colidem em timestamp exato).
+        const existingAppointments = await tx.appointment.findMany({
+          where: {
+            tenantId: tenant.id,
+            professionalId: professional.id,
+            scheduledAt: { gte: dayStart, lte: dayEnd },
+            status: { notIn: ["CANCELLED", "NO_SHOW"] },
+          },
+          select: { scheduledAt: true, durationMinutes: true },
+          take: 200,
+        });
+        const hasOverlap = existingAppointments.some((appt) => {
+          const apptStart = appt.scheduledAt;
+          const apptEnd = new Date(apptStart.getTime() + appt.durationMinutes * 60_000);
+          return scheduledAt < apptEnd && apptStart < appointmentEnd;
+        });
+        if (hasOverlap) {
+          throw new Error("SLOT_OVERLAP");
+        }
+
+        // Upsert de Client por telefone (documento) — cliente novo vindo da agenda
+        // pública nunca precisa de cadastro completo prévio (fricção mínima).
+        const client = await tx.client.upsert({
+          where: { tenantId_document: { tenantId: tenant.id, document: parsed.data.clientPhone } },
+          create: { tenantId: tenant.id, name: parsed.data.clientName, phone: parsed.data.clientPhone, document: parsed.data.clientPhone },
+          update: { name: parsed.data.clientName, phone: parsed.data.clientPhone },
+        });
+
+        return tx.appointment.create({
+          data: {
+            tenantId: tenant.id,
+            clientId: client.id,
+            professionalId: parsed.data.professionalId,
+            serviceId: parsed.data.serviceId,
+            scheduledAt,
+            durationMinutes: service.estimatedDurationMinutes,
+            source: "PUBLIC_BOOKING",
+          },
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
     return res.status(201).json({ success: true, data: appointment, error: null });
   } catch (err: any) {
-    if (err?.code === "P2002") {
+    if (err?.code === "P2002" || err?.message === "SLOT_OVERLAP") {
       return res.status(409).json({ success: false, data: null, error: { code: "SLOT_ALREADY_TAKEN", message: "Este horário acabou de ser reservado por outro cliente. Escolha outro horário." } });
     }
     throw err;

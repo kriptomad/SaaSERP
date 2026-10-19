@@ -69,7 +69,8 @@ export interface ProductBatch {
 }
 
 export const stockApi = {
-  movements: (params: { productId?: string; type?: string }) => api.get<StockMovement[]>("/stock-movements", params),
+  movements: (params: { productId?: string; type?: string; page?: number; pageSize?: number }) =>
+    api.getPaged<StockMovement[]>("/stock-movements", params),
   batches: (productId: string) => api.get<ProductBatch[]>("/product-batches", { productId }),
   adjust: (input: { productId: string; quantity: number; reasonCode: string; productBatchId?: string }) =>
     api.post<StockMovement>("/stock-movements/adjustment", input),

@@ -70,15 +70,25 @@ personalizationRouter.post("/personalization-orders", requireAuth, requireModule
   const client = await prisma.client.findFirst({ where: { id: input.clientId, tenantId }, select: { id: true } });
   if (!client) return notFound(res, "Cliente não encontrado.");
 
-  // SaleItem não tem tenantId próprio na query de leitura comum do sistema — o
-  // vínculo de tenant é sempre validado via Sale.tenantId (relação pai), mesmo
-  // padrão usado em outros módulos que leem SaleItem (ex.: liquor-ledger não lê
-  // SaleItem, mas close-sale.service.ts sempre atravessa Sale para confirmar tenant).
+  // CORREÇÃO DE AUDITORIA: a rota aceitava qualquer `clientId` informado pelo
+  // client, sem checar se correspondia ao cliente REAL da venda
+  // (`saleItem.sale.clientId`) — permitindo abrir uma O.S. de personalização em
+  // nome de um cliente diferente de quem efetivamente comprou o item.
   const saleItem = await prisma.saleItem.findFirst({
     where: { id: input.saleItemId, sale: { tenantId } },
-    include: { sale: { select: { id: true, tenantId: true } }, personalizationItem: { select: { id: true } } },
+    include: { sale: { select: { id: true, tenantId: true, clientId: true } }, personalizationItem: { select: { id: true } } },
   });
   if (!saleItem) return notFound(res, "Item de venda não encontrado neste tenant.");
+  if (saleItem.sale.clientId !== input.clientId) {
+    return res.status(409).json({
+      success: false,
+      data: null,
+      error: {
+        code: "CLIENT_MISMATCH",
+        message: "O clientId informado não corresponde ao cliente real desta venda.",
+      },
+    });
+  }
   if (saleItem.personalizationItem) {
     return res.status(409).json({
       success: false,
@@ -127,6 +137,8 @@ personalizationRouter.get("/personalization-orders", requireAuth, requireModule(
     where: { tenantId, items: { some: { saleItemId: { not: null } } } },
     include: { items: true, client: { select: { id: true, name: true } } },
     orderBy: { createdAt: "desc" },
+    // CORREÇÃO DE AUDITORIA: listagem sem nenhum teto/paginação.
+    take: 200,
   });
   return res.json({ success: true, data: workOrders, error: null });
 });
@@ -141,7 +153,13 @@ personalizationRouter.patch("/personalization-orders/:workOrderItemId/approve-ar
     return forbidden(res, "Seu nível de acesso não permite aprovar arte de personalização.");
   }
 
-  const item = await prisma.workOrderItem.findFirst({ where: { id: req.params.workOrderItemId, tenantId } });
+  // CORREÇÃO DE AUDITORIA: a rota aceitava aprovar arte de QUALQUER
+  // `WorkOrderItem` do tenant (ex.: peça/mão de obra de uma O.S. de assistência
+  // técnica comum), não apenas itens de personalização de fato
+  // (`saleItemId` preenchido é o que identifica um item como de personalização
+  // neste módulo — ver `GET /personalization-orders` acima, que usa o mesmo
+  // critério).
+  const item = await prisma.workOrderItem.findFirst({ where: { id: req.params.workOrderItemId, tenantId, saleItemId: { not: null } } });
   if (!item) return notFound(res, "Item de O.S. de personalização não encontrado.");
 
   const updated = await prisma.workOrderItem.update({ where: { id: item.id }, data: { artApprovedAt: new Date() } });
@@ -170,6 +188,7 @@ personalizationRouter.patch("/personalization-orders/:workOrderId/status", requi
 
   const workOrder = await prisma.workOrder.findFirst({
     where: { id: req.params.workOrderId, tenantId, items: { some: { saleItemId: { not: null } } } },
+    include: { items: { where: { saleItemId: { not: null } }, select: { id: true, artApprovedAt: true } } },
   });
   if (!workOrder) return notFound(res, "Ordem de personalização não encontrada.");
 
@@ -180,6 +199,23 @@ personalizationRouter.patch("/personalization-orders/:workOrderId/status", requi
       success: false,
       data: null,
       error: { code: "INVALID_TRANSITION", message: `Não é possível voltar ou repetir o status (atual: ${workOrder.status}).` },
+    });
+  }
+
+  // CORREÇÃO DE AUDITORIA: o status avançava para produção/conclusão
+  // (IN_REPAIR em diante) mesmo sem nenhuma aprovação de arte registrada —
+  // permitindo a confecção começar sobre uma arte que o cliente nunca validou.
+  // Avançar além de RECEIVED (ou seja, entrar em produção) exige que TODOS os
+  // itens de personalização desta O.S. já tenham `artApprovedAt` preenchido.
+  const entersProduction = nextIndex > STATUS_ORDER.indexOf("RECEIVED");
+  if (entersProduction && workOrder.items.some((item) => !item.artApprovedAt)) {
+    return res.status(409).json({
+      success: false,
+      data: null,
+      error: {
+        code: "ART_NOT_APPROVED",
+        message: "Todos os itens de personalização desta O.S. precisam ter a arte aprovada pelo cliente antes de avançar para produção/conclusão.",
+      },
     });
   }
 

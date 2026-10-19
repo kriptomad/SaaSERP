@@ -25,6 +25,17 @@ model Referral {
   referredTenantId String         @unique // o tenant indicado só pode ter sido indicado uma vez — nunca dupla contagem
   status           ReferralStatus @default(PENDING)
   rewardAppliedAt  DateTime?
+  // Outbox/retry da aplicação da recompensa (Capítulo 2.8) — GAP DE AUDITORIA
+  // FECHADO (rodada de idempotência): `rewardAppliedAt` só é gravado depois que o
+  // provedor de billing confirma de fato o crédito/desconto; `rewardAttemptedAt`
+  // registra a tentativa pendente (claim) para impedir processamento concorrente
+  // duplicado e aplicar backoff entre novas tentativas após falha. As duas flags
+  // por perna (`referrerCreditAppliedAt`/`referredDiscountAppliedAt`) evitam que um
+  // retry após sucesso parcial (ex.: crédito do indicador já confirmado no Stripe,
+  // mas desconto do indicado falhou) reaplique no provedor a perna que já teve êxito.
+  rewardAttemptedAt         DateTime?
+  referrerCreditAppliedAt   DateTime?
+  referredDiscountAppliedAt DateTime?
   expiresAt        DateTime // createdAt + 90 dias
   createdAt        DateTime       @default(now())
 
@@ -84,6 +95,12 @@ model LoyaltyTransaction {
   loyaltyAccount LoyaltyAccount @relation(fields: [loyaltyAccountId], references: [id], onDelete: Cascade)
   sale           Sale?          @relation(fields: [saleId], references: [id])
 
+  // CORREÇÃO DE AUDITORIA: sem esta constraint, reprocessar a mesma venda (retry de
+  // rede, replay de fila, dupla submissão do fechamento de venda) criava um segundo
+  // lançamento EARN/REDEEM para o mesmo `saleId`, duplicando pontos de fidelidade ou
+  // permitindo um segundo resgate sobre a mesma venda. `saleId` nulo (MANUAL_ADJUST/
+  // EXPIRE) nunca colide entre si — Postgres trata NULL como distinto em UNIQUE.
+  @@unique([saleId, type])
   @@index([loyaltyAccountId, createdAt])
   @@index([expiresAt])
   @@map("loyalty_transactions")
@@ -1718,6 +1735,29 @@ model FailedOfflineSaleSync {
   @@map("failed_offline_sale_syncs")
 }
 
+// GAP DE AUDITORIA FECHADO (Capítulo 6.8 — Estorno/Cancelamento Fiscal): quando o
+// cancelamento fiscal (SEFAZ) já foi confirmado, mas a fase local subsequente do
+// estorno (estoque/caixa/status da venda) falha (crash do processo, erro de
+// banco), o resultado é um documento fiscal CANCELLED com a Sale ainda como se
+// estivesse PAID — um estado divergente que não pode ficar visível só em log.
+// Mesmo padrão de `FailedOfflineSaleSync` acima: um registro durável e central
+// para reconciliação manual, nunca apenas uma exceção lançada e logada.
+model PendingFiscalRefundReconciliation {
+  id               String    @id @default(uuid())
+  tenantId         String
+  saleId           String
+  fiscalDocumentId String
+  errorMessage     String    @db.Text
+  createdAt        DateTime  @default(now())
+  resolvedAt       DateTime?
+  resolvedByUserId String?
+  resolutionNote   String?
+
+  @@index([tenantId, resolvedAt])
+  @@index([saleId])
+  @@map("pending_fiscal_refund_reconciliations")
+}
+
 enum CashRegisterStatus {
   OPEN
   CLOSED
@@ -2817,6 +2857,14 @@ model ComandaItem {
   unitPrice        Decimal   @db.Decimal(12, 2)
   sentToKdsAt      DateTime? // momento em que o item foi enviado à cozinha (KDS) via SSE
   recipeConsumedAt DateTime? // Capítulo 11.1 — momento em que a ficha técnica (Recipe/RecipeItem) deste item foi baixada; preenchido no LANÇAMENTO do item, nunca no fechamento (o insumo é consumido na produção do prato, não na baixa fiscal)
+  // GAP DE AUDITORIA FECHADO: decisão de negócio documentada (Capítulo 11.1) é
+  // permitir o lançamento do item mesmo com insumo insuficiente (o prato já está
+  // sendo preparado/entregue ao cliente) — mas essa decisão não pode ficar
+  // silenciosa. Preenchido com a mensagem de `MissingIngredientStockError` sempre
+  // que a baixa de ficha técnica falhar por falta de insumo, tornando o evento
+  // visível/auditável (consulta, relatório, alerta) em vez de só um warning
+  // efêmero na resposta HTTP do momento do lançamento.
+  recipeConsumptionWarning String?
 
   comanda         Comanda                 @relation(fields: [comandaId], references: [id], onDelete: Cascade)
   // Gap de auditoria: `productId`/`serviceId` existiam como colunas soltas sem
@@ -3056,6 +3104,16 @@ model PlatformAdminUser {
   role                PlatformAdminRole
   totpSecretEncrypted String? // nulo até o Passo 1 do enrollment (Capítulo 14.2) gerar o segredo
   totpConfirmedAt     DateTime? // nulo até o Passo 2 confirmar o primeiro código válido — 2FA é obrigatório (Cap. 14.2)
+  // GAP DE AUDITORIA FECHADO: o token JWT de enrollment (`platform-admin-2fa-enroll`,
+  // 10min) por si só não impedia um re-roll do segredo sobrescrever um enrollment
+  // pendente sem invalidar o anterior — qualquer token de enrollment ainda não
+  // expirado continuava "válido" para `/2fa/confirm` mesmo depois de um novo
+  // `/2fa/enroll` gerar outro segredo. `totpEnrollNonce` é reemitido a cada
+  // `/2fa/enroll` (sobrescrevendo o anterior, invalidando-o instantaneamente) e
+  // embutido no JWT; `/2fa/confirm` só aceita o token cujo nonce bate com o valor
+  // atual gravado aqui, nunca um nonce de uma tentativa de enrollment anterior.
+  totpEnrollNonce           String?
+  totpEnrollNonceExpiresAt  DateTime?
   active              Boolean           @default(true)
   lastLoginAt         DateTime?
   createdAt           DateTime          @default(now())

@@ -157,11 +157,67 @@ export async function executeReportDefinition(
 
   const joinClause = buildJoinClause(dataset, requiredJoinNames);
 
-  const sql = `SELECT ${selectFragments.join(", ")} FROM "${dataset.tableName}" AS t
+  // CORREÇÃO DE AUDITORIA (bug real confirmado): quando a consulta usa um join 1:N
+  // em relação à tabela base (`fanOut: true`, ex.: sales -> sale_items), uma métrica
+  // da PRÓPRIA tabela base (ex.: `SUM(t."totalAmount")`) somada diretamente sobre as
+  // linhas já juntadas conta o mesmo valor uma vez POR LINHA DE ITEM, inflando o
+  // faturamento reportado. A query é reescrita em duas camadas: uma subquery interna
+  // materializa cada dimensão/métrica com um alias próprio + `ROW_NUMBER() OVER
+  // (PARTITION BY t."id")`, e a camada externa agrega métricas que NÃO dependem de
+  // nenhum join (puramente da tabela base) apenas na primeira linha de cada `t."id"`
+  // — nunca somando o mesmo valor de venda mais de uma vez. Métricas que já
+  // dependem de um join (ex.: soma de `sale_items.quantity`) continuam agregadas
+  // normalmente sobre todas as linhas juntadas, pois esse É o grão correto delas.
+  const hasFanOutJoin = Array.from(requiredJoinNames).some((joinName) => dataset.joins?.[joinName]?.fanOut);
+
+  if (!hasFanOutJoin) {
+    const sql = `SELECT ${selectFragments.join(", ")} FROM "${dataset.tableName}" AS t
+      ${joinClause}
+      WHERE ${whereFragments.join(" AND ")}
+      ${groupByFragments.length ? `GROUP BY ${groupByFragments.join(", ")}` : ""}
+      ${definition.dimensions.length ? `ORDER BY ${groupByFragments.join(", ")}` : ""}
+      LIMIT 10000`;
+
+    return prisma.$queryRawUnsafe<Record<string, unknown>[]>(sql, ...params);
+  }
+
+  const innerSelectFragments = [`t."id" AS "__base_id"`, `ROW_NUMBER() OVER (PARTITION BY t."id" ORDER BY t."id") AS "__row_num"`];
+  const dimensionAliasByKey = new Map<string, string>();
+  dimensionFields.forEach(({ key, field }, index) => {
+    const alias = `__dim_${index}`;
+    dimensionAliasByKey.set(key, alias);
+    innerSelectFragments.push(`${field.sql} AS "${alias}"`);
+  });
+  const metricAliasByKey = new Map<string, string>();
+  metricFields.forEach(({ key, field }, index) => {
+    const alias = `__metric_${index}`;
+    metricAliasByKey.set(key, alias);
+    innerSelectFragments.push(`${field.sql} AS "${alias}"`);
+  });
+
+  const innerSql = `SELECT ${innerSelectFragments.join(", ")} FROM "${dataset.tableName}" AS t
     ${joinClause}
-    WHERE ${whereFragments.join(" AND ")}
-    ${groupByFragments.length ? `GROUP BY ${groupByFragments.join(", ")}` : ""}
-    ${definition.dimensions.length ? `ORDER BY ${groupByFragments.join(", ")}` : ""}
+    WHERE ${whereFragments.join(" AND ")}`;
+
+  const outerSelectFragments = [
+    ...dimensionFields.map(({ key }) => `q."${dimensionAliasByKey.get(key)}" AS "${key}"`),
+    ...metricFields.map(({ key, field }) => {
+      const alias = metricAliasByKey.get(key)!;
+      // Métrica que já depende de algum join (requiresJoin) vive no mesmo grão das
+      // linhas juntadas — agregação normal é o comportamento correto para ela.
+      if (field.requiresJoin) return `${field.aggregation}(q."${alias}") AS "${key}"`;
+      // Métrica pura da tabela base: COUNT conta `id` distintos (nunca uma vez por
+      // linha de item); SUM/AVG só considera a primeira linha de cada `id`
+      // (deduplicada via ROW_NUMBER), nunca somando o mesmo valor de venda 2+ vezes.
+      if (field.aggregation === "COUNT") return `COUNT(DISTINCT CASE WHEN q."__row_num" = 1 THEN q."__base_id" END) AS "${key}"`;
+      return `${field.aggregation}(CASE WHEN q."__row_num" = 1 THEN q."${alias}" ELSE NULL END) AS "${key}"`;
+    }),
+  ];
+  const outerGroupByFragments = dimensionFields.map(({ key }) => `q."${dimensionAliasByKey.get(key)}"`);
+
+  const sql = `SELECT ${outerSelectFragments.join(", ")} FROM (${innerSql}) AS q
+    ${outerGroupByFragments.length ? `GROUP BY ${outerGroupByFragments.join(", ")}` : ""}
+    ${outerGroupByFragments.length ? `ORDER BY ${outerGroupByFragments.join(", ")}` : ""}
     LIMIT 10000`;
 
   return prisma.$queryRawUnsafe<Record<string, unknown>[]>(sql, ...params);

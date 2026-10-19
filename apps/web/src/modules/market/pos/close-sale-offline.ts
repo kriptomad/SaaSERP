@@ -59,30 +59,38 @@ export async function closeSaleOffline(input: CloseSaleOfflineInput): Promise<Cl
       ? Math.max(0, input.amountTendered - totalAmount)
       : 0;
 
-  await offlineDb.pendingSales.add({
-    localId,
-    payload: {
-      idempotencyKey: localId,
-      cashRegisterId: input.cashRegisterId,
-      ...(input.clientId ? { clientId: input.clientId } : {}),
-      items: input.items,
-      ...(input.payments
-        ? { payments: input.payments }
-        : { paymentMethod: input.paymentMethod, amountTendered: input.amountTendered }),
-    },
-    createdAt: Date.now(),
-    syncStatus: "PENDING",
-    syncAttempts: 0,
-  });
+  // CORREÇÃO DE AUDITORIA (full-audit, sev. 79): a criação da venda pendente e o
+  // decremento do snapshot de estoque local eram duas operações Dexie separadas —
+  // uma falha entre elas (aba fechada, erro de IndexedDB) podia deixar a venda
+  // registrada SEM o estoque local descontado (permitindo vender acima do estoque
+  // real enquanto offline) ou um estado parcialmente decrementado. `transaction("rw", ...)`
+  // garante que ambas as gravações só sejam efetivadas juntas (tudo ou nada).
+  await offlineDb.transaction("rw", offlineDb.pendingSales, offlineDb.products, async () => {
+    await offlineDb.pendingSales.add({
+      localId,
+      payload: {
+        idempotencyKey: localId,
+        cashRegisterId: input.cashRegisterId,
+        ...(input.clientId ? { clientId: input.clientId } : {}),
+        items: input.items,
+        ...(input.payments
+          ? { payments: input.payments }
+          : { paymentMethod: input.paymentMethod, amountTendered: input.amountTendered }),
+      },
+      createdAt: Date.now(),
+      syncStatus: "PENDING",
+      syncAttempts: 0,
+    });
 
-  for (const item of input.items) {
-    const cached = await offlineDb.products.get(item.productId);
-    if (cached) {
-      await offlineDb.products.update(item.productId, {
-        stockQuantitySnapshot: cached.stockQuantitySnapshot - item.quantity,
-      });
+    for (const item of input.items) {
+      const cached = await offlineDb.products.get(item.productId);
+      if (cached) {
+        await offlineDb.products.update(item.productId, {
+          stockQuantitySnapshot: cached.stockQuantitySnapshot - item.quantity,
+        });
+      }
     }
-  }
+  });
 
   await registerBackgroundSync();
 

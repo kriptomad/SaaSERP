@@ -8,6 +8,7 @@ import { z } from "zod";
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { requirePlatformAdminAuth, requireSuperAdmin } from "./platform-admin-auth.middleware";
 import { applyReferrerCreditToProvider, applyReferredDiscountToProvider } from "../billing/referral-billing.service";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const marketingAdminRouter = Router();
 
@@ -145,10 +146,11 @@ marketingAdminRouter.delete("/platform-admin/discount-coupons/:id", requirePlatf
 // ─────────────────────────────────────────────────────────────────────────
 
 marketingAdminRouter.get("/platform-admin/referrals", requirePlatformAdminAuth, async (req: Request, res: Response) => {
-  const status = typeof req.query.status === "string" ? req.query.status : undefined;
-  if (status && !["PENDING", "CONVERTED", "EXPIRED"].includes(status)) return err(res, 400, "VALIDATION_ERROR", "Status inválido.");
+  const statusParsed = readEnumQuery(res, req.query.status, ["PENDING", "CONVERTED", "EXPIRED"] as const, "status");
+  if (!statusParsed.ok) return;
+  const status = statusParsed.value;
   const referrals = await prisma.referral.findMany({
-    where: status ? { status: status as any } : {},
+    where: status ? { status } : {},
     include: { referralCode: { select: { code: true, tenant: { select: { id: true, tradeName: true } } } }, referredTenant: { select: { id: true, tradeName: true } } },
     orderBy: { createdAt: "desc" },
     take: 200,
@@ -199,6 +201,13 @@ async function resolveReferralRewardConfig(): Promise<{ creditMonths: number; re
   };
 }
 
+// Janela de backoff entre tentativas de aplicação da recompensa: evita que uma
+// corrida de requisições concorrentes (ou um retry manual impaciente do admin)
+// dispare chamadas duplicadas ao provedor enquanto uma tentativa anterior ainda
+// pode estar em voo; depois desse intervalo sem confirmação, a tentativa é
+// considerada "morta" (processo caiu, timeout, etc.) e pode ser reclamada de novo.
+const REWARD_APPLY_RETRY_BACKOFF_MS = 60_000;
+
 marketingAdminRouter.post("/platform-admin/referrals/:id/reward-applied", requirePlatformAdminAuth, requireSuperAdmin, async (req: Request, res: Response) => {
   const referral = await prisma.referral.findUnique({
     where: { id: req.params.id },
@@ -208,8 +217,28 @@ marketingAdminRouter.post("/platform-admin/referrals/:id/reward-applied", requir
   if (referral.status !== "CONVERTED") return err(res, 409, "NOT_CONVERTED", "Só indicações CONVERTED recebem recompensa.");
   if (referral.rewardAppliedAt) return err(res, 409, "REWARD_ALREADY_APPLIED", "Recompensa já registrada para esta indicação.");
 
-  const claimed = await prisma.referral.updateMany({ where: { id: referral.id, rewardAppliedAt: null }, data: { rewardAppliedAt: new Date() } });
-  if (claimed.count === 0) return err(res, 409, "REWARD_ALREADY_APPLIED", "Recompensa já registrada para esta indicação.");
+  // Outbox/claim: registra a TENTATIVA pendente antes de chamar qualquer provedor
+  // externo — nunca marca `rewardAppliedAt` neste passo. `rewardAppliedAt` só é
+  // gravado mais abaixo, depois que o provedor confirma o crédito/desconto de
+  // verdade, e sempre na mesma transação que a criação do crédito local — nunca
+  // antes, fechando a janela em que a recompensa aparecia "aplicada" sem nenhum
+  // efeito real em billing. `rewardAttemptedAt` com backoff impede processamento
+  // concorrente duplicado (duas chamadas quase simultâneas a este endpoint).
+  const backoffCutoff = new Date(Date.now() - REWARD_APPLY_RETRY_BACKOFF_MS);
+  const claimed = await prisma.referral.updateMany({
+    where: { id: referral.id, rewardAppliedAt: null, OR: [{ rewardAttemptedAt: null }, { rewardAttemptedAt: { lt: backoffCutoff } }] },
+    data: { rewardAttemptedAt: new Date() },
+  });
+  if (claimed.count === 0) {
+    const current = await prisma.referral.findUniqueOrThrow({ where: { id: referral.id } });
+    if (current.rewardAppliedAt) return err(res, 409, "REWARD_ALREADY_APPLIED", "Recompensa já registrada para esta indicação.");
+    return err(
+      res,
+      409,
+      "REWARD_APPLY_IN_PROGRESS",
+      "Outra tentativa de aplicar esta recompensa está em andamento; aguarde alguns instantes e tente novamente.",
+    );
+  }
 
   const { creditMonths, referredDiscountPercent } = await resolveReferralRewardConfig();
 
@@ -221,6 +250,38 @@ marketingAdminRouter.post("/platform-admin/referrals/:id/reward-applied", requir
     prisma.subscription.findFirst({ where: { tenantId: referral.referredTenantId }, orderBy: { createdAt: "desc" } }),
   ]);
 
+  const referrerLegNeeded = Boolean(referrerSubscription) && !referral.referrerCreditAppliedAt;
+  const referredLegNeeded = Boolean(referredSubscription && referredSubscription.firstCycleDiscountPercent == null) && !referral.referredDiscountAppliedAt;
+
+  // Confirma no provedor ANTES de qualquer efeito local — cada perna só é chamada
+  // de novo num retry se ainda não tiver sido confirmada antes (flags
+  // `referrerCreditAppliedAt`/`referredDiscountAppliedAt`), nunca reaplicando no
+  // Stripe/Asaas uma perna que um retry anterior já conseguiu confirmar.
+  const referrerOk = referrerLegNeeded ? await applyReferrerCreditToProvider(referrerSubscription!.id, creditMonths) : true;
+  if (referrerLegNeeded && referrerOk) {
+    await prisma.referral.update({ where: { id: referral.id }, data: { referrerCreditAppliedAt: new Date() } });
+  }
+
+  const referredOk = referredLegNeeded ? await applyReferredDiscountToProvider(referredSubscription!.id, referredDiscountPercent) : true;
+  if (referredLegNeeded && referredOk) {
+    await prisma.referral.update({ where: { id: referral.id }, data: { referredDiscountAppliedAt: new Date() } });
+  }
+
+  if (!referrerOk || !referredOk) {
+    // Tentativa fica registrada (`rewardAttemptedAt`) para retry após o backoff —
+    // nenhum crédito/desconto local é criado e `rewardAppliedAt` permanece null.
+    await writeAuditLog(req, "REFERRAL_REWARD_APPLY_FAILED", "Referral", referral.id, { referrerOk, referredOk });
+    return err(
+      res,
+      502,
+      "REWARD_PROVIDER_FAILURE",
+      "Falha ao confirmar a recompensa no provedor de pagamento (Stripe/Asaas); tentativa registrada — repita em instantes.",
+    );
+  }
+
+  // Confirmação do provedor obtida para as duas pernas: só agora a criação do
+  // crédito/desconto local e a marcação de `rewardAppliedAt` acontecem, e sempre
+  // juntas na mesma transação (nunca uma sem a outra).
   await prisma.$transaction([
     ...(referrerSubscription
       ? [
@@ -238,16 +299,7 @@ marketingAdminRouter.post("/platform-admin/referrals/:id/reward-applied", requir
           }),
         ]
       : []),
-  ]);
-
-  // GAP DE AUDITORIA FECHADO (Rodada 6) — até aqui só o banco local sabia do crédito;
-  // agora a cobrança real no Stripe/Asaas também é abatida (best-effort, nunca
-  // bloqueia a recompensa já persistida acima em caso de falha do provedor).
-  await Promise.all([
-    referrerSubscription ? applyReferrerCreditToProvider(referrerSubscription.id, creditMonths) : Promise.resolve(),
-    referredSubscription && referredSubscription.firstCycleDiscountPercent == null
-      ? applyReferredDiscountToProvider(referredSubscription.id, referredDiscountPercent)
-      : Promise.resolve(),
+    prisma.referral.update({ where: { id: referral.id }, data: { rewardAppliedAt: new Date() } }),
   ]);
 
   await writeAuditLog(req, "REFERRAL_REWARD_APPLIED", "Referral", referral.id, {

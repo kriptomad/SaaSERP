@@ -61,6 +61,9 @@ variantTurnoverRouter.get("/product-variants/turnover-report", requireAuth, requ
       axis: { select: { name: true } },
       product: { select: { id: true, name: true, sku: true } },
     },
+    // Teto defensivo — relatório gerencial, não uma listagem completa de todas as
+    // variantes do tenant (que poderia chegar a milhares em catálogos grandes).
+    take: 500,
   });
 
   // SaleItem não tem data própria — o período é filtrado pela Sale (venda) pai.
@@ -71,6 +74,7 @@ variantTurnoverRouter.get("/product-variants/turnover-report", requireAuth, requ
       sale: { status: "PAID", createdAt: { gte: since } },
     },
     select: { productVariantId: true, quantity: true, totalPrice: true },
+    take: 5000, // teto defensivo — agregação de vendas do período, não um extrato completo
   });
 
   const soldByVariant = new Map<string, number>();

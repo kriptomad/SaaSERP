@@ -25,26 +25,105 @@ import { TefDaemonUnreachableError, TefProvider, TefSessionNotFoundError } from 
 
 export const tefRouter = Router();
 
+// CORREÇÃO DE AUDITORIA (RBAC): este router só exigia `requireAuth` genérico —
+// qualquer usuário autenticado do tenant, de QUALQUER papel, conseguia iniciar/
+// confirmar/cancelar uma cobrança na maquininha, mesmo sem nenhuma permissão de
+// caixa. Replicado o mesmo padrão `hasPermission` usado em todos os outros
+// módulos do sistema (ex.: liquor-ledger.routes.ts, tire-service-orders.routes.ts),
+// com a permissão "pdv:cash-register:tef-payment" (seedada em
+// packages/db/prisma/seed.ts para OWNER/MANAGER/CASHIER — os mesmos papéis que já
+// abrem/fecham caixa).
+async function hasPermission(role: string, userId: string, permissionCode: string): Promise<boolean> {
+  const [defaultGrant, override] = await Promise.all([
+    prisma.roleDefaultPermission.findUnique({ where: { role_permissionCode: { role: role as any, permissionCode } } }),
+    prisma.rolePermission.findUnique({ where: { userId_permission: { userId, permission: permissionCode } } }),
+  ]);
+  return override ? override.granted : Boolean(defaultGrant);
+}
+async function requireTefPermission(req: Request, res: Response): Promise<boolean> {
+  const { userId, role } = req.session!;
+  if (!(await hasPermission(role, userId, "pdv:cash-register:tef-payment"))) {
+    res.status(403).json({
+      success: false,
+      data: null,
+      error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite operar pagamento via TEF/maquininha." },
+    });
+    return false;
+  }
+  return true;
+}
+
 // TTL generoso o bastante para cobrir a janela de interação humana no pinpad
 // (inserir/aproximar cartão + digitar senha), mas curto o suficiente para nunca
 // deixar uma sessão travada indefinidamente no Redis caso o operador abandone o PDV.
 const TEF_SESSION_TTL_SECONDS = 180;
+// Janela de retenção do registro de confirmação idempotente — maior que o TTL da
+// sessão em si, pois o objetivo é sobreviver exatamente ao cenário em que a
+// sessão TEF já foi limpa (confirmação bem-sucedida) mas o cliente HTTP perdeu a
+// resposta e reenviou a mesma requisição de confirmação por timeout/retry.
+const TEF_CONFIRMATION_IDEMPOTENCY_TTL_SECONDS = 3600;
 
 function tefSessionKey(sessionId: string): string {
   return `tef:session:${sessionId}`;
 }
-
-async function saveTefSession(sessionId: string, tenantId: string): Promise<void> {
-  await redis.set(tefSessionKey(sessionId), tenantId, "EX", TEF_SESSION_TTL_SECONDS);
+function tefConfirmationKey(sessionId: string): string {
+  return `tef:confirmed:${sessionId}`;
 }
 
-async function loadTefSession(sessionId: string): Promise<{ tenantId: string } | null> {
-  const tenantId = await redis.get(tefSessionKey(sessionId));
-  return tenantId ? { tenantId } : null;
+// Estado de sessão agora vincula tenantId + userId + cashRegisterId + saleId —
+// CORREÇÃO DE AUDITORIA: antes só guardava `tenantId`, então qualquer usuário
+// autenticado do MESMO tenant (não necessariamente quem abriu a transação, nem
+// necessariamente no mesmo caixa/venda) conseguia continuar/confirmar/cancelar
+// uma sessão TEF alheia apenas sabendo o `sessionId` (ex.: visível em logs de
+// rede do PDV). Agora toda operação subsequente revalida esses 4 vínculos.
+interface TefSessionState {
+  tenantId: string;
+  userId: string;
+  cashRegisterId: string;
+  saleId: string;
+}
+
+async function saveTefSession(sessionId: string, state: TefSessionState): Promise<void> {
+  await redis.set(tefSessionKey(sessionId), JSON.stringify(state), "EX", TEF_SESSION_TTL_SECONDS);
+}
+
+async function loadTefSession(sessionId: string): Promise<TefSessionState | null> {
+  const raw = await redis.get(tefSessionKey(sessionId));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed.tenantId === "string" &&
+      typeof parsed.userId === "string" &&
+      typeof parsed.cashRegisterId === "string" &&
+      typeof parsed.saleId === "string"
+    ) {
+      return parsed as TefSessionState;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 async function clearTefSession(sessionId: string): Promise<void> {
   await redis.del(tefSessionKey(sessionId));
+}
+
+// Valida que a sessão carregada pertence de fato ao chamador atual (tenant +
+// operador) E que a venda/caixa vinculados ainda são válidos para este tenant —
+// chamado em toda operação subsequente (continue/confirm/cancel).
+async function assertSessionBindings(session: TefSessionState, tenantId: string, userId: string): Promise<string | null> {
+  if (session.tenantId !== tenantId) return "Sessão TEF não encontrada ou expirada.";
+  if (session.userId !== userId) return "Esta sessão TEF pertence a outro operador; não pode ser manipulada por este usuário.";
+  const cashRegister = await prisma.cashRegister.findFirst({ where: { id: session.cashRegisterId, tenantId } });
+  if (!cashRegister || cashRegister.status !== "OPEN") {
+    return "O caixa vinculado a esta sessão TEF não está mais aberto.";
+  }
+  const sale = await prisma.sale.findFirst({ where: { id: session.saleId, tenantId } });
+  if (!sale) return "A venda vinculada a esta sessão TEF não foi encontrada.";
+  return null;
 }
 
 function isSitefConnectionPayload(value: Record<string, unknown>): value is SitefConnectionConfig & Record<string, unknown> {
@@ -89,21 +168,47 @@ const startSchema = z.object({
   amountCents: z.number().int().positive(),
   transactionType: z.enum(["CREDIT", "DEBIT"]),
   saleReference: z.string().min(1),
+  // CORREÇÃO DE AUDITORIA: `cashRegisterId` passa a ser obrigatório para que a
+  // sessão TEF possa ser vinculada ao caixa físico que está cobrando — sem isso
+  // não havia como validar, em `continue/confirm/cancel`, que o caixa ainda
+  // está aberto e é o mesmo que iniciou a cobrança.
+  cashRegisterId: z.string().min(1),
   installments: z.number().int().positive().max(21).optional(),
 });
 
 tefRouter.post("/hardware/tef/transactions", requireAuth, async (req: Request, res: Response) => {
-  const { tenantId } = req.session!;
+  if (!(await requireTefPermission(req, res))) return;
+  const { tenantId, userId } = req.session!;
   const parsed = startSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
   }
 
+  // CORREÇÃO DE AUDITORIA: `saleReference`/`cashRegisterId` chegavam do client
+  // sem nenhuma validação de pertencimento ao tenant — agora confirmados contra
+  // o banco ANTES de abrir a sessão TEF, e seus ids ficam gravados no próprio
+  // estado da sessão (ver `TefSessionState`).
+  const [sale, cashRegister] = await Promise.all([
+    prisma.sale.findFirst({ where: { id: parsed.data.saleReference, tenantId } }),
+    prisma.cashRegister.findFirst({ where: { id: parsed.data.cashRegisterId, tenantId } }),
+  ]);
+  if (!sale) {
+    return res.status(404).json({ success: false, data: null, error: { code: "SALE_NOT_FOUND", message: "Venda (saleReference) não encontrada neste tenant." } });
+  }
+  if (!cashRegister || cashRegister.status !== "OPEN") {
+    return res.status(409).json({ success: false, data: null, error: { code: "CASH_REGISTER_NOT_OPEN", message: "O caixa informado não está aberto neste tenant." } });
+  }
+
   try {
     const provider = await resolveTefProvider(tenantId);
-    const result = await provider.startTransaction(parsed.data);
+    const result = await provider.startTransaction({
+      amountCents: parsed.data.amountCents,
+      transactionType: parsed.data.transactionType,
+      saleReference: parsed.data.saleReference,
+      installments: parsed.data.installments,
+    });
     const sessionId = result.sessionId || randomUUID();
-    await saveTefSession(sessionId, tenantId);
+    await saveTefSession(sessionId, { tenantId, userId, cashRegisterId: cashRegister.id, saleId: sale.id });
     return res.status(201).json({ success: true, data: { ...result, sessionId }, error: null });
   } catch (error) {
     return handleTefError(res, error);
@@ -113,20 +218,25 @@ tefRouter.post("/hardware/tef/transactions", requireAuth, async (req: Request, r
 const continueSchema = z.object({ fieldId: z.string().min(1), value: z.string() });
 
 tefRouter.post("/hardware/tef/transactions/:sessionId/continue", requireAuth, async (req: Request, res: Response) => {
-  const { tenantId } = req.session!;
+  if (!(await requireTefPermission(req, res))) return;
+  const { tenantId, userId } = req.session!;
   const { sessionId } = req.params;
   const parsed = continueSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
   }
   const session = await loadTefSession(sessionId);
-  if (!session || session.tenantId !== tenantId) {
+  if (!session) {
     return res.status(404).json({ success: false, data: null, error: { code: "TEF_SESSION_NOT_FOUND", message: "Sessão TEF não encontrada ou expirada." } });
+  }
+  const bindingError = await assertSessionBindings(session, tenantId, userId);
+  if (bindingError) {
+    return res.status(404).json({ success: false, data: null, error: { code: "TEF_SESSION_NOT_FOUND", message: bindingError } });
   }
   try {
     // Renova o TTL a cada interação — a janela de 180s é por passo, não para a
     // transação inteira (que pode ter N idas e vindas de `continue`).
-    await saveTefSession(sessionId, tenantId);
+    await saveTefSession(sessionId, session);
     const provider = await resolveTefProvider(tenantId);
     const result = await provider.continueTransaction(sessionId, parsed.data.fieldId, parsed.data.value);
     return res.json({ success: true, data: result, error: null });
@@ -136,11 +246,36 @@ tefRouter.post("/hardware/tef/transactions/:sessionId/continue", requireAuth, as
 });
 
 tefRouter.post("/hardware/tef/transactions/:sessionId/confirm", requireAuth, async (req: Request, res: Response) => {
-  const { tenantId } = req.session!;
+  if (!(await requireTefPermission(req, res))) return;
+  const { tenantId, userId } = req.session!;
   const { sessionId } = req.params;
+
+  // CORREÇÃO DE AUDITORIA (idempotência): se esta sessão já foi confirmada com
+  // sucesso antes (ex.: o cliente HTTP não recebeu a resposta por timeout de
+  // rede e reenviou o mesmo POST), a sessão já foi limpa do Redis — sem este
+  // registro de idempotência, o retry cairia no "TEF_SESSION_NOT_FOUND" e o
+  // operador poderia ser levado a iniciar uma NOVA cobrança manualmente,
+  // cobrando o cliente duas vezes. Retorna o mesmo resultado já confirmado sem
+  // chamar `provider.confirmTransaction` de novo.
+  const cachedConfirmation = await redis.get(tefConfirmationKey(sessionId));
+  if (cachedConfirmation) {
+    try {
+      const cached = JSON.parse(cachedConfirmation);
+      if (cached?.tenantId === tenantId) {
+        return res.json({ success: true, data: { sessionId, confirmed: true, idempotentReplay: true }, error: null });
+      }
+    } catch {
+      // registro corrompido — ignora e segue o fluxo normal abaixo
+    }
+  }
+
   const session = await loadTefSession(sessionId);
-  if (!session || session.tenantId !== tenantId) {
+  if (!session) {
     return res.status(404).json({ success: false, data: null, error: { code: "TEF_SESSION_NOT_FOUND", message: "Sessão TEF não encontrada ou expirada." } });
+  }
+  const bindingError = await assertSessionBindings(session, tenantId, userId);
+  if (bindingError) {
+    return res.status(404).json({ success: false, data: null, error: { code: "TEF_SESSION_NOT_FOUND", message: bindingError } });
   }
   try {
     const provider = await resolveTefProvider(tenantId);
@@ -153,6 +288,7 @@ tefRouter.post("/hardware/tef/transactions/:sessionId/confirm", requireAuth, asy
     for (let attempt = 0; attempt <= delaysMs.length; attempt += 1) {
       try {
         await provider.confirmTransaction(sessionId);
+        await redis.set(tefConfirmationKey(sessionId), JSON.stringify({ tenantId, confirmedAt: new Date().toISOString() }), "EX", TEF_CONFIRMATION_IDEMPOTENCY_TTL_SECONDS);
         await clearTefSession(sessionId);
         return res.json({ success: true, data: { sessionId, confirmed: true }, error: null });
       } catch (error) {
@@ -193,21 +329,30 @@ tefRouter.post("/hardware/tef/transactions/:sessionId/confirm", requireAuth, asy
 const cancelSchema = z.object({ nsu: z.string().min(1), reason: z.string().min(3) });
 
 tefRouter.post("/hardware/tef/transactions/:sessionId/cancel", requireAuth, async (req: Request, res: Response) => {
-  const { tenantId } = req.session!;
+  if (!(await requireTefPermission(req, res))) return;
+  const { tenantId, userId } = req.session!;
   const { sessionId } = req.params;
   const parsed = cancelSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
   }
-  let session = await loadTefSession(sessionId);
+  // CORREÇÃO DE AUDITORIA: o fallback anterior (`session = { tenantId }` quando a
+  // sessão não era encontrada no Redis) permitia "cancelar" usando SOMENTE o
+  // tenantId do chamador — sem validar que o NSU informado de fato pertence a
+  // uma sessão/transação real deste tenant/operador/caixa/venda, abrindo
+  // margem para um cancelamento arbitrário contra o daemon só com um NSU
+  // adivinhado/reaproveitado. Removido: a sessão original precisa continuar
+  // válida (dentro do TTL) para que o cancelamento seja aceito; se ela já
+  // expirou, a reconciliação deve ser feita manualmente pelo lojista (mesmo
+  // fluxo de alerta já usado em `TEF_CONFIRMATION_FAILED`), nunca por este
+  // endpoint sem lastro de sessão.
+  const session = await loadTefSession(sessionId);
   if (!session) {
-    // Sessão já expirou/não existe no Redis (ex.: processo que a abriu caiu antes de
-    // persistir) — ainda assim tentamos cancelar no daemon usando só o tenantId do
-    // chamador autenticado, pois o SiTef identifica a transação pelo NSU informado.
-    session = { tenantId };
-  }
-  if (session.tenantId !== tenantId) {
     return res.status(404).json({ success: false, data: null, error: { code: "TEF_SESSION_NOT_FOUND", message: "Sessão TEF não encontrada ou expirada." } });
+  }
+  const bindingError = await assertSessionBindings(session, tenantId, userId);
+  if (bindingError) {
+    return res.status(404).json({ success: false, data: null, error: { code: "TEF_SESSION_NOT_FOUND", message: bindingError } });
   }
   try {
     const provider = await resolveTefProvider(tenantId);

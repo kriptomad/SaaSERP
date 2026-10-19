@@ -50,6 +50,7 @@ productVariantsRouter.get("/products/:productId/variant-axes", requireAuth, requ
     where: { tenantId, productId: product.id },
     include: { _count: { select: { variants: true } } },
     orderBy: { name: "asc" },
+    take: 200, // teto defensivo — produto em grade não costuma ter mais que poucos eixos (Cor, Tamanho...)
   });
   return res.json({ success: true, data: axes, error: null });
 });
@@ -119,6 +120,7 @@ productVariantsRouter.get("/products/:productId/variants", requireAuth, requireM
     where: { tenantId, productId: product.id },
     include: { axis: { select: { id: true, name: true } } },
     orderBy: [{ axis: { name: "asc" } }, { axisValue: "asc" }],
+    take: 500, // teto defensivo — produto em grade não costuma passar de algumas dezenas de combinações
   });
   return res.json({ success: true, data: variants, error: null });
 });
@@ -272,6 +274,7 @@ productVariantsRouter.get("/products/:productId/variants/stock", requireAuth, re
     where: { tenantId, productId: product.id },
     include: { axis: { select: { name: true } } },
     orderBy: { axisValue: "asc" },
+    take: 500, // teto defensivo — produto em grade não costuma passar de algumas dezenas de combinações
   });
   const totalVariantStock = variants.reduce((acc, v) => acc + Number(v.stockQuantity), 0);
   return res.json({

@@ -217,19 +217,29 @@ stockRouter.get("/stock-movements", requireAuth, async (req: Request, res: Respo
   }
 
   const productId = typeof req.query.productId === "string" ? req.query.productId : null;
-  const type = typeof req.query.type === "string" ? req.query.type : null;
+  const typeRaw = typeof req.query.type === "string" ? req.query.type : null;
+  const allowedTypes = new Set(["PURCHASE_IN", "SALE_OUT", "ADJUSTMENT", "RECIPE_CONSUMPTION", "PRODUCTION_CONSUMPTION", "LOSS", "RETURN"]);
+  const type = typeRaw && allowedTypes.has(typeRaw) ? typeRaw : null;
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
 
-  const movements = await prisma.stockMovement.findMany({
-    where: {
-      tenantId,
-      ...(productId ? { productId } : {}),
-      ...(type ? { type: type as any } : {}),
-    },
-    orderBy: { createdAt: "desc" },
-    take: 200,
-  });
+  const where = {
+    tenantId,
+    ...(productId ? { productId } : {}),
+    ...(type ? { type: type as any } : {}),
+  };
 
-  return res.json({ success: true, data: movements, error: null });
+  const [movements, total] = await prisma.$transaction([
+    prisma.stockMovement.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.stockMovement.count({ where }),
+  ]);
+
+  return res.json({ success: true, data: movements, error: null, meta: { page, pageSize, total } });
 });
 
 const adjustmentSchema = z.object({

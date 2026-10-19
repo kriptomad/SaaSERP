@@ -17,6 +17,7 @@ import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { notifyTenant } from "../notifications/notify.service";
+import { readEnumQuery } from "../../lib/query-enum";
 
 export const opticalLabWorkOrdersRouter = Router();
 
@@ -48,9 +49,10 @@ async function requireWrite(req: Request, res: Response): Promise<boolean> {
 opticalLabWorkOrdersRouter.get("/optical-lab-work-orders", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const status = req.query.status as string | undefined;
+  const statusParsed = readEnumQuery(res, req.query.status, ["RECEIVED", "DIAGNOSING", "AWAITING_APPROVAL", "IN_REPAIR", "READY", "DELIVERED", "CANCELLED"] as const, "status");
+  if (!statusParsed.ok) return;
   const orders = await prisma.workOrder.findMany({
-    where: { tenantId, workOrderType: "OPTICAL_LAB", ...(status ? { status: status as any } : {}) },
+    where: { tenantId, workOrderType: "OPTICAL_LAB", ...(statusParsed.value ? { status: statusParsed.value } : {}) },
     include: { client: { select: { id: true, name: true, phone: true } }, opticalPrescription: { select: { id: true, prescriptionNumber: true } } },
     orderBy: { createdAt: "desc" },
   });

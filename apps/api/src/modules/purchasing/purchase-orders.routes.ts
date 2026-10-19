@@ -18,6 +18,7 @@ import { requireAuth } from "../../middlewares/auth.middleware";
 import { recalculateRecipeCostsForIngredient } from "../../services/production/recalculate-recipe-cost.service";
 import { manifestRecipientOperation, RecipientManifestationAlreadyFinalError } from "../fiscal/manifest-recipient.service";
 import { createModuleLogger } from "../../lib/logger";
+import { readEnumQuery } from "../../lib/query-enum";
 
 const log = createModuleLogger("purchase-orders.routes");
 
@@ -56,9 +57,10 @@ async function requireStockWrite(req: Request, res: Response): Promise<boolean> 
 purchaseOrdersRouter.get("/purchase-orders", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireStockRead(req, res))) return;
   const { tenantId } = req.session!;
-  const status = req.query.status as string | undefined;
+  const statusParsed = readEnumQuery(res, req.query.status, ["DRAFT", "SENT", "PARTIALLY_RECEIVED", "RECEIVED", "CANCELLED"] as const, "status");
+  if (!statusParsed.ok) return;
   const orders = await prisma.purchaseOrder.findMany({
-    where: { tenantId, ...(status ? { status: status as any } : {}) },
+    where: { tenantId, ...(statusParsed.value ? { status: statusParsed.value } : {}) },
     include: { items: true, supplier: { select: { id: true, name: true } } },
     orderBy: { createdAt: "desc" },
   });

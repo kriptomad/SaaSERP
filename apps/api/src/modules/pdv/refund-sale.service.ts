@@ -14,7 +14,7 @@
 // fases sequenciais: (1) cancelamento fiscal, se houver documento autorizado; (2)
 // transação local de estoque + status da venda, só aberta depois que a fase 1 já
 // terminou com sucesso.
-import { Prisma, TenantScopedPrismaClient } from "@filitech/db";
+import { Prisma, TenantScopedPrismaClient, prismaUnscoped } from "@filitech/db";
 import { createModuleLogger } from "../../lib/logger";
 import { verifyManagerPin } from "../auth/manager-pin.service";
 import { cancelFiscalDocument } from "../fiscal/cancel-fiscal-document.service";
@@ -289,6 +289,32 @@ export async function refundSale(
         { saleId: sale.id, fiscalDocumentId: authorizedFiscalDoc.id, err },
         "Estorno: fase local falhou após cancelamento fiscal já confirmado na SEFAZ — estado inconsistente, requer reconciliação manual",
       );
+      // GAP DE AUDITORIA FECHADO: além do log estruturado acima (que depende de
+      // alguém monitorando os logs em tempo real), este estado inconsistente é
+      // persistido em um registro DURÁVEL e central (mesmo padrão de
+      // `FailedOfflineSaleSync`, Capítulo 8.3) — garante que o estorno nunca fique
+      // invisível, mesmo que o alarme de log seja perdido/não monitorado. Usa
+      // `prismaUnscoped` (nunca o client tenant-scoped `prisma`, cuja conexão de
+      // transação acabou de falhar/ser revertida) para garantir que esta gravação
+      // de reconciliação tenha a melhor chance de suceder mesmo após a falha acima.
+      try {
+        await prismaUnscoped.pendingFiscalRefundReconciliation.create({
+          data: {
+            tenantId: params.tenantId,
+            saleId: sale.id,
+            fiscalDocumentId: authorizedFiscalDoc.id,
+            errorMessage: err instanceof Error ? err.message : String(err),
+          },
+        });
+      } catch (persistErr) {
+        // Pior caso: nem o registro de reconciliação pôde ser gravado (ex.: banco
+        // indisponível). Loga como segundo erro crítico separado — nunca silencia
+        // a falha de persistência da própria rede de segurança.
+        logger.error(
+          { saleId: sale.id, fiscalDocumentId: authorizedFiscalDoc.id, persistErr },
+          "Estorno: falha ao persistir registro de reconciliação pendente após cancelamento fiscal já confirmado — estado inconsistente SEM registro durável, requer investigação manual imediata via log",
+        );
+      }
       throw new RefundLocalPhaseFailedAfterFiscalCancelError(sale.id, authorizedFiscalDoc.id, err);
     }
     throw err;

@@ -35,6 +35,7 @@ import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
+import { readEnumQuery } from "../../lib/query-enum";
 import {
   grantAccountingEngagement,
   acceptAccountingEngagement,
@@ -177,6 +178,7 @@ accountingOfficeRouter.get("/accounting-engagements", requireAuth, requireModule
   const engagements = await prisma.accountingEngagement.findMany({
     where: { OR: [{ clientTenantId: tenantId }, { accountingFirmTenantId: tenantId }] },
     orderBy: { grantedAt: "desc" },
+    take: 200, // CORREÇÃO DE AUDITORIA: listagem antes era unbounded
   });
   return res.json({ success: true, data: engagements, error: null });
 });
@@ -295,9 +297,30 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, requireMod
     where: { accountingFirmTenantId: tenantId, status: "ACTIVE" },
     include: { clientTenant: { select: { id: true, tradeName: true, slug: true, cnpj: true } } },
     orderBy: { grantedAt: "desc" },
+    take: 200, // CORREÇÃO DE AUDITORIA: listagem antes era unbounded
   });
 
-  const clientTenantIds = engagements.map((e) => e.clientTenantId);
+  // CORREÇÃO DE AUDITORIA: o filtro `status: "ACTIVE"` acima já restringe a query,
+  // mas nenhum acesso cross-tenant real passava por `assertAccountingAccess()` —
+  // a única porta oficial de acesso cross-tenant do módulo (Capítulo 7.4), que
+  // também grava a trilha de auditoria (`CROSS_TENANT_ACCESS`). Revalida cada
+  // engagement individualmente e descarta silenciosamente qualquer um que tenha
+  // sido revogado entre a query acima e esta checagem (corrida improvável, mas
+  // não impossível), em vez de devolver dado de um vínculo não mais ativo.
+  const accessChecks = await Promise.all(
+    engagements.map(async (engagement) => {
+      try {
+        await assertAccountingAccess(tenantId, engagement.clientTenantId);
+        return true;
+      } catch (err) {
+        if (err instanceof NoActiveEngagementError) return false;
+        throw err;
+      }
+    }),
+  );
+  const authorizedEngagements = engagements.filter((_, index) => accessChecks[index]);
+
+  const clientTenantIds = authorizedEngagements.map((e) => e.clientTenantId);
   const taskCounts = await prisma.accountingTask.groupBy({
     by: ["clientTenantId", "status"],
     where: { accountingFirmTenantId: tenantId, clientTenantId: { in: clientTenantIds } },
@@ -313,7 +336,7 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, requireMod
     countsByClient.set(row.clientTenantId, entry);
   }
 
-  const portfolio = engagements.map((e) => ({
+  const portfolio = authorizedEngagements.map((e) => ({
     engagementId: e.id,
     clientTenantId: e.clientTenantId,
     clientTradeName: e.clientTenant.tradeName,
@@ -325,7 +348,7 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, requireMod
   }));
 
   const pendingTasksQueue = await prisma.accountingTask.findMany({
-    where: { accountingFirmTenantId: tenantId, status: { in: ["PENDING", "IN_PROGRESS", "LATE", "BLOCKED"] } },
+    where: { accountingFirmTenantId: tenantId, clientTenantId: { in: clientTenantIds }, status: { in: ["PENDING", "IN_PROGRESS", "LATE", "BLOCKED"] } },
     include: { clientTenant: { select: { tradeName: true, slug: true } } },
     orderBy: { dueDate: "asc" },
     take: 100,
@@ -358,14 +381,43 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, requireMod
 accountingOfficeRouter.get("/accounting-tasks", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireTaskRead(req, res))) return;
   const { tenantId } = req.session!;
-  const { competencia, status } = req.query as { competencia?: string; status?: string };
+  const { competencia } = req.query as { competencia?: string };
+  const statusParsed = readEnumQuery(res, req.query.status, ["PENDING", "IN_PROGRESS", "DONE", "LATE", "BLOCKED"] as const, "status");
+  if (!statusParsed.ok) return;
+  const status = statusParsed.value;
+
+  // CORREÇÃO DE AUDITORIA: antes, o lado "escritório" via QUALQUER tarefa já
+  // gravada com `accountingFirmTenantId === tenantId`, mesmo depois do vínculo
+  // ser revogado pelo cliente (a tarefa em si não é apagada na revogação).
+  // Restringe explicitamente o lado escritório às tarefas de clientes com
+  // vínculo ATIVO, usando `assertAccountingAccess()` — a mesma porta única de
+  // acesso cross-tenant do restante do módulo (Capítulo 7.4).
+  const activeEngagements = await prisma.accountingEngagement.findMany({
+    where: { accountingFirmTenantId: tenantId, status: "ACTIVE" },
+    select: { clientTenantId: true },
+    take: 500,
+  });
+  const activeClientIds: string[] = [];
+  for (const engagement of activeEngagements) {
+    try {
+      await assertAccountingAccess(tenantId, engagement.clientTenantId);
+      activeClientIds.push(engagement.clientTenantId);
+    } catch (err) {
+      if (!(err instanceof NoActiveEngagementError)) throw err;
+    }
+  }
+
   const tasks = await prisma.accountingTask.findMany({
     where: {
-      OR: [{ accountingFirmTenantId: tenantId }, { clientTenantId: tenantId }],
+      OR: [
+        { accountingFirmTenantId: tenantId, clientTenantId: { in: activeClientIds } },
+        { clientTenantId: tenantId },
+      ],
       ...(competencia ? { competencia } : {}),
-      ...(status ? { status: status as any } : {}),
+      ...(status ? { status } : {}),
     },
     orderBy: { dueDate: "asc" },
+    take: 200, // CORREÇÃO DE AUDITORIA: listagem antes era unbounded
   });
   return res.json({ success: true, data: tasks, error: null });
 });

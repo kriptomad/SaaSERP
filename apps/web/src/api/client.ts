@@ -7,8 +7,16 @@
 // nenhum código de página/componente — tanto para o backend local (modo HOST)
 // quanto para o PC HOST configurado na rede (modo USUÁRIO), sem precisar de um
 // build do apps/web diferente por modo/host.
+//
+// CORREÇÃO DE AUDITORIA (full-audit, sev. 85): antes, `?apiBaseUrl=` era aceito em
+// QUALQUER contexto (inclusive a web pública), permitindo que um link malicioso
+// (ex.: enviado por e-mail/WhatsApp) redirecionasse todas as chamadas de API —
+// incluindo login — para um servidor controlado por um atacante (phishing de
+// credenciais). Agora só é honrado quando a página está rodando dentro do shell
+// Electron (que injeta `window.filitechDesktop` via preload script), nunca na web
+// pública servida pelo Vercel/Railway.
 export function resolveApiBaseUrl(): string {
-  if (typeof window !== "undefined") {
+  if (typeof window !== "undefined" && Boolean((window as unknown as { filitech?: unknown }).filitech)) {
     const fromQuery = new URLSearchParams(window.location.search).get("apiBaseUrl");
     if (fromQuery) return fromQuery;
   }
@@ -32,24 +40,49 @@ export function setStoredToken(token: string | null): void {
   } else {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
   }
+  // CORREÇÃO DE AUDITORIA (full-audit, sev. 98/96): espelha o token no IndexedDB
+  // (lido por raw IndexedDB dentro do service worker) para que o Background Sync
+  // real consiga autenticar a sincronização de vendas pendentes mesmo com todas as
+  // abas do PDV fechadas — ver `shared/offline/db.ts` (AuthMirrorState).
+  void mirrorAuthStateToOfflineDb(token);
+}
+
+async function mirrorAuthStateToOfflineDb(token: string | null): Promise<void> {
+  try {
+    const { offlineDb } = await import("../shared/offline/db");
+    await offlineDb.authMirror.put({ key: "session", token, apiBaseUrl: API_BASE_URL, updatedAt: Date.now() });
+  } catch {
+    // Ambiente sem IndexedDB (ex.: SSR/teste) — a sincronização em segundo plano via
+    // service worker simplesmente não vai conseguir autenticar; o fallback
+    // "online"/postMessage para abas abertas continua funcionando normalmente.
+  }
+}
+
+function safeJsonParse<T>(raw: string | null): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    // CORREÇÃO DE AUDITORIA (full-audit, sev. 67): dado corrompido/adulterado em
+    // sessionStorage não deve derrubar o boot do AuthProvider — apenas trata como
+    // sessão ausente (o usuário volta para a tela de login).
+    return null;
+  }
 }
 
 export function getStoredTenant(): AuthResponse["tenant"] | null {
-  const raw = sessionStorage.getItem(SSO_TENANT_KEY);
-  return raw ? (JSON.parse(raw) as AuthResponse["tenant"]) : null;
+  return safeJsonParse<AuthResponse["tenant"]>(sessionStorage.getItem(SSO_TENANT_KEY));
 }
 
 export function getStoredUser(): AuthResponse["user"] | null {
-  const raw = sessionStorage.getItem(SSO_USER_KEY);
-  return raw ? (JSON.parse(raw) as AuthResponse["user"]) : null;
+  return safeJsonParse<AuthResponse["user"]>(sessionStorage.getItem(SSO_USER_KEY));
 }
 
 // Capítulo 13.1 — presente apenas quando esta janela foi aberta por impersonation a
 // partir do painel de plataforma (via `?sso=`); usado pelo AppShell para exibir o
 // aviso "Sessão de suporte" com botão de encerrar.
 export function getStoredImpersonation(): AuthResponse["impersonation"] | null {
-  const raw = sessionStorage.getItem(SSO_IMPERSONATION_KEY);
-  return raw ? (JSON.parse(raw) as AuthResponse["impersonation"]) : null;
+  return safeJsonParse<AuthResponse["impersonation"]>(sessionStorage.getItem(SSO_IMPERSONATION_KEY));
 }
 
 export function setStoredSession(response: AuthResponse | null): void {
@@ -103,6 +136,11 @@ function consumeSsoFromQuery(): void {
   window.history.replaceState({}, "", url.pathname + (url.search ? url.search : ""));
 }
 consumeSsoFromQuery();
+// Garante que o service worker tenha o token espelhado mesmo após um reload de
+// página (onde nenhum novo `setStoredToken` é chamado, pois a sessão já existia em
+// localStorage de um boot anterior) — sem isto, o Background Sync real só passaria a
+// funcionar depois do PRÓXIMO login.
+void mirrorAuthStateToOfflineDb(getStoredToken());
 
 export class ApiError extends Error {
   constructor(
@@ -261,6 +299,7 @@ export function openCashRegister(openingAmount: number): Promise<{ success: bool
 // Envelope padrão dos módulos REST: { success, data, error }. Os helpers devolvem direto `data`.
 interface Envelope<T> {
   data: T;
+  meta?: { page: number; pageSize: number; total: number };
 }
 
 export type QueryParams = Record<string, string | number | boolean | null | undefined>;
@@ -275,9 +314,22 @@ export function withQuery(path: string, params?: QueryParams): string {
   return text ? `${path}?${text}` : path;
 }
 
+export interface PagedResult<T> {
+  data: T;
+  meta: { page: number; pageSize: number; total: number } | null;
+}
+
 export const api = {
   async get<T>(path: string, params?: QueryParams): Promise<T> {
     return (await request<Envelope<T>>(withQuery(path, params))).data;
+  },
+  // CORREÇÃO DE AUDITORIA (full-audit, sev. 78/80/73): expõe o `meta.total`/`page`
+  // retornado pelos endpoints que agora suportam paginação real, para que as telas
+  // possam mostrar "carregar mais"/paginação em vez de truncar silenciosamente a
+  // listagem no limite fixo antigo.
+  async getPaged<T>(path: string, params?: QueryParams): Promise<PagedResult<T>> {
+    const envelope = await request<Envelope<T>>(withQuery(path, params));
+    return { data: envelope.data, meta: envelope.meta ?? null };
   },
   async post<T>(path: string, body?: unknown): Promise<T> {
     return (await request<Envelope<T>>(path, { method: "POST", body: JSON.stringify(body ?? {}) })).data;

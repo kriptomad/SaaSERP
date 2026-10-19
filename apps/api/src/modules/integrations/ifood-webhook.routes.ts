@@ -26,23 +26,49 @@ import { Prisma, prismaUnscoped as prisma } from "@filitech/db";
 import { decryptEnvelope } from "../../lib/envelope-crypto";
 import { calculateTax } from "../fiscal/tax-engine.service";
 import { resolveTaxReformPhase } from "../fiscal/tax-reform-phase.service";
+import { enforceRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
 
 export const ifoodWebhookRouter = Router();
 
+// GAP DE AUDITORIA FECHADO: webhook público (sem sessão) não tinha NENHUM rate
+// limit — qualquer parte capaz de montar um POST para `/webhooks/ifood/:tenantId`
+// podia martelar o endpoint sem teto algum, inclusive para tentativas de força
+// bruta de assinatura. Chave combina tenantId (identificável diretamente pela
+// própria URL, não pelo payload ainda não parseado neste ponto) + IP — mesma
+// convenção de `public-booking.routes.ts`/`lookup.routes.ts`.
+const IFOOD_WEBHOOK_RATE_LIMIT_MAX = 60;
+const IFOOD_WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = 60;
+
+// GAP DE AUDITORIA FECHADO: usado quando a integração não está configurada/ativa
+// para o tenant, apenas para manter o mesmo formato (HMAC sobre o corpo bruto) e
+// custo computacional de uma verificação real — nunca é uma chave válida de
+// verdade, só existe para não pular a etapa de HMAC e assim não abrir uma
+// diferença de timing grosseira entre "tenant sem integração" e "assinatura errada".
+const DUMMY_HMAC_SECRET = crypto.randomBytes(32).toString("hex");
+
+function genericUnauthorized(res: Response) {
+  // GAP DE AUDITORIA FECHADO: antes, "tenant sem integração ativa" (404) e
+  // "assinatura inválida" (401) tinham código/mensagem distintos — um atacante
+  // conseguia enumerar quais tenants têm a integração iFood configurada apenas
+  // observando a resposta, sem nunca precisar acertar a assinatura. Agora ambos os
+  // casos retornam exatamente a mesma resposta genérica.
+  return res.status(401).json({ success: false, data: null, error: { code: "UNAUTHORIZED", message: "Requisição não autorizada." } });
+}
+
 const ifoodOrderItemSchema = z.object({
-  sku: z.string().min(1),
-  quantity: z.number().positive(),
-  unitPrice: z.number().positive(),
+  sku: z.string().min(1).max(100),
+  quantity: z.number().finite().positive(),
+  unitPrice: z.number().finite().positive(),
 });
 
 const ifoodOrderWebhookSchema = z.object({
-  orderId: z.string().min(1),
-  totalAmount: z.number().positive(),
+  orderId: z.string().min(1).max(100),
+  totalAmount: z.number().finite().positive(),
   // Comissão de marketplace retida pelo iFood neste pedido (Capítulo 11.1) — vira
   // uma AccountPayable já paga (o iFood desconta no repasse, nunca uma cobrança
   // futura em aberto), vinculada à Sale de origem via `AccountPayable.saleId`.
-  commissionAmount: z.number().min(0),
-  items: z.array(ifoodOrderItemSchema).min(1),
+  commissionAmount: z.number().finite().nonnegative(),
+  items: z.array(ifoodOrderItemSchema).min(1).max(500),
 });
 
 async function findOrCreateIfoodSupplier(tenantId: string) {
@@ -56,29 +82,44 @@ async function findOrCreateIfoodSupplier(tenantId: string) {
 ifoodWebhookRouter.post("/webhooks/ifood/:tenantId", async (req: Request, res: Response) => {
   const { tenantId } = req.params;
 
-  const credential = await prisma.integrationCredential.findUnique({
-    where: { tenantId_provider_environment: { tenantId, provider: "MARKETPLACE_IFOOD", environment: "PRODUCTION" } },
-  });
-  if (!credential || !credential.active) {
-    return res.status(404).json({ success: false, data: null, error: { code: "INTEGRATION_NOT_CONFIGURED", message: "Integração iFood não configurada ou inativa para este tenant." } });
+  try {
+    await enforceRateLimit(`ifood-webhook:${tenantId}:${req.ip}`, IFOOD_WEBHOOK_RATE_LIMIT_MAX, IFOOD_WEBHOOK_RATE_LIMIT_WINDOW_SECONDS);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
   }
 
   const signatureHeader = req.headers["x-ifood-signature"];
   if (!signatureHeader || typeof signatureHeader !== "string") {
-    return res.status(401).json({ success: false, data: null, error: { code: "MISSING_SIGNATURE", message: "Header X-IFood-Signature ausente." } });
+    return genericUnauthorized(res);
   }
+
+  // GAP DE AUDITORIA FECHADO: a verificação de assinatura HMAC agora roda ANTES de
+  // qualquer lookup de tenant/credencial real ter seu resultado exposto na resposta
+  // — "tenant sem integração ativa" usa `DUMMY_HMAC_SECRET` para seguir o MESMO
+  // caminho de código (decrypt teria sido pulado, então simulamos o custo do HMAC
+  // apenas) e cai no mesmo 401 genérico de uma assinatura errada, nunca em um 404
+  // diferenciado que permitiria enumerar tenants com a integração ativa.
+  const credential = await prisma.integrationCredential.findUnique({
+    where: { tenantId_provider_environment: { tenantId, provider: "MARKETPLACE_IFOOD", environment: "PRODUCTION" } },
+  });
 
   // req.body aqui é o Buffer bruto (express.raw, ver server.ts) — obrigatório para a
   // verificação HMAC, nunca o corpo já parseado em JSON (mesmo motivo do webhook Stripe).
   const rawBody = req.body as Buffer;
-  const { clientSecret } = decryptEnvelope(credential.encryptedPayload, credential.encryptionKeyId) as { clientSecret: string };
+  const clientSecret =
+    credential && credential.active
+      ? (decryptEnvelope(credential.encryptedPayload, credential.encryptionKeyId) as { clientSecret: string }).clientSecret
+      : DUMMY_HMAC_SECRET;
   const expectedSignature = crypto.createHmac("sha256", clientSecret).update(rawBody).digest("hex");
 
   const receivedBuf = Buffer.from(signatureHeader, "hex");
   const expectedBuf = Buffer.from(expectedSignature, "hex");
   const isValid = receivedBuf.length === expectedBuf.length && crypto.timingSafeEqual(receivedBuf, expectedBuf);
-  if (!isValid) {
-    return res.status(401).json({ success: false, data: null, error: { code: "INVALID_SIGNATURE", message: "Assinatura HMAC inválida." } });
+  if (!credential || !credential.active || !isValid) {
+    return genericUnauthorized(res);
   }
 
   let payload: unknown;
