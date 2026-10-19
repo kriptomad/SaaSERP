@@ -363,6 +363,10 @@ platformAdminRouter.get("/platform-admin/admin-users", requirePlatformAdminAuth,
   const admins = await prisma.platformAdminUser.findMany({
     select: { id: true, name: true, email: true, role: true, active: true },
     orderBy: { name: "asc" },
+    // GAP DE AUDITORIA FECHADO (Rodada 12): teto de segurança — lista de admins
+    // da própria plataforma (nunca cresce por ação de tenant), mas sem nenhum
+    // limite o endpoint ficava sem contrato de resposta limitada.
+    take: 500,
   });
   return res.json({ success: true, data: admins, error: null });
 });
@@ -377,6 +381,11 @@ platformAdminRouter.get("/platform-admin/admin-users", requirePlatformAdminAuth,
 platformAdminRouter.get("/platform-admin/integrations/summary", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
   const credentials = await prisma.integrationCredential.findMany({
     select: { id: true, tenantId: true, provider: true, active: true, lastTestedAt: true, lastTestSuccess: true },
+    // GAP DE AUDITORIA FECHADO (Rodada 12): sem teto, crescimento da base de
+    // tenants/credenciais fazia este dashboard carregar a tabela inteira em
+    // memória a cada acesso. O loop abaixo é por PROVEDOR (conjunto pequeno e
+    // fixo, ex. ~15 integrações suportadas) — não é N+1 por tenant/credencial.
+    take: 20_000,
   });
 
   const byProvider = new Map<string, { credentialIds: string[]; activeTenantCount: number }>();
@@ -414,7 +423,7 @@ platformAdminRouter.get("/platform-admin/integrations/summary", requirePlatformA
 // ─────────────────────────────────────────────────────────────────────────
 
 platformAdminRouter.get("/platform-admin/system-parameters", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
-  const parameters = await prisma.systemParameter.findMany({ orderBy: { key: "asc" } });
+  const parameters = await prisma.systemParameter.findMany({ orderBy: { key: "asc" }, take: 1000 });
   return res.json({ success: true, data: parameters, error: null });
 });
 
@@ -429,11 +438,25 @@ platformAdminRouter.put("/platform-admin/system-parameters/:key", requirePlatfor
   if (!existing) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Parâmetro não encontrado." } });
   }
-  const updated = await prisma.systemParameter.update({
-    where: { key: existing.key },
-    data: { value: parsed.data.value, updatedByPlatformAdminUserId: req.platformAdminSession!.platformAdminUserId },
+  // GAP DE AUDITORIA FECHADO (Rodada 12): update + auditLog eram duas escritas
+  // separadas — uma falha na segunda deixava um parâmetro de sistema (que pode
+  // mudar comportamento em produção) alterado sem nenhuma trilha de auditoria.
+  const updated = await prisma.$transaction(async (tx) => {
+    const param = await tx.systemParameter.update({
+      where: { key: existing.key },
+      data: { value: parsed.data.value, updatedByPlatformAdminUserId: req.platformAdminSession!.platformAdminUserId },
+    });
+    await tx.auditLog.create({
+      data: {
+        platformAdminUserId: req.platformAdminSession!.platformAdminUserId,
+        action: "PARAMETER_UPDATED",
+        targetType: "SystemParameter",
+        targetId: existing.key,
+        metadata: { from: existing.value, to: parsed.data.value } as any,
+      },
+    });
+    return param;
   });
-  await writeAuditLog(req, "PARAMETER_UPDATED", "SystemParameter", existing.key, { from: existing.value, to: parsed.data.value });
   return res.json({ success: true, data: updated, error: null });
 });
 
@@ -442,7 +465,7 @@ platformAdminRouter.put("/platform-admin/system-parameters/:key", requirePlatfor
 // ─────────────────────────────────────────────────────────────────────────
 
 platformAdminRouter.get("/platform-admin/feature-flags", requirePlatformAdminAuth, async (_req: Request, res: Response) => {
-  const flags = await prisma.featureFlag.findMany({ orderBy: { key: "asc" } });
+  const flags = await prisma.featureFlag.findMany({ orderBy: { key: "asc" }, take: 1000 });
   return res.json({ success: true, data: flags, error: null });
 });
 
@@ -492,6 +515,12 @@ platformAdminRouter.get("/platform-admin/support-tickets", requirePlatformAdminA
       ...(assignedToMe === "true" ? { assignedToPlatformAdminUserId: req.platformAdminSession!.platformAdminUserId } : {}),
     },
     orderBy: { createdAt: "desc" },
+    // GAP DE AUDITORIA FECHADO (Rodada 12): sem teto, a fila de chamados crescia
+    // sem limite de resposta — justamente o endpoint mais crítico durante um
+    // incidente, quando o volume de chamados costuma picar. Ordenado por mais
+    // recente primeiro, então o teto nunca esconde o que é mais urgente agora;
+    // chamados antigos resolvidos continuam filtráveis por status.
+    take: 300,
   });
   return res.json({ success: true, data: tickets, error: null });
 });
@@ -529,6 +558,12 @@ platformAdminRouter.patch("/platform-admin/support-tickets/:id", requirePlatform
       resolvedAt: parsed.data.status === "RESOLVED" ? new Date() : existing.resolvedAt,
     },
   });
+  // GAP DE AUDITORIA FECHADO (Rodada 12): reatribuição/mudança de status e
+  // prioridade de chamado não deixava NENHUM rastro no audit log da plataforma,
+  // diferente de feature flags, parâmetros, revogação de chave, etc. — uma
+  // mudança de status/responsável que afete um litígio ou incidente de cliente
+  // precisa de trilha imutável igual a qualquer outra ação sensível do painel.
+  await writeAuditLog(req, "SUPPORT_TICKET_UPDATED", "SupportTicket", existing.id, { changes: parsed.data });
   return res.json({ success: true, data: updated, error: null });
 });
 
@@ -552,6 +587,9 @@ platformAdminRouter.post("/platform-admin/support-tickets/:id/messages", require
       attachmentUrls: parsed.data.attachmentUrls,
     },
   });
+  // GAP DE AUDITORIA FECHADO (Rodada 12): resposta de admin a um chamado (pode
+  // conter decisão de reembolso, compromisso de prazo, etc.) não era auditada.
+  await writeAuditLog(req, "SUPPORT_TICKET_MESSAGE_SENT", "SupportTicket", ticket.id, { messageId: message.id });
   return res.status(201).json({ success: true, data: message, error: null });
 });
 
@@ -560,7 +598,7 @@ platformAdminRouter.post("/platform-admin/support-tickets/:id/messages", require
 // ─────────────────────────────────────────────────────────────────────────
 
 platformAdminRouter.get("/platform-admin/tenants/:tenantId/api-keys", requirePlatformAdminAuth, async (req: Request, res: Response) => {
-  const keys = await prisma.tenantApiKey.findMany({ where: { tenantId: req.params.tenantId }, orderBy: { createdAt: "desc" } });
+  const keys = await prisma.tenantApiKey.findMany({ where: { tenantId: req.params.tenantId }, orderBy: { createdAt: "desc" }, take: 500 });
   return res.json({ success: true, data: keys, error: null });
 });
 
@@ -575,7 +613,7 @@ platformAdminRouter.post("/platform-admin/tenant-api-keys/:id/revoke", requirePl
 });
 
 platformAdminRouter.get("/platform-admin/tenants/:tenantId/webhook-endpoints", requirePlatformAdminAuth, async (req: Request, res: Response) => {
-  const endpoints = await prisma.tenantWebhookEndpoint.findMany({ where: { tenantId: req.params.tenantId } });
+  const endpoints = await prisma.tenantWebhookEndpoint.findMany({ where: { tenantId: req.params.tenantId }, orderBy: { createdAt: "desc" }, take: 200 });
   return res.json({ success: true, data: endpoints, error: null });
 });
 

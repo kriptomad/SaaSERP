@@ -16,6 +16,11 @@ import { enforceRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
 // nenhum rate limiting — mesmo padrão de lookup.routes.ts/public-booking.routes.ts.
 const PUBLIC_STORE_ORDER_RATE_LIMIT_MAX = 10;
 const PUBLIC_STORE_ORDER_RATE_LIMIT_WINDOW_SECONDS = 60;
+// GAP DE AUDITORIA FECHADO (Rodada 12): catálogo público não tinha NENHUM rate
+// limit — scraping/refresh em loop batia direto no banco sem nenhuma barreira,
+// mesmo padrão do `/slots` de public-booking.routes.ts antes da Rodada 11.
+const PUBLIC_STORE_READ_RATE_LIMIT_MAX = 60;
+const PUBLIC_STORE_READ_RATE_LIMIT_WINDOW_SECONDS = 60;
 
 export const publicOnlineStoreRouter = Router();
 
@@ -67,6 +72,18 @@ publicOnlineStoreRouter.get("/loja/:customSlug", async (req: Request, res: Respo
 });
 
 publicOnlineStoreRouter.get("/loja/:customSlug/products", async (req: Request, res: Response) => {
+  // GAP DE AUDITORIA FECHADO (Rodada 12): rota pública anônima sem rate limit e
+  // sem teto de resultados — um catálogo com centenas de milhares de produtos
+  // (real ou forjado) podia ser solicitado repetidamente, esgotando CPU/memória
+  // da API e conexões do Postgres.
+  try {
+    await enforceRateLimit(`public-store:${req.params.customSlug}:read:${req.ip}`, PUBLIC_STORE_READ_RATE_LIMIT_MAX, PUBLIC_STORE_READ_RATE_LIMIT_WINDOW_SECONDS);
+  } catch (err) {
+    if (err instanceof RateLimitExceededError) {
+      return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
+    }
+    throw err;
+  }
   const store = await resolveActiveStoreBySlug(req.params.customSlug);
   if (!store) return notFoundStore(res);
 
@@ -74,13 +91,21 @@ publicOnlineStoreRouter.get("/loja/:customSlug/products", async (req: Request, r
     where: { tenantId: store.tenantId, showInOnlineStore: true, active: true },
     select: { id: true, name: true, description: true, unitPrice: true },
     orderBy: { name: "asc" },
+    take: 500,
   });
   return res.json({ success: true, data: products, error: null });
 });
 
 const orderItemSchema = z.object({
   productId: z.string().min(1),
-  quantity: z.number().positive(),
+  // GAP DE AUDITORIA FECHADO (Rodada 12): `.positive()` sozinho aceitava
+  // quantidades absurdamente grandes sem teto superior. Produtos pesáveis
+  // (`Product.isWeighted`, ex. padaria por peso) legitimamente usam fração
+  // (0.750kg) — por isso o teto superior continua aceitando decimais aqui;
+  // a exigência de número inteiro para produtos NÃO pesáveis é validada
+  // abaixo, já com o produto carregado do banco (único lugar que sabe se é
+  // pesável ou não).
+  quantity: z.number().positive().finite().max(10_000),
 });
 
 const createPublicOrderSchema = z.object({
@@ -90,12 +115,19 @@ const createPublicOrderSchema = z.object({
   isDelivery: z.boolean().default(false),
   deliveryAddress: z.string().min(1).max(500).optional(),
   customerNotes: z.string().max(1000).optional(),
-  items: z.array(orderItemSchema).min(1),
+  // GAP DE AUDITORIA FECHADO (Rodada 12): array de itens sem teto superior —
+  // um payload com dezenas de milhares de itens inflava o `$in` da query de
+  // produtos e o cálculo de total em memória sem limite nenhum.
+  items: z.array(orderItemSchema).min(1).max(100),
 });
 
 publicOnlineStoreRouter.post("/loja/:customSlug/orders", async (req: Request, res: Response) => {
   try {
-    await enforceRateLimit(`public-store:order:${req.ip}`, PUBLIC_STORE_ORDER_RATE_LIMIT_MAX, PUBLIC_STORE_ORDER_RATE_LIMIT_WINDOW_SECONDS);
+    // GAP DE AUDITORIA FECHADO (Rodada 12): chave sem o slug da loja — mesmo
+    // problema corrigido em public-booking.routes.ts na Rodada 11: um único IP
+    // (NAT/torre de celular compartilhada) esgotava o balde de pedidos para
+    // TODAS as lojas da plataforma, não só a que estava realmente sendo abusada.
+    await enforceRateLimit(`public-store:${req.params.customSlug}:order:${req.ip}`, PUBLIC_STORE_ORDER_RATE_LIMIT_MAX, PUBLIC_STORE_ORDER_RATE_LIMIT_WINDOW_SECONDS);
   } catch (err) {
     if (err instanceof RateLimitExceededError) {
       return res.status(429).json({ success: false, data: null, error: { code: "RATE_LIMITED", message: err.message } });
@@ -131,6 +163,18 @@ publicOnlineStoreRouter.post("/loja/:customSlug/orders", async (req: Request, re
   const missing = productIds.filter((id) => !productById.has(id));
   if (missing.length > 0) {
     return res.status(422).json({ success: false, data: null, error: { code: "PRODUCT_UNAVAILABLE", message: "Um ou mais produtos não estão mais disponíveis nesta loja." } });
+  }
+
+  // GAP DE AUDITORIA FECHADO (Rodada 12): produto NÃO pesável vendido em
+  // fração (ex.: "0.5 unidade" de um item unitário) é sempre erro de
+  // cadastro/abuso de cliente, nunca uma venda real — só `isWeighted` legitima
+  // quantidade fracionária.
+  const invalidFractional = input.items.find((item) => {
+    const product = productById.get(item.productId)!;
+    return !product.isWeighted && !Number.isInteger(item.quantity);
+  });
+  if (invalidFractional) {
+    return res.status(422).json({ success: false, data: null, error: { code: "INVALID_QUANTITY", message: "Quantidade deve ser um número inteiro para este produto." } });
   }
 
   let itemsTotalAmount = 0;
