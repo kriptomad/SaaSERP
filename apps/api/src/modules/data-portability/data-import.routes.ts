@@ -61,10 +61,31 @@ dataImportRouter.post("/data-import/jobs", requireAuth, async (req: Request, res
   return res.status(201).json({ success: true, data: job, error: null });
 });
 
+// CORREÇÃO DE AUDITORIA (fa-w5-perf-unbounded-data-import-jobs): antes, `findMany`
+// sem `take`/`skip`/cursor devolvia TODOS os jobs de importação do tenant de uma vez
+// — um tenant com anos de importações acumuladas paga o custo de uma varredura
+// completa a cada carregamento da tela. Mesmo padrão de paginação por cursor (nunca
+// OFFSET) já usado em `sales.routes.ts` GET /sales: cursor por `createdAt` via
+// `?before=`, `limit` opcional (default 50, máximo 100), e a técnica de buscar
+// `limit + 1` linhas para saber se há próxima página sem um `COUNT(*)` extra.
 dataImportRouter.get("/data-import/jobs", requireAuth, async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
-  const jobs = await prisma.dataImportJob.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" } });
-  return res.json({ success: true, data: jobs, error: null });
+  const limitParam = Number(req.query.limit);
+  const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 100 ? limitParam : 50;
+  const before = typeof req.query.before === "string" ? new Date(req.query.before) : null;
+
+  const jobs = await prisma.dataImportJob.findMany({
+    where: {
+      tenantId,
+      ...(before && !Number.isNaN(before.getTime()) ? { createdAt: { lt: before } } : {}),
+    },
+    orderBy: { createdAt: "desc" },
+    take: limit + 1,
+  });
+  const hasMore = jobs.length > limit;
+  const page = hasMore ? jobs.slice(0, limit) : jobs;
+  const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
+  return res.json({ success: true, data: page, meta: { nextCursor, hasMore }, error: null });
 });
 
 dataImportRouter.get("/data-import/jobs/:id", requireAuth, async (req: Request, res: Response) => {

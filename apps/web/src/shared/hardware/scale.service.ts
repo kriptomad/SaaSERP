@@ -35,23 +35,70 @@ export interface ScaleReading {
 
 export type ScaleProtocol = "TOLEDO_PRIX" | "FILIZOLA_GENERIC";
 
-export const SCALE_PROFILES: Record<ScaleProtocol, { baudRate: number }> = {
-  TOLEDO_PRIX: { baudRate: 9600 },
-  FILIZOLA_GENERIC: { baudRate: 9600 },
+export interface ScaleProfileConfig {
+  baudRate: number;
+  // CORREÇÃO DE AUDITORIA (fa-w5-hw-scale-stability-assumption): alguns protocolos de
+  // balança sinalizam estabilidade POSITIVAMENTE (ex.: token "ST"/"S" no início do
+  // frame), não só a instabilidade. Quando `providesExplicitStabilityMarker` é
+  // `true`, `parseScaleLine` passa a EXIGIR encontrar esse marcador positivo para
+  // retornar `stable: true` — nunca mais trata a simples AUSÊNCIA do marcador de
+  // instabilidade ("I"/"M") como prova de estabilidade.
+  //
+  // LIMITAÇÃO REAL E DOCUMENTADA: a pesquisa desta sessão só confirmou, para Toledo
+  // Prix/Filizola no modo "contínuo"/protocolo padrão, um marcador NEGATIVO de
+  // instabilidade — nenhum marcador positivo de estabilidade é documentado
+  // publicamente para esses modelos. Por isso ambos os perfis abaixo mantêm
+  // `providesExplicitStabilityMarker: false` e preservam o comportamento histórico
+  // (ausência de "I"/"M" ⇒ assume estável) — uma suposição de protocolo honesta e
+  // registrada aqui, não uma garantia absoluta, e não um TODO silencioso.
+  providesExplicitStabilityMarker: boolean;
+}
+
+export const SCALE_PROFILES: Record<ScaleProtocol, ScaleProfileConfig> = {
+  TOLEDO_PRIX: { baudRate: 9600, providesExplicitStabilityMarker: false },
+  FILIZOLA_GENERIC: { baudRate: 9600, providesExplicitStabilityMarker: false },
 };
 
-// Extrai o primeiro número decimal (com vírgula OU ponto) da linha recebida.
-const WEIGHT_PATTERN = /(\d{1,3}[.,]\d{2,3})/;
+// CORREÇÃO DE AUDITORIA (fa-w5-hw-scale-untrusted-weight-parser): nenhuma balança de
+// checkout real pesa um item de PDV acima disso — usado como bound de sanidade para
+// rejeitar leituras obviamente corrompidas/ruído de linha serial que, por coincidência,
+// caiam no formato numérico esperado (ex.: bit de framing corrompido fazendo "1.234"
+// virar "123.400" ou similar).
+const MAX_PLAUSIBLE_WEIGHT_KG = 500;
 
-export function parseScaleLine(line: string): ScaleReading | null {
-  const match = line.match(WEIGHT_PATTERN);
+// CORREÇÃO DE AUDITORIA (fa-w5-hw-scale-untrusted-weight-parser): a regex anterior
+// (`/(\d{1,3}[.,]\d{2,3})/`) casava o primeiro número decimal em QUALQUER POSIÇÃO da
+// linha, sem validar o restante do frame nem checksum algum — uma linha de ruído
+// serial, ou um trecho corrompido que por acaso contivesse um número nesse formato,
+// era aceito como peso válido sem nenhuma estrutura de protocolo por trás. Agora a
+// linha inteira (já despojada de STX/CR pelo chamador em `streamReadings`) precisa
+// casar, do início ao fim, com a estrutura documentada do frame: marcador de status
+// opcional (1-2 letras, ex. "I"/"M" de instável/movimento) + peso numérico + unidade
+// opcional "kg" — qualquer sujeira fora desse formato é rejeitada com `null`.
+const FRAME_PATTERN = /^\s*([A-Za-z]{0,2})\s*([+-]?\d{1,3}[.,]\d{2,3})\s*(?:kg)?\s*$/i;
+const INSTABILITY_MARKER_PATTERN = /^[IM]$/i;
+const STABILITY_MARKER_PATTERN = /^(ST|S)$/i;
+
+export function parseScaleLine(line: string, protocol: ScaleProtocol = "TOLEDO_PRIX"): ScaleReading | null {
+  const match = line.match(FRAME_PATTERN);
   if (!match) return null;
-  const weightKg = Number(match[1].replace(",", "."));
-  if (!Number.isFinite(weightKg) || weightKg < 0) return null;
-  // Firmwares comuns reportam instabilidade com um caractere "I"/"M" antes do peso
-  // (Instável/Movimento) — na ausência desse marcador, assume-se estável (o caso
-  // mais comum: a maioria das balanças de checkout só transmite quando já estabilizou).
-  const stable = !/[IM]\s*\d/.test(line);
+  const weightKg = Number(match[2].replace(",", "."));
+  if (!Number.isFinite(weightKg) || weightKg < 0 || weightKg > MAX_PLAUSIBLE_WEIGHT_KG) return null;
+  const statusToken = (match[1] || "").trim();
+  const profile = SCALE_PROFILES[protocol];
+  let stable: boolean;
+  if (INSTABILITY_MARKER_PATTERN.test(statusToken)) {
+    stable = false;
+  } else if (profile.providesExplicitStabilityMarker) {
+    // Protocolo que DE FATO sinaliza estabilidade positiva — exige o marcador
+    // explícito; nunca assume estável só por ausência do marcador de instabilidade.
+    stable = STABILITY_MARKER_PATTERN.test(statusToken);
+  } else {
+    // Ver `providesExplicitStabilityMarker` acima: limitação real e documentada,
+    // preservada por compatibilidade com os perfis atuais (nenhum expõe marcador
+    // positivo de estabilidade).
+    stable = true;
+  }
   return { weightKg, stable, raw: line };
 }
 
@@ -115,7 +162,7 @@ export class ScaleService {
         while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
           const line = buffer.slice(0, newlineIndex).replace(/[\x02\r]/g, "");
           buffer = buffer.slice(newlineIndex + 1);
-          const reading = parseScaleLine(line);
+          const reading = parseScaleLine(line, this.protocol);
           if (reading) onReading(reading);
         }
       }

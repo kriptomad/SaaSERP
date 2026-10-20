@@ -62,6 +62,10 @@ ENV TZ=America/Sao_Paulo
 EXPOSE 3333
 # O entrypoint da imagem distroless já é `node`; o CMD recebe apenas o script.
 # Worker BullMQ: APP_ROLE=worker (dist/start.cjs) ou CMD ["apps/api/dist/worker.cjs"].
-# Migrations (sem shell na imagem):
-#   --entrypoint /nodejs/bin/node ... packages/db/node_modules/prisma/build/index.js migrate deploy --schema packages/db/prisma/schema.prisma
+# fa-w5-boot-migration-not-applied: dist/start.cjs (gerado por apps/api/scripts/
+# build.mjs) roda `prisma migrate deploy` SINCRONAMENTE antes de iniciar a API
+# (não roda no worker) usando o mesmo binário sem shell
+# (packages/db/node_modules/prisma/build/index.js) do job one-shot `migrate` do
+# deploy/generic-host/docker-compose.yml — nenhuma réplica da API aceita tráfego
+# com schema desatualizado. Ver comentário completo em build.mjs.
 CMD ["apps/api/dist/start.cjs"]

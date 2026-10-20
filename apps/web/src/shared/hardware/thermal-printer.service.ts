@@ -79,7 +79,19 @@ export class ThermalPrinterService {
     if (!this.writer) {
       throw new PrinterNotConnectedError("Impressora térmica não conectada. Clique em 'Conectar impressora' antes de imprimir.");
     }
-    await this.writer.write(bytes);
+    // CORREÇÃO DE AUDITORIA (fa-w5-hw-printer-error-nonblocking): `writer.write()`
+    // nunca tinha um timeout — uma impressora travada/desconectada no meio da
+    // operação (papel preso, USB removido sem `disconnect()`, driver CDC pendurado)
+    // podia deixar essa Promise pendurada INDEFINIDAMENTE, travando para sempre
+    // qualquer chamador que dependesse dela resolver/rejeitar (mesmo os que já
+    // tratam falha de impressão como não-bloqueante em PosPage.tsx — um `.catch()`
+    // nunca dispara se a Promise não resolve nem rejeita). Força um limite de 5s.
+    await Promise.race([
+      this.writer.write(bytes),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Tempo esgotado ao escrever na impressora térmica (porta serial travada ou desconectada).")), 5000),
+      ),
+    ]);
   }
 
   /** Comando ESC p — abre a gaveta de dinheiro conectada à mesma impressora (Capítulo 23.4). */

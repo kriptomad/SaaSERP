@@ -31,6 +31,22 @@ export interface SendSmsResult {
   message: string;
 }
 
+// fa-w5-notif-tenant-controlled-message-impersonation — mesma mitigação de
+// atribuição de whatsapp.channel.ts (ver nota completa lá): acrescenta um rodapé
+// NÃO REMOVÍVEL identificando o tenant remetente antes de qualquer envio SMS.
+// Diferente do WhatsApp, SMS tem um limite rígido de caracteres (`MAX_SMS_LENGTH`)
+// — o rodapé tem prioridade sobre o corpo da notificação (nunca é ele que é
+// truncado): o corpo original é que perde espaço quando os dois juntos excedem o
+// limite, garantindo que a atribuição do remetente sempre chegue ao destinatário.
+async function withSenderAttribution(tenantId: string, rawBody: string): Promise<string> {
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { tradeName: true } });
+  const senderName = tenant?.tradeName?.trim() || "um lojista Filitech ERP";
+  const footer = `\n\n— Mensagem de ${senderName} via Filitech ERP`;
+  const availableForBody = MAX_SMS_LENGTH - footer.length;
+  const truncatedBody = availableForBody > 0 && rawBody.length > availableForBody ? `${rawBody.slice(0, availableForBody - 1)}…` : rawBody;
+  return `${truncatedBody}${footer}`;
+}
+
 export async function sendSmsText(tenantId: string, toE164Phone: string, body: string): Promise<SendSmsResult> {
   const credential = await prisma.integrationCredential.findUnique({
     where: { tenantId_provider_environment: { tenantId, provider: "SMS_ZENVIA", environment: "PRODUCTION" } },
@@ -50,7 +66,7 @@ export async function sendSmsText(tenantId: string, toE164Phone: string, body: s
   }
   const apiToken = decrypted.apiToken;
   const from = decrypted.from;
-  const text = body.length > MAX_SMS_LENGTH ? `${body.slice(0, MAX_SMS_LENGTH - 1)}…` : body;
+  const text = await withSenderAttribution(tenantId, body);
 
   try {
     const response = await withCircuitBreaker(SMS_BREAKER, () =>

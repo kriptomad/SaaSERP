@@ -57,6 +57,11 @@ export async function expireStalePendingCheckoutsProcessor(_job: Job): Promise<{
 export function startExpireStalePendingCheckoutsWorker(): Worker {
   return new Worker(QUEUE_NAMES.EXPIRE_STALE_PENDING_CHECKOUTS, expireStalePendingCheckoutsProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job diário
+    // único cujo processor já varre TODAS as Subscription PENDING_CHECKOUT travadas
+    // num `for` sequencial dentro da mesma execução — nunca há concorrência real
+    // entre jobs desta fila. `concurrency: 1` explicitado (antes implícito).
+    concurrency: 1,
   });
 }
 

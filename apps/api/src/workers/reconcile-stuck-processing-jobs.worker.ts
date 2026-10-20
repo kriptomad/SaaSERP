@@ -123,6 +123,14 @@ export async function reconcileStuckProcessingJobsProcessor(_job: Job): Promise<
 export function startReconcileStuckProcessingJobsWorker(): Worker {
   return new Worker(QUEUE_NAMES.RECONCILE_STUCK_PROCESSING_JOBS, reconcileStuckProcessingJobsProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job a cada 15
+    // minutos cujo processor já varre, sequencialmente dentro da mesma execução, até
+    // 200 registros por tipo (DataImportJob/TenantDataExportJob/ReportExportJob) de
+    // QUALQUER tenant — nunca há dois jobs desta fila concorrentes. `concurrency: 1`
+    // explicitado (antes implícito) para nunca permitir duas varreduras sobrepostas
+    // marcando o mesmo registro como FAILED em paralelo (geraria dois
+    // WorkerJobFailure duplicados para o mesmo evento).
+    concurrency: 1,
   });
 }
 

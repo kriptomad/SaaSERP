@@ -101,6 +101,13 @@ export async function personalInvestmentQuotesProcessor(_job: Job): Promise<{ up
 export function startPersonalInvestmentQuotesWorker(): Worker {
   return new Worker(QUEUE_NAMES.PERSONAL_INVESTMENT_QUOTES, personalInvestmentQuotesProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job diário
+    // único cujo processor já percorre todos os lotes de tickers e investimentos
+    // sequencialmente dentro da mesma execução (o paralelismo real aqui já existe
+    // dentro do próprio job, via `chunk`/lotes de até 10 tickers por requisição à
+    // brapi.dev) — nunca há dois jobs desta fila concorrentes para `concurrency`
+    // paralelizar entre si. `concurrency: 1` explicitado (antes implícito).
+    concurrency: 1,
   });
 }
 

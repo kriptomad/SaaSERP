@@ -19,6 +19,7 @@ import {
 } from "./dunning.service";
 import { invalidateTenantModuleCache } from "../../middlewares/gatekeeper.middleware";
 import { createModuleLogger } from "../../lib/logger";
+import { markWebhookEventProcessed, wasWebhookEventAlreadyProcessed } from "../../lib/webhook-replay-guard";
 
 const log = createModuleLogger("billing-webhooks");
 
@@ -440,6 +441,20 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
     payment,
   } = req.body as { event: string; payment?: { subscription?: string; id: string; externalReference?: string; value?: number; nextDueDate?: string } };
 
+  // CORREÇÃO DE AUDITORIA (fa-w5-sec-asaas-unsigned-body): o Asaas identifica cada
+  // evento de forma única pela combinação `event` (tipo) + `payment.id` (cobrança
+  // afetada) — não existe um `payment.id` genérico reaproveitado entre eventos
+  // distintos, então esta combinação serve como chave de deduplicação. Checagem de
+  // replay ANTES de qualquer consulta ao banco (defesa em profundidade sobre a
+  // máquina de estados `BillingEvent` já existente abaixo, que continua sendo a
+  // garantia real de idempotência de negócio) — um reenvio do mesmo evento (retry
+  // legítimo do Asaas, ou replay manual de alguém de posse do token estático) é
+  // apenas reconhecido com 200, sem tocar no banco.
+  const asaasReplayGuardKey = payment?.id ? `asaas-webhook:${eventType}:${payment.id}` : null;
+  if (asaasReplayGuardKey && (await wasWebhookEventAlreadyProcessed(asaasReplayGuardKey))) {
+    return res.json({ received: true, duplicate: true });
+  }
+
   if (!payment?.subscription) {
     // Sem referência de assinatura: pode ser uma cobrança avulsa de Boleto/Pix emitida
     // pelo lojista a um cliente dele (PaymentCharge, Capítulo 9), não billing SaaS.
@@ -469,6 +484,7 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
         });
       }
     }
+    if (asaasReplayGuardKey) await markWebhookEventProcessed(asaasReplayGuardKey);
     return res.json({ received: true, ignored: "no-subscription-reference" });
   }
 
@@ -497,6 +513,7 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
           return res.json({ received: true, ignored: "unknown-pending-subscription" });
         }
         await markBillingEventSucceeded("asaas", `${eventType}:${payment.id}`);
+        if (asaasReplayGuardKey) await markWebhookEventProcessed(asaasReplayGuardKey);
       } catch (err) {
         await markBillingEventFailed("asaas", `${eventType}:${payment.id}`);
         return webhookProcessingFailedResponse(res, err, { provider: "asaas", eventType, paymentId: payment.id });
@@ -541,6 +558,7 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
         break;
     }
     await markBillingEventSucceeded("asaas", `${eventType}:${payment.id}`);
+    if (asaasReplayGuardKey) await markWebhookEventProcessed(asaasReplayGuardKey);
   } catch (err) {
     await markBillingEventFailed("asaas", `${eventType}:${payment.id}`);
     return webhookProcessingFailedResponse(res, err, { provider: "asaas", eventType, paymentId: payment.id });

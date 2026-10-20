@@ -81,6 +81,15 @@ interface TefSessionState {
   userId: string;
   cashRegisterId: string;
   saleId: string;
+  // CORREÇÃO DE AUDITORIA (fa-w5-hw-tef-payment-record-gap): o valor/forma de
+  // pagamento e o NSU/código de autorização da adquirente precisam sobreviver do
+  // `start`/`continue` (quando a aprovação de fato acontece) até o `confirm` — sem
+  // isso o endpoint de confirmação não tinha como criar o `Payment` real vinculado
+  // à venda, só limpar o cache do Redis (nenhum registro durável da cobrança).
+  amountCents: number;
+  transactionType: "CREDIT" | "DEBIT";
+  nsu: string | null;
+  authorizationCode: string | null;
 }
 
 async function saveTefSession(sessionId: string, state: TefSessionState): Promise<void> {
@@ -97,7 +106,11 @@ async function loadTefSession(sessionId: string): Promise<TefSessionState | null
       typeof parsed.tenantId === "string" &&
       typeof parsed.userId === "string" &&
       typeof parsed.cashRegisterId === "string" &&
-      typeof parsed.saleId === "string"
+      typeof parsed.saleId === "string" &&
+      typeof parsed.amountCents === "number" &&
+      (parsed.transactionType === "CREDIT" || parsed.transactionType === "DEBIT") &&
+      (parsed.nsu === null || typeof parsed.nsu === "string") &&
+      (parsed.authorizationCode === null || typeof parsed.authorizationCode === "string")
     ) {
       return parsed as TefSessionState;
     }
@@ -199,6 +212,33 @@ tefRouter.post("/hardware/tef/transactions", requireAuth, async (req: Request, r
     return res.status(409).json({ success: false, data: null, error: { code: "CASH_REGISTER_NOT_OPEN", message: "O caixa informado não está aberto neste tenant." } });
   }
 
+  // CORREÇÃO DE AUDITORIA (fa-w5-hw-tef-client-controlled-amount): `amountCents`
+  // antes só era validado como inteiro positivo pelo `startSchema` (zod) — nunca
+  // cruzado contra o valor real da venda, então um client comprometido/adulterado
+  // podia mandar QUALQUER valor para a maquininha (inclusive menor que o total
+  // devido, ou maior, abrindo espaço para cobrança indevida do cliente sem
+  // lastro no saldo da venda). O client continua enviando `amountCents` só como
+  // valor de conveniência/exibição — o servidor é sempre a fonte da verdade:
+  // calcula aqui o saldo em aberto real (total da venda menos pagamentos já
+  // CONFIRMADOS) e rejeita se o valor pedido ultrapassar esse saldo.
+  const confirmedPayments = await prisma.payment.aggregate({
+    where: { tenantId, saleId: sale.id, status: "CONFIRMED" },
+    _sum: { amount: true },
+  });
+  const totalCents = Math.round(Number(sale.totalAmount) * 100);
+  const paidCents = Math.round(Number(confirmedPayments._sum.amount ?? 0) * 100);
+  const allowedCents = totalCents - paidCents;
+  if (parsed.data.amountCents > allowedCents) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: {
+        code: "AMOUNT_EXCEEDS_BALANCE",
+        message: `Valor solicitado (R$ ${(parsed.data.amountCents / 100).toFixed(2)}) excede o saldo em aberto da venda (R$ ${(Math.max(0, allowedCents) / 100).toFixed(2)}). A cobrança na maquininha nunca pode ultrapassar o saldo real registrado no servidor.`,
+      },
+    });
+  }
+
   try {
     const provider = await resolveTefProvider(tenantId);
     const result = await provider.startTransaction({
@@ -208,7 +248,16 @@ tefRouter.post("/hardware/tef/transactions", requireAuth, async (req: Request, r
       installments: parsed.data.installments,
     });
     const sessionId = result.sessionId || randomUUID();
-    await saveTefSession(sessionId, { tenantId, userId, cashRegisterId: cashRegister.id, saleId: sale.id });
+    await saveTefSession(sessionId, {
+      tenantId,
+      userId,
+      cashRegisterId: cashRegister.id,
+      saleId: sale.id,
+      amountCents: parsed.data.amountCents,
+      transactionType: parsed.data.transactionType,
+      nsu: result.nsu,
+      authorizationCode: result.authorizationCode,
+    });
     return res.status(201).json({ success: true, data: { ...result, sessionId }, error: null });
   } catch (error) {
     return handleTefError(res, error);
@@ -234,11 +283,18 @@ tefRouter.post("/hardware/tef/transactions/:sessionId/continue", requireAuth, as
     return res.status(404).json({ success: false, data: null, error: { code: "TEF_SESSION_NOT_FOUND", message: bindingError } });
   }
   try {
-    // Renova o TTL a cada interação — a janela de 180s é por passo, não para a
-    // transação inteira (que pode ter N idas e vindas de `continue`).
-    await saveTefSession(sessionId, session);
     const provider = await resolveTefProvider(tenantId);
     const result = await provider.continueTransaction(sessionId, parsed.data.fieldId, parsed.data.value);
+    // Renova o TTL a cada interação — a janela de 180s é por passo, não para a
+    // transação inteira (que pode ter N idas e vindas de `continue`) — e persiste o
+    // NSU/código de autorização assim que a adquirente os devolver (geralmente só no
+    // passo em que a transação é de fato aprovada), para que `confirm` tenha esses
+    // dados disponíveis ao criar o `Payment` (ver fa-w5-hw-tef-payment-record-gap).
+    await saveTefSession(sessionId, {
+      ...session,
+      nsu: result.nsu ?? session.nsu,
+      authorizationCode: result.authorizationCode ?? session.authorizationCode,
+    });
     return res.json({ success: true, data: result, error: null });
   } catch (error) {
     return handleTefError(res, error);
@@ -288,6 +344,28 @@ tefRouter.post("/hardware/tef/transactions/:sessionId/confirm", requireAuth, asy
     for (let attempt = 0; attempt <= delaysMs.length; attempt += 1) {
       try {
         await provider.confirmTransaction(sessionId);
+        // CORREÇÃO DE AUDITORIA (fa-w5-hw-tef-payment-record-gap): até aqui, uma
+        // transação TEF aprovada só deixava rastro no cache de idempotência do
+        // Redis (TTL de 1h) — nenhum registro DURÁVEL no banco vinculava a cobrança
+        // aprovada na adquirente a um `Payment` real da venda. Se o Redis fosse
+        // perdido (restart sem persistência, TTL expirado, falha de infra), o
+        // dinheiro cobrado do cliente não tinha NENHUM lastro contábil no ERP.
+        // `upsert` por `idempotencyKey` único (`tef:{sessionId}`) garante que, mesmo
+        // com retries desta mesma confirmação, no máximo um `Payment` é criado.
+        await prisma.payment.upsert({
+          where: { tenantId_idempotencyKey: { tenantId, idempotencyKey: `tef:${sessionId}` } },
+          update: {},
+          create: {
+            tenantId,
+            saleId: session.saleId,
+            method: session.transactionType === "CREDIT" ? "CREDIT_CARD" : "DEBIT_CARD",
+            status: "CONFIRMED",
+            amount: session.amountCents / 100,
+            tefAuthorizationCode: session.authorizationCode,
+            externalProviderId: session.nsu,
+            idempotencyKey: `tef:${sessionId}`,
+          },
+        });
         await redis.set(tefConfirmationKey(sessionId), JSON.stringify({ tenantId, confirmedAt: new Date().toISOString() }), "EX", TEF_CONFIRMATION_IDEMPOTENCY_TTL_SECONDS);
         await clearTefSession(sessionId);
         return res.json({ success: true, data: { sessionId, confirmed: true }, error: null });

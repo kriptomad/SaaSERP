@@ -27,6 +27,7 @@ import { decryptEnvelope } from "../../lib/envelope-crypto";
 import { calculateTax } from "../fiscal/tax-engine.service";
 import { resolveTaxReformPhase } from "../fiscal/tax-reform-phase.service";
 import { enforceRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
+import { markWebhookEventProcessed, wasWebhookEventAlreadyProcessed } from "../../lib/webhook-replay-guard";
 
 export const ifoodWebhookRouter = Router();
 
@@ -132,6 +133,21 @@ ifoodWebhookRouter.post("/webhooks/ifood/:tenantId", async (req: Request, res: R
   const parsed = ifoodOrderWebhookSchema.safeParse(payload);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+  }
+
+  // CORREÇÃO DE AUDITORIA (fa-w5-sec-ifood-replay): a verificação HMAC acima já é
+  // correta e autêntica (comprova que a requisição veio do iFood), mas não impede
+  // reentregas/replays do MESMO evento de disparar o processamento caro (transação
+  // serializable com múltiplas consultas/escritas) de novo — a idempotência via
+  // `@@unique([tenantId, idempotencyKey])` em `Sale` só é verificada DEPOIS de todo
+  // esse trabalho já ter sido feito. `orderId` é o único identificador de evento
+  // exposto por este payload normalizado (não há um `id` de webhook nem um `code`
+  // de evento separados aqui — ver schema acima); curto-circuita com 200 ANTES da
+  // transação sempre que o pedido já foi processado com sucesso recentemente, para
+  // que o iFood não fique reenviando nem o custo de processamento seja pago de novo.
+  const ifoodReplayGuardKey = `ifood-webhook:${tenantId}:${parsed.data.orderId}`;
+  if (await wasWebhookEventAlreadyProcessed(ifoodReplayGuardKey)) {
+    return res.json({ success: true, data: { duplicate: true }, error: null });
   }
 
   // Capítulo 6.6 — "o fechamento de caixa consolida os três canais": uma venda
@@ -256,6 +272,7 @@ ifoodWebhookRouter.post("/webhooks/ifood/:tenantId", async (req: Request, res: R
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
+    await markWebhookEventProcessed(ifoodReplayGuardKey);
     return res.status(201).json({ success: true, data: result, error: null });
   } catch (err: any) {
     // Idempotência: reentrega do mesmo pedido (orderId já processado) nunca deve
@@ -263,6 +280,7 @@ ifoodWebhookRouter.post("/webhooks/ifood/:tenantId", async (req: Request, res: R
     // isso estruturalmente; aqui só traduzimos a violação em uma resposta 200
     // "duplicate" (webhooks de provedor tratam qualquer erro como motivo de retry).
     if (err?.code === "P2002") {
+      await markWebhookEventProcessed(ifoodReplayGuardKey);
       return res.json({ success: true, data: { duplicate: true }, error: null });
     }
     if (typeof err?.message === "string" && err.message.startsWith("UNKNOWN_SKU:")) {

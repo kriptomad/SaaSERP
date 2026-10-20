@@ -44,7 +44,18 @@ const planSchema = z.object({
 healthInsurancePlansRouter.get("/health-insurance-plans", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const plans = await prisma.healthInsurancePlan.findMany({ where: { tenantId }, orderBy: { name: "asc" } });
+  // CORREÇÃO DE AUDITORIA (fa-w5-perf-unbounded-health-insurance-plans): antes,
+  // `findMany` sem `take` devolvia TODOS os convênios cadastrados do tenant. Tabela
+  // de dado de referência (pequena na prática — um tenant tem no máximo algumas
+  // dezenas de convênios distintos), então um `take: 200` simples já cobre
+  // qualquer tenant real sem paginação por cursor; `?search=` opcional por nome
+  // cobre o caso raro de um tenant próximo do limite.
+  const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+  const plans = await prisma.healthInsurancePlan.findMany({
+    where: { tenantId, ...(search ? { name: { contains: search, mode: "insensitive" } } : {}) },
+    orderBy: { name: "asc" },
+    take: 200,
+  });
   return res.json({ success: true, data: plans, error: null });
 });
 

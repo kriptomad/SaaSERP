@@ -22,6 +22,12 @@ export function startTefTransaction(params: {
   amountCents: number;
   transactionType: "CREDIT" | "DEBIT";
   saleReference: string;
+  // CORREÇÃO DE AUDITORIA (fa-w5-hw-tef-route-contract-mismatch): o backend
+  // (tef.routes.ts) exige `cashRegisterId` desde a correção que vincula a sessão
+  // TEF ao caixa físico que está cobrando — sem este campo no tipo da requisição,
+  // o PDV nunca enviava o caixa aberto e TODA cobrança de cartão falhava com
+  // VALIDATION_ERROR (400) antes mesmo de chegar à maquininha.
+  cashRegisterId: string;
   installments?: number;
 }): Promise<TefSessionResult> {
   return api.post("/hardware/tef/transactions", params);

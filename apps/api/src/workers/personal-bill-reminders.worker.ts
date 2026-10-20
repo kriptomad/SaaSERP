@@ -97,6 +97,11 @@ export async function personalBillRemindersProcessor(_job: Job): Promise<{ reope
 export function startPersonalBillRemindersWorker(): Worker {
   return new Worker(QUEUE_NAMES.PERSONAL_BILL_REMINDERS, personalBillRemindersProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job diário
+    // único cujo processor já itera TODAS as PersonalBill do sistema inteiro num
+    // `for` sequencial na mesma execução — nunca há dois jobs desta fila
+    // concorrentes. `concurrency: 1` explicitado (antes implícito).
+    concurrency: 1,
   });
 }
 

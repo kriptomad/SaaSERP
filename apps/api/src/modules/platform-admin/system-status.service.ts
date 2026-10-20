@@ -8,6 +8,7 @@
 // a clientes) para a página de status pública (`GET /status`).
 import { prismaUnscoped as prisma } from "@filitech/db";
 import { redis } from "../../lib/redis";
+import { getPlatformSecret } from "../../lib/platform-secrets";
 import {
   QUEUE_NAMES,
   whatsappNotificationsQueue,
@@ -115,6 +116,13 @@ export interface QueueHealth {
   delayed: number;
 }
 
+export interface IntegrationReadiness {
+  name: string;
+  configured: boolean;
+  /** Fontes presentes (painel admin / env var) que compõem a leitura "configured" acima. */
+  detail: string;
+}
+
 export interface SystemStatusSnapshot {
   overallStatus: ComponentStatus;
   checkedAt: string;
@@ -123,6 +131,7 @@ export interface SystemStatusSnapshot {
   queues: QueueHealth[];
   processUptimeSeconds: number;
   nodeVersion: string;
+  integrations: IntegrationReadiness[];
 }
 
 // Limiar simples e honesto: uma fila com itens falhados acumulados é "degraded"
@@ -179,8 +188,82 @@ function worstStatus(statuses: ComponentStatus[]): ComponentStatus {
   return "operational";
 }
 
+// fa-w5-boot-optional-integrations-lazy-failure: expõe no painel interno (nunca na
+// página pública de status) se cada integração opcional está de fato pronta para
+// uso — hoje a única forma de descobrir isso era deixar um usuário real bater numa
+// rota que depende da integração e observar o erro. Usa `getPlatformSecret` (não
+// `process.env` direto) porque Stripe/Asaas/Pluggy/R2 podem estar configurados pelo
+// painel admin (`PlatformSecret`, cifrado no banco) em vez de variável de ambiente —
+// mesma fonte de verdade que o restante do código de billing/integrações usa.
+async function checkIntegrationReadiness(): Promise<IntegrationReadiness[]> {
+  const [
+    stripeSecretKey,
+    stripeWebhookSecret,
+    asaasApiKey,
+    asaasWebhookToken,
+    pluggyClientId,
+    pluggyClientSecret,
+    r2AccountId,
+    r2AccessKeyId,
+    r2SecretAccessKey,
+    r2BucketName,
+  ] = await Promise.all([
+    getPlatformSecret("STRIPE_SECRET_KEY"),
+    getPlatformSecret("STRIPE_WEBHOOK_SECRET"),
+    getPlatformSecret("ASAAS_API_KEY"),
+    getPlatformSecret("ASAAS_WEBHOOK_TOKEN"),
+    getPlatformSecret("PLUGGY_CLIENT_ID"),
+    getPlatformSecret("PLUGGY_CLIENT_SECRET"),
+    getPlatformSecret("R2_ACCOUNT_ID"),
+    getPlatformSecret("R2_ACCESS_KEY_ID"),
+    getPlatformSecret("R2_SECRET_ACCESS_KEY"),
+    getPlatformSecret("R2_BUCKET_NAME"),
+  ]);
+
+  const stripeConfigured = Boolean(stripeSecretKey) && Boolean(stripeWebhookSecret);
+  const asaasConfigured = Boolean(asaasApiKey) && Boolean(asaasWebhookToken);
+  const pluggyConfigured = Boolean(pluggyClientId) && Boolean(pluggyClientSecret);
+  const r2Configured = Boolean(r2AccountId) && Boolean(r2AccessKeyId) && Boolean(r2SecretAccessKey) && Boolean(r2BucketName);
+
+  return [
+    {
+      name: "Stripe",
+      configured: stripeConfigured,
+      detail: stripeConfigured
+        ? "Secret key + webhook secret configurados."
+        : "Incompleto — falta secret key e/ou webhook secret (checkout Stripe indisponível).",
+    },
+    {
+      name: "Asaas",
+      configured: asaasConfigured,
+      detail: asaasConfigured
+        ? "API key + webhook token configurados."
+        : "Incompleto — falta API key e/ou webhook token (checkout Asaas indisponível).",
+    },
+    {
+      name: "Open Finance (Pluggy)",
+      configured: pluggyConfigured,
+      detail: pluggyConfigured
+        ? "Client ID + client secret configurados."
+        : "Não configurado — sincronização bancária automática indisponível.",
+    },
+    {
+      name: "Object Storage (Cloudflare R2)",
+      configured: r2Configured,
+      detail: r2Configured
+        ? "Credenciais + bucket configurados."
+        : "Não configurado — upload de arquivos (avatares, fotos de O.S., XMLs fiscais) indisponível.",
+    },
+  ];
+}
+
 export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
-  const [database, redisHealth, queues] = await Promise.all([checkDatabase(), checkRedis(), checkQueues()]);
+  const [database, redisHealth, queues, integrations] = await Promise.all([
+    checkDatabase(),
+    checkRedis(),
+    checkQueues(),
+    checkIntegrationReadiness(),
+  ]);
 
   return {
     overallStatus: worstStatus([database.status, redisHealth.status, ...queues.map((q) => q.status)]),
@@ -190,6 +273,7 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
     queues,
     processUptimeSeconds: Math.round(process.uptime()),
     nodeVersion: process.version,
+    integrations,
   };
 }
 

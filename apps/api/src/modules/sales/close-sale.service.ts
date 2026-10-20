@@ -300,8 +300,76 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
       // vinculado depois, mesmo padrão de `opticalLabOrders`/`returnableContainerEntries`.
       const soldSerialIds: string[] = [];
 
+      // CORREÇÃO DE AUDITORIA (fa-w5-perf-pdv-item-roundtrips): antes, o loop abaixo
+      // disparava de 3 a 5 queries sequenciais POR ITEM (produto, variante, receita/
+      // recipe, serial, receita óptica) — com o cart aberto dentro da transação
+      // Serializable, um carrinho de 30 itens segurava o lock de estoque por 100+
+      // round-trips sequenciais ao banco. Pré-busca em lote (ainda DENTRO da mesma
+      // transação, portanto com a MESMA consistência de leitura Serializable de
+      // antes) de tudo que é referenciável por id/chave conhecida ANTES do loop,
+      // materializado em Maps — o loop abaixo passa a resolver cada entidade por
+      // lookup em memória (O(1)) em vez de uma query nova. Toda semântica de
+      // "não encontrado" é preservada abaixo, item a item, incluindo o fallback que
+      // replica EXATAMENTE o erro do antigo `findFirstOrThrow` do Prisma quando o
+      // produto realmente não existe (caminho raro, fora do hot path).
+      const uniqueProductIds = Array.from(new Set(input.items.map((item) => item.productId)));
+      const products = uniqueProductIds.length > 0
+        ? await tx.product.findMany({ where: { id: { in: uniqueProductIds }, tenantId: input.tenantId } })
+        : [];
+      const productById = new Map(products.map((p) => [p.id, p]));
+
+      const uniqueVariantIds = Array.from(
+        new Set(input.items.map((item) => item.productVariantId).filter((id): id is string => Boolean(id))),
+      );
+      const variants = uniqueVariantIds.length > 0
+        ? await tx.productVariant.findMany({ where: { id: { in: uniqueVariantIds }, tenantId: input.tenantId } })
+        : [];
+      const variantById = new Map(variants.map((v) => [v.id, v]));
+
+      // Uma linha por produto no máximo (`Recipe.productId` é único) — cobre tanto o
+      // uso de kit (`isKitComposition`, precisa de `items`) quanto a checagem de
+      // produção própria (`isOwnProduction`, só precisa de existência) mais abaixo,
+      // com o mesmo Map (o `include: { items: true }` é um superset do antigo
+      // `select: { id: true }` usado na segunda ocorrência — nunca uma divergência de
+      // dado, só um fetch levemente mais largo e já em lote).
+      const recipes = uniqueProductIds.length > 0
+        ? await tx.recipe.findMany({ where: { productId: { in: uniqueProductIds }, tenantId: input.tenantId }, include: { items: true } })
+        : [];
+      const recipeByProductId = new Map(recipes.map((r) => [r.productId, r]));
+
+      const uniqueSerialNumbers = Array.from(
+        new Set(input.items.map((item) => item.serialNumber).filter((s): s is string => Boolean(s))),
+      );
+      const serials = uniqueSerialNumbers.length > 0
+        ? await tx.productSerial.findMany({ where: { tenantId: input.tenantId, serialNumber: { in: uniqueSerialNumbers } } })
+        : [];
+      const serialByNumber = new Map(serials.map((s) => [s.serialNumber, s]));
+      // Guarda, em memória, quais serials já foram reclamados por um item ANTERIOR
+      // do mesmo carrinho (dentro deste mesmo loop) — replica o comportamento antigo
+      // de "query fresca por item", que detectaria o status já SOLD de um serial
+      // duplicado no mesmo carrinho (erro amigável) antes mesmo do `updateMany`
+      // atômico de claim (que também protegeria, mas com uma mensagem de erro
+      // diferente/menos específica).
+      const claimedSerialIdsInThisSale = new Set<string>();
+
+      const uniqueOpticalPrescriptionIds = Array.from(
+        new Set(input.items.map((item) => item.opticalPrescriptionId).filter((id): id is string => Boolean(id))),
+      );
+      const opticalPrescriptions = uniqueOpticalPrescriptionIds.length > 0 && input.clientId
+        ? await tx.opticalPrescription.findMany({
+            where: { id: { in: uniqueOpticalPrescriptionIds }, tenantId: input.tenantId, clientId: input.clientId },
+          })
+        : [];
+      const opticalPrescriptionById = new Map(opticalPrescriptions.map((p) => [p.id, p]));
+
       for (const item of input.items) {
-        const product = await tx.product.findFirstOrThrow({ where: { id: item.productId, tenantId: input.tenantId } });
+        // Caminho rápido: produto já pré-buscado em lote acima. Caminho raro (miss no
+        // Map — productId realmente inválido/inexistente neste tenant): cai de volta
+        // para o `findFirstOrThrow` original, que lança o MESMO erro Prisma
+        // (PrismaClientKnownRequestError P2025) que o código lançava antes desta
+        // otimização, preservando o comportamento de erro byte a byte.
+        const product = productById.get(item.productId)
+          ?? (await tx.product.findFirstOrThrow({ where: { id: item.productId, tenantId: input.tenantId } }));
 
         // CORREÇÃO DE AUDITORIA (fa-sale-quantity-fraction-unvalidated): revalida a
         // quantidade do item contra a regra de fracionamento/escala do produto lido
@@ -318,11 +386,9 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
         // (`quantity >= wholesaleMinQty` + `wholesalePrice`), 4) Preço Unidade.
         let expectedUnitPrice: Prisma.Decimal;
         if (item.productVariantId) {
-          const variantForPricing = await tx.productVariant.findFirst({
-            where: { id: item.productVariantId, tenantId: input.tenantId, productId: product.id },
-            select: { priceOverride: true },
-          });
-          expectedUnitPrice = variantForPricing?.priceOverride ?? product.unitPrice;
+          const variantForPricing = variantById.get(item.productVariantId);
+          const priceOverride = variantForPricing && variantForPricing.productId === product.id ? variantForPricing.priceOverride : null;
+          expectedUnitPrice = priceOverride ?? product.unitPrice;
         } else if (saleClient?.isReseller && product.resalePrice !== null) {
           expectedUnitPrice = product.resalePrice;
         } else if (product.wholesaleMinQty !== null && product.wholesalePrice !== null && item.quantity >= product.wholesaleMinQty) {
@@ -361,9 +427,7 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
           if (!item.opticalPrescriptionId) {
             throw new OpticalPrescriptionRequiredError(`Venda de lente de grau (${product.name}) exige a receita óptica usada (opticalPrescriptionId).`);
           }
-          const prescription = await tx.opticalPrescription.findFirst({
-            where: { id: item.opticalPrescriptionId, tenantId: input.tenantId, clientId: input.clientId },
-          });
+          const prescription = opticalPrescriptionById.get(item.opticalPrescriptionId);
           if (!prescription) {
             throw new OpticalPrescriptionRequiredError(`Receita óptica ${item.opticalPrescriptionId} não encontrada para este cliente.`);
           }
@@ -406,7 +470,7 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
         // simultânea do último componente em dois PDVs (mesmo padrão já usado para
         // variantes, acima/abaixo deste bloco).
         if (product.isKitComposition) {
-          const recipe = await tx.recipe.findFirst({ where: { productId: product.id, tenantId: input.tenantId }, include: { items: true } });
+          const recipe = recipeByProductId.get(product.id);
           if (!recipe || recipe.items.length === 0) {
             throw new KitCompositionMissingError(
               `Produto kit ${product.name} está marcado como isKitComposition mas não tem ficha técnica (Recipe/RecipeItem) cadastrada.`,
@@ -447,13 +511,11 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
           if (!item.serialNumber) {
             throw new SerialNotFoundError(`Venda do produto ${product.name} exige a leitura do número de série/IMEI.`);
           }
-          const serial = await tx.productSerial.findUnique({
-            where: { tenantId_serialNumber: { tenantId: input.tenantId, serialNumber: item.serialNumber } },
-          });
+          const serial = serialByNumber.get(item.serialNumber);
           if (!serial || serial.productId !== product.id) {
             throw new SerialNotFoundError(`Serial ${item.serialNumber} não encontrado no estoque deste produto.`);
           }
-          if (serial.status === "SOLD") {
+          if (serial.status === "SOLD" || claimedSerialIdsInThisSale.has(serial.id)) {
             throw new SerialNotReadyForSaleError(`Serial ${item.serialNumber} já consta como vendido.`);
           }
           // Bloqueia explicitamente a venda de uma unidade cujo IMEI ainda não foi
@@ -490,6 +552,7 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
           if (claimedProductStock.count === 0) {
             throw new InsufficientStockError(`Estoque insuficiente do produto ${product.name} para concluir a venda.`);
           }
+          claimedSerialIdsInThisSale.add(serial.id);
           soldSerialIds.push(serial.id);
         } else {
           // NONE: baixa direta, sem necessidade de lock por lote/série.
@@ -503,8 +566,8 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
             if (!item.productVariantId) {
               throw new VariantRequiredError(`Venda do produto ${product.name} exige a seleção da variante (cor/tamanho).`);
             }
-            const variant = await tx.productVariant.findFirst({ where: { id: item.productVariantId, tenantId: input.tenantId, productId: product.id } });
-            if (!variant) {
+            const variant = variantById.get(item.productVariantId);
+            if (!variant || variant.productId !== product.id) {
               throw new VariantNotFoundError(`Variante ${item.productVariantId} não encontrada para o produto ${product.name}.`);
             }
             // Claim atômico (mesmo padrão do ajuste de estoque de variante): nunca um
@@ -560,7 +623,7 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
         //    dinâmico (21.13) — item de produto, nunca de mão de obra de O.S.
         const originUf = tenant.uf ?? product.originUf ?? "SP";
         const destinationUf = saleClient?.uf ?? originUf;
-        const productRecipe = await tx.recipe.findUnique({ where: { productId: product.id }, select: { id: true } });
+        const productRecipe = recipeByProductId.get(product.id) ?? null;
         const taxResult = await calculateFullTax(tx, {
           tenantId: input.tenantId,
           ncm: product.ncm ?? "00000000",
@@ -732,30 +795,52 @@ async function executeCloseSaleTransaction(prisma: TenantScopedPrismaClient, inp
         await tx.productSerial.updateMany({ where: { id: { in: soldSerialIds } }, data: { saleId: sale.id } });
       }
 
-      // Itens criados individualmente (não createMany) propositalmente: precisamos do
-      // `id` real de cada SaleItem assim que criado para gravar, ainda dentro desta
-      // mesma transação, o `PrescriptionRecord` correspondente (Capítulo 4.5) — sem
-      // isso a trava regulatória acima não teria como persistir a receita retida
-      // vinculada ao item de venda (`PrescriptionRecord.saleItemId` é FK obrigatória
-      // e @unique, exigindo um SaleItem já existente). `saleItemsData` e
-      // `input.items` mantêm o mesmo índice: o loop anterior faz exatamente um
-      // `push` por item de `input.items`, nunca pulando nenhum.
+      // CORREÇÃO DE AUDITORIA (fa-w5-perf-pdv-item-inserts): antes, TODO SaleItem era
+      // criado individualmente (um INSERT por item, nunca em lote) só para poder
+      // encadear, em seguida, o `PrescriptionRecord` de itens com retenção de receita
+      // (Capítulo 4.5) — que de fato PRECISA do `id` real do SaleItem recém-criado
+      // (`PrescriptionRecord.saleItemId` é FK obrigatória e @unique). Só essa minoria
+      // de itens (produto de retenção obrigatória/substância controlada) genuinamente
+      // precisa do id de volta imediatamente nesta mesma transação — a maioria dos
+      // itens de um carrinho comum (sem receita) não depende de nada subsequente e é
+      // inserida de uma vez via `createMany`. `saleItemsData` e `input.items` mantêm o
+      // mesmo índice: o loop anterior faz exatamente um `push` por item de
+      // `input.items`, nunca pulando nenhum.
+      const itemIndexesNeedingPrescription: number[] = [];
+      const saleItemsWithoutPrescription: Prisma.SaleItemCreateManySaleInput[] = [];
       for (let i = 0; i < saleItemsData.length; i++) {
-        const createdItem = await tx.saleItem.create({ data: { ...saleItemsData[i], saleId: sale.id } });
-        const prescriptionData = input.items[i]?.prescriptionData;
-        if (prescriptionData) {
-          await tx.prescriptionRecord.create({
-            data: {
-              tenantId: input.tenantId,
-              saleItemId: createdItem.id,
-              prescriptionType: prescriptionData.prescriptionType,
-              patientDocument: prescriptionData.patientDocument,
-              electronicPrescriptionNumber: prescriptionData.electronicPrescriptionNumber ?? null,
-              retainedDocumentStorageKey: prescriptionData.retainedDocumentStorageKey ?? null,
-              validatedByUserId: input.cashierId,
-            },
+        if (input.items[i]?.prescriptionData) {
+          itemIndexesNeedingPrescription.push(i);
+        } else {
+          saleItemsWithoutPrescription.push(saleItemsData[i]);
+        }
+      }
+
+      if (saleItemsWithoutPrescription.length > 0) {
+        await tx.saleItem.createMany({
+          data: saleItemsWithoutPrescription.map((data) => ({ ...data, saleId: sale.id })),
+        });
+      }
+
+      if (itemIndexesNeedingPrescription.length > 0) {
+        const prescriptionRecordsData: Prisma.PrescriptionRecordCreateManyInput[] = [];
+        for (const i of itemIndexesNeedingPrescription) {
+          const createdItem = await tx.saleItem.create({ data: { ...saleItemsData[i], saleId: sale.id } });
+          const prescriptionData = input.items[i]!.prescriptionData!;
+          prescriptionRecordsData.push({
+            tenantId: input.tenantId,
+            saleItemId: createdItem.id,
+            prescriptionType: prescriptionData.prescriptionType,
+            patientDocument: prescriptionData.patientDocument,
+            electronicPrescriptionNumber: prescriptionData.electronicPrescriptionNumber ?? null,
+            retainedDocumentStorageKey: prescriptionData.retainedDocumentStorageKey ?? null,
+            validatedByUserId: input.cashierId,
           });
         }
+        // PrescriptionRecord em si não precisa do id de volta em nenhum ponto
+        // subsequente desta transação — lote único mesmo quando há múltiplos itens
+        // com receita no mesmo carrinho (ex.: dois medicamentos controlados).
+        await tx.prescriptionRecord.createMany({ data: prescriptionRecordsData });
       }
 
       // Capítulo 4.1.1 — crédito automático de pontos de fidelidade (EARN), na MESMA

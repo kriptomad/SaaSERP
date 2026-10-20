@@ -33,7 +33,7 @@ notificationsRouter.get("/notifications", requireAuth, async (req: Request, res:
   const { tenantId, userId } = req.session!;
   const onlyUnread = req.query.unreadOnly === "true";
 
-  const [notifications, unreadCount] = await Promise.all([
+  const [notifications, ownUnreadCount, broadcastUnreadCount] = await Promise.all([
     prisma.notification.findMany({
       where: {
         tenantId,
@@ -43,10 +43,19 @@ notificationsRouter.get("/notifications", requireAuth, async (req: Request, res:
       orderBy: { createdAt: "desc" },
       take: 50,
     }),
-    prisma.notification.count({
-      where: { tenantId, OR: [{ userId }, { userId: null }], readAt: null },
-    }),
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-notification-count-scan): o antigo
+    // `count({ OR: [{userId}, {userId: null}] })` não alinha bem com o índice
+    // existente `@@index([tenantId, userId, readAt])` para o ramo `userId: null`
+    // (OR força o planner a considerar um bitmap/union em vez de um único scan de
+    // índice direto). Duas contagens separadas — cada uma uma igualdade simples de
+    // (tenantId, userId, readAt) — usam o índice composto já existente de forma
+    // direta, sem precisar de um índice novo; a soma em memória é equivalente ao
+    // `count(OR)` original (os dois conjuntos são disjuntos: userId = X vs. userId
+    // IS NULL nunca se sobrepõem).
+    prisma.notification.count({ where: { tenantId, userId, readAt: null } }),
+    prisma.notification.count({ where: { tenantId, userId: null, readAt: null } }),
   ]);
+  const unreadCount = ownUnreadCount + broadcastUnreadCount;
 
   return res.json({ success: true, data: { notifications, unreadCount }, error: null });
 });

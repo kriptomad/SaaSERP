@@ -78,7 +78,7 @@ describe("Autenticação/RBAC — token, permissão, tenant lockout e forjamento
       data: { tenantId: tenantB.tenant.id, userId: cashierUserId, permission: "crm:client:write", granted: false },
     });
 
-    cashierToken = signSessionToken({ userId: cashierUserId, tenantId: tenantB.tenant.id, role: "CASHIER" });
+    cashierToken = signSessionToken({ userId: cashierUserId, tenantId: tenantB.tenant.id, role: "CASHIER", tokenVersion: 0 });
   });
 
   afterAll(async () => {
@@ -92,14 +92,14 @@ describe("Autenticação/RBAC — token, permissão, tenant lockout e forjamento
   });
 
   it("token EXPIRADO rejeita com 401 (não derruba o servidor, apenas 'segue sem sessão')", async () => {
-    const expiredToken = signSessionToken({ userId: tenantA.user.id, tenantId: tenantA.tenant.id, role: "OWNER" }, "-1h");
+    const expiredToken = signSessionToken({ userId: tenantA.user.id, tenantId: tenantA.tenant.id, role: "OWNER", tokenVersion: 0 }, "-1h");
     const res = await request(app).get("/clients").set("Authorization", `Bearer ${expiredToken}`);
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe("UNAUTHENTICATED");
   });
 
   it("token ADULTERADO (assinatura corrompida) rejeita com 401", async () => {
-    const validToken = signSessionToken({ userId: tenantA.user.id, tenantId: tenantA.tenant.id, role: "OWNER" });
+    const validToken = signSessionToken({ userId: tenantA.user.id, tenantId: tenantA.tenant.id, role: "OWNER", tokenVersion: 0 });
     // Corrompe o último caractere da assinatura (terceiro segmento do JWT) — o
     // payload continua sintaticamente válido, só a verificação RS256 falha.
     const segments = validToken.split(".");
@@ -140,7 +140,7 @@ describe("Autenticação/RBAC — token, permissão, tenant lockout e forjamento
   it("tentativa de forjar tenantId no BODY da requisição é ignorada — usa sempre o tenantId do token assinado", async () => {
     // O usuário autenticado pertence ao Tenant B; tenta, no corpo da requisição,
     // "se passar" pelo Tenant A incluindo um campo tenantId arbitrário.
-    const ownerTokenB = signSessionToken({ userId: tenantB.user.id, tenantId: tenantB.tenant.id, role: "OWNER" });
+    const ownerTokenB = signSessionToken({ userId: tenantB.user.id, tenantId: tenantB.tenant.id, role: "OWNER", tokenVersion: 0 });
     const res = await request(app)
       .post("/clients")
       .set("Authorization", `Bearer ${ownerTokenB}`)
@@ -158,7 +158,7 @@ describe("Autenticação/RBAC — token, permissão, tenant lockout e forjamento
   });
 
   it("tentativa de forjar tenantId via QUERY STRING na listagem é ignorada — resultado continua escopado ao tenant do token", async () => {
-    const ownerTokenB = signSessionToken({ userId: tenantB.user.id, tenantId: tenantB.tenant.id, role: "OWNER" });
+    const ownerTokenB = signSessionToken({ userId: tenantB.user.id, tenantId: tenantB.tenant.id, role: "OWNER", tokenVersion: 0 });
     const res = await request(app)
       .get("/clients")
       .query({ tenantId: tenantA.tenant.id })

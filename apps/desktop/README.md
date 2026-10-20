@@ -135,7 +135,9 @@ assim que a rede volta.
 ## Empacotamento (.exe)
 
 `npm run package:win` roda, em sequência: `npm run build` (renderer Vite + main process
-`tsc`) → `npm run prepare:api-resources` → `electron-builder --win --publish=never`.
+`tsc`) → `npm run prepare:api-resources` → `node scripts/package-win.mjs` (wrapper que
+chama `electron-builder --win --publish <política>`, política decidida em tempo de
+build — ver seção "Assinatura de código e auto-update" abaixo).
 
 O passo `prepare:api-resources` (`scripts/prepare-api-resources.mjs`) é o que fecha o
 gap que antes era pendência (Rodada 4 do mega-audit): ele builda `apps/api` de verdade
@@ -190,9 +192,29 @@ app Electron. Detalhes linha-a-linha estão nos comentários `CORREÇÃO DE AUDI
   `127.0.0.1`; `0.0.0.0` continua disponível na tela de config de rede para quem
   precisa servir a LAN, agora com um aviso explícito sobre expor a porta sem TLS/sem
   firewall.
-- **Navegação/janelas**: `webSecurity: true` em ambas as janelas; `will-navigate` e
-  `setWindowOpenHandler` restringem navegação/popups a uma allowlist; downloads vão
-  para diálogo "Salvar como" em vez de navegar embutido.
+- **Navegação/janelas**: `webSecurity: true` em ambas as janelas; `sandbox: true` em
+  ambas (fa-w5-desktop-sandbox-disabled — os dois preloads só usam `contextBridge`/
+  `ipcRenderer`, 100% sandbox-compatível no Electron 33, nenhuma funcionalidade
+  perdida); `will-navigate` e `setWindowOpenHandler` restringem navegação/popups a uma
+  allowlist; downloads vão para diálogo "Salvar como" em vez de navegar embutido.
+- **CSP (fa-w5-desktop-csp-overbroad)**: a CSP de `index.html` (janela launcher) foi
+  restrita de `default-src 'self' 'unsafe-inline' data: http: https: ws:` (praticamente
+  qualquer origem/script inline) para diretivas explícitas (`script-src 'self'`,
+  `connect-src 'self'`, `object-src 'none'`, etc.) — esta janela nunca faz fetch/XHR
+  direto (toda chamada de rede passa pelo processo main via IPC) e não tem nenhum
+  `<script>` inline, então não há perda de funcionalidade. `style-src` mantém
+  `'unsafe-inline'` porque Emotion/MUI injeta `<style>` em runtime.
+- **Crash reporting (fa-w5-desktop-crash-reporting-missing)**: `@sentry/electron`
+  integrado no processo main (`electron/sentry.ts`) e no renderer do launcher
+  (`src/main.tsx`), opcional via `DESKTOP_SENTRY_DSN`/`VITE_DESKTOP_SENTRY_DSN` (mesmo
+  padrão no-op de `apps/api/src/lib/sentry.ts`/`apps/web/src/lib/sentry.ts` — sem DSN,
+  zero overhead e zero dependência de rede). Captura crashes nativos das janelas e
+  exceções não tratadas do processo main automaticamente ao inicializar.
+- **Segredos — fallback sem criptografia (fa-w5-desktop-secret-plaintext-fallback)**:
+  quando `safeStorage` não está disponível, `config-store.ts` continua gravando em
+  texto puro (necessário para não quebrar instalações headless/Linux sem keyring), mas
+  agora loga um `console.error`/`console.warn` explícito (visível em diagnóstico/crash
+  reports) toda vez que isso acontece, em vez de degradar silenciosamente.
 - **Licença offline**: o token offline agora é validado criptograficamente (RS256,
   `license-verify.ts`) — emissor, expiração, `deviceFingerprint` e `tenantId` são
   conferidos contra o estado local antes de considerar a licença válida; o preload
@@ -209,10 +231,27 @@ app Electron. Detalhes linha-a-linha estão nos comentários `CORREÇÃO DE AUDI
   "Configurar PC servidor") usa um canal dedicado (`NETWORK_TEST_CANDIDATE_HOST`),
   validado por schema estrutural (host/porta), nunca por URL livre.
 - **Auto-update**: `electron-updater` foi integrado (`autoUpdater.checkForUpdatesAndNotify()`,
-  guardado por `app.isPackaged`); o provedor de publicação em `package.json`
-  (`build.publish`) está com uma URL placeholder — **requer configuração real do
-  provedor de distribuição + certificado de assinatura de código antes de uso em
-  produção** (gap conhecido, não bloqueante para esta correção pontual).
+  guardado por `app.isPackaged`).
+- **Assinatura de código e auto-update — status atual (fa-w5-desktop-code-signing-not-configured,
+  fa-w5-desktop-update-trust-incomplete)**: o gap aqui NÃO é mais de código, é só de
+  **secrets de CI pendentes**. A configuração já está totalmente wired:
+  - `package.json#build.publish[0].url` usa interpolação `${env.DESKTOP_UPDATE_FEED_URL}`
+    do electron-builder — nunca mais uma URL placeholder hardcoded.
+  - `scripts/package-win.mjs` (chamado por `npm run package:win`) decide a política de
+    publicação em tempo de build: sem `DESKTOP_UPDATE_FEED_URL`/`CSC_LINK`+
+    `CSC_KEY_PASSWORD` configurados, força `--publish never` automaticamente (gera só
+    o instalador local, igual ao comportamento anterior); com qualquer um definido,
+    publica (`--publish always`).
+  - Assinatura Authenticode em si usa a convenção PADRÃO do electron-builder
+    (`CSC_LINK`/`CSC_KEY_PASSWORD` no ambiente) — nada na config do `package.json` a
+    desativa ou sobrescreve.
+  - **O que falta de verdade para builds de release assinados/publicados**: um
+    certificado Authenticode real (`CSC_LINK`/`CSC_KEY_PASSWORD`) e um domínio HTTPS
+    real servindo o feed de updates (`DESKTOP_UPDATE_FEED_URL`), ambos configurados
+    como secrets no CI — **não é alcançável neste ambiente sandbox** (não é possível
+    obter/validar um certificado de assinatura de código real aqui). Ver
+    `apps/desktop/.env.example` para a lista completa de variáveis e
+    `scripts/package-win.mjs` para a lógica.
 - **TEF/pinpad — gap de escopo conhecido, documentado e não implementado**: a auditoria
   apontou corretamente que não existe nenhuma ponte TEF/pinpad (nenhum módulo, IPC ou
   bridge nativa) neste app, apesar de ser um requisito de MVP para o PDV físico.

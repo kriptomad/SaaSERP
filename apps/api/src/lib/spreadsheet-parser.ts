@@ -4,6 +4,11 @@
 // rota de sugestão de mapeamento (preview das 5 primeiras linhas) e pelo worker de
 // validação (linha a linha) — um único ponto de parsing para os dois XLSX e CSV.
 //
+// RISCO RESIDUAL ACEITO (fa-w5-sec-dependency-audit-cleanup, GHSA-w5hq-g745-h8pq):
+// ver explicação completa em `report-export.service.ts` — mesma dependência
+// `exceljs`/`uuid` vulnerável, mesmo caminho de código interno não exercitado
+// (`uuid.v4()` sem buffer próprio), mesmo risco aceito e documentado.
+//
 // `exceljs` lê XLSX nativamente via `workbook.xlsx.load(buffer)`. Para CSV, a API de
 // stream de `exceljs` (`workbook.csv.read`) exige um `Readable` e se mostrou mais
 // frágil com delimitadores/aspas de planilhas exportadas por diferentes ERPs

@@ -56,6 +56,15 @@ export async function reconcileStuckFiscalDocumentsProcessor(_job: Job): Promise
 export function startReconcileStuckFiscalDocumentsWorker(): Worker {
   return new Worker(QUEUE_NAMES.RECONCILE_STUCK_FISCAL_DOCUMENTS, reconcileStuckFiscalDocumentsProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job a cada 10
+    // minutos cujo processor já varre, num `for` sequencial dentro da mesma
+    // execução, até 500 FiscalDocument travados de QUALQUER tenant — nunca há dois
+    // jobs desta fila concorrentes (mesmo `REPEATABLE_JOB_NAME` fixo). `concurrency:
+    // 1` explicitado (antes implícito) para nunca permitir que uma sobreposição
+    // acidental de duas execuções reenfileire a mesma emissão fiscal em duplicidade
+    // mais vezes do que o necessário (idempotente, mas desperdiçaria capacidade da
+    // fila de emissão real).
+    concurrency: 1,
   });
 }
 

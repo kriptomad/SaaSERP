@@ -14,15 +14,16 @@
     "build": "npm run build:renderer && npm run build:electron",
     "typecheck": "tsc --noEmit",
     "prepare:api-resources": "node scripts/prepare-api-resources.mjs",
-    "package:win": "npm run build && npm run prepare:api-resources && electron-builder --win --publish=never",
+    "package:win": "npm run build && npm run prepare:api-resources && node scripts/package-win.mjs",
     "start": "electron ."
   },
   "dependencies": {
-    "@filitech/design-tokens": "*",
     "@emotion/react": "^11.13.3",
     "@emotion/styled": "^11.13.0",
+    "@filitech/design-tokens": "*",
     "@mui/icons-material": "^5.18.0",
     "@mui/material": "^5.16.7",
+    "@sentry/electron": "^7.20.2",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.3.9",
     "jsonwebtoken": "^9.0.2",
@@ -32,9 +33,9 @@
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.9.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@types/node": "^22.9.0",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
@@ -60,16 +61,22 @@
       {
         "from": "../web/dist",
         "to": "web",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "resources-build/api",
         "to": "api",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "artifactName": "FilitechERPDesktop-Setup-${version}.${ext}"
     },
     "nsis": {
@@ -80,7 +87,8 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "https://updates.filitech.com.br/desktop/"
+        "url": "${env.DESKTOP_UPDATE_FEED_URL}",
+        "channel": "latest"
       }
     ]
   }

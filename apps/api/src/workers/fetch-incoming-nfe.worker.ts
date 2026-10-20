@@ -149,7 +149,18 @@ export async function fetchIncomingNfeProcessor(_job: Job): Promise<{ tenantsPro
 }
 
 export function startFetchIncomingNfeWorker(): Worker {
-  return new Worker(QUEUE_NAMES.FETCH_INCOMING_NFE, fetchIncomingNfeProcessor, { connection: queueRedisConnection });
+  return new Worker(QUEUE_NAMES.FETCH_INCOMING_NFE, fetchIncomingNfeProcessor, {
+    connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job único
+    // diário (`upsertJobScheduler`) cujo processor já percorre TODOS os tenants
+    // BUSINESS com CNPJ num `for` sequencial dentro da própria execução — nunca há
+    // dois jobs desta fila simultâneos para `concurrency` paralelizar entre si.
+    // Explicitado em 1 (era implícito) para impedir que uma sobreposição acidental
+    // de duas execuções do mesmo job consultasse a Distribuição DFe do mesmo tenant
+    // duas vezes ao mesmo tempo (duplicaria o avanço de `incomingNfeLastVersion`
+    // de forma não determinística).
+    concurrency: 1,
+  });
 }
 
 export async function scheduleFetchIncomingNfeJob(): Promise<void> {

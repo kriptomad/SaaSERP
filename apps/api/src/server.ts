@@ -2,6 +2,12 @@
 // Entrada real da API — monta Express, middlewares de segurança (Capítulo 3), auth
 // (Capítulo 3.5), contexto de tenant (Capítulo 7.1) e tenant lockout (Capítulo 2).
 import "dotenv/config";
+// fa-w5-boot-no-central-env-validation: precisa ser o PRIMEIRO import depois de
+// `dotenv/config` — roda como efeito colateral de import (ver comentário completo
+// em lib/env-validation.ts) e precisa avaliar ANTES de qualquer import abaixo que
+// transitivamente dispare as checagens ad-hoc de lib/redis.ts, lib/queue.ts ou
+// lib/jwt-keys.ts, para que a lista agregada de problemas apareça de uma vez.
+import "./lib/env-validation";
 import express from "express";
 import "express-async-errors";
 import cors from "cors";

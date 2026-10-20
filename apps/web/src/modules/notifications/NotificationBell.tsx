@@ -15,9 +15,11 @@ import {
   ListItemButton,
   ListItemText,
   Menu,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import NotificationsIcon from "@mui/icons-material/Notifications";
+import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
 import { useNavigate } from "react-router-dom";
 import { notificationFeedApi } from "./api";
 import { useSseStream } from "../../shared/useSseStream";
@@ -97,9 +99,21 @@ export function NotificationBell() {
                 sx={{ opacity: n.readAt ? 0.6 : 1, borderLeft: 3, borderColor: SEVERITY_COLOR[n.severity] ?? "divider" }}
               >
                 <ListItemText
-                  primary={n.title}
+                  primary={
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+                      <Box component="span">{n.title}</Box>
+                      {n.deliveryStatus === "FAILED" && (
+                        // fa-w5-notif-delivery-failure-silent-to-users — falha TERMINAL do
+                        // fan-out externo (WhatsApp/SMS) desta notificação, visível sem
+                        // precisar de acesso ao painel técnico/Bull Board.
+                        <Tooltip title={n.deliveryError ? `Falha ao entregar via WhatsApp/SMS: ${n.deliveryError}` : "Falha ao entregar via WhatsApp/SMS"}>
+                          <ErrorOutlineIcon color="error" fontSize="inherit" />
+                        </Tooltip>
+                      )}
+                    </Box>
+                  }
                   secondary={n.body}
-                  primaryTypographyProps={{ fontWeight: n.readAt ? 400 : 600 }}
+                  primaryTypographyProps={{ fontWeight: n.readAt ? 400 : 600, component: "div" }}
                   secondaryTypographyProps={{ noWrap: true }}
                 />
               </ListItemButton>

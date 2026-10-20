@@ -53,6 +53,19 @@ function encryptSecret(plain: string | null): string | null {
     // Sem backend de criptografia do SO disponível (ex. CI headless/Linux sem
     // keyring) — mantém em claro em vez de falhar o app inteiro, mas nunca finge
     // estar cifrado adicionando o prefixo sem realmente cifrar.
+    // CORREÇÃO DE AUDITORIA (fa-w5-desktop-secret-plaintext-fallback): essa
+    // degradação de segurança era totalmente silenciosa — nenhum log indicava que
+    // tokens/connection string estavam sendo gravados em texto puro em
+    // `filitech-desktop-config.json`. Agora é logada alto (console.error, visível em
+    // logs de diagnóstico/crash reports) toda vez que ocorre, para que suporte/TI do
+    // lojista perceba e possa agir (ex.: configurar um keyring no Linux headless).
+    console.error(
+      "[config-store] SEGURANÇA: safeStorage (DPAPI/Keychain/libsecret) indisponível nesta " +
+        "máquina/sessão — segredo (token de sessão, licença ou connection string do Postgres) " +
+        "será gravado em TEXTO PURO em filitech-desktop-config.json. Qualquer processo/usuário " +
+        "com acesso de leitura a esse arquivo poderá ler o segredo. Configure um backend de " +
+        "credenciais do SO (ex.: libsecret/gnome-keyring em Linux) para habilitar a criptografia.",
+    );
     return plain;
   }
   return ENC_PREFIX + safeStorage.encryptString(plain).toString("base64");
@@ -60,7 +73,17 @@ function encryptSecret(plain: string | null): string | null {
 
 function decryptSecret(stored: string | null): string | null {
   if (stored === null) return null;
-  if (!stored.startsWith(ENC_PREFIX)) return stored; // valor legado em claro ou sem criptografia disponível
+  if (!stored.startsWith(ENC_PREFIX)) {
+    // valor legado em claro (instalação anterior à correção fa-desktop-plaintext-secrets)
+    // ou gravado em claro por falta de safeStorage — avisa, mas segue aceitando o
+    // valor para não travar o app (ver fa-w5-desktop-secret-plaintext-fallback).
+    console.warn(
+      "[config-store] SEGURANÇA: lendo segredo armazenado em TEXTO PURO (valor legado ou " +
+        "gravado sem safeStorage disponível) — considere reconfigurar esta instalação em uma " +
+        "máquina com backend de criptografia do SO disponível.",
+    );
+    return stored;
+  }
   if (!safeStorage.isEncryptionAvailable()) return null; // não é possível decifrar nesta máquina/sessão
   try {
     return safeStorage.decryptString(Buffer.from(stored.slice(ENC_PREFIX.length), "base64"));

@@ -51,6 +51,11 @@ export async function enforceScheduledCancellationsProcessor(_job: Job): Promise
 export function startEnforceScheduledCancellationsWorker(): Worker {
   return new Worker(QUEUE_NAMES.SCHEDULED_SUBSCRIPTION_CANCELLATIONS, enforceScheduledCancellationsProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job diário
+    // único cujo processor já varre TODAS as Subscription com cancelamento
+    // agendado vencido num `for` sequencial na mesma execução — nunca há dois jobs
+    // desta fila simultâneos. `concurrency: 1` explicitado (antes implícito).
+    concurrency: 1,
   });
 }
 

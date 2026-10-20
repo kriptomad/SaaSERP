@@ -13,6 +13,9 @@ interface SendSmsNotificationJobData {
   tenantId: string;
   toPhone: string;
   body: string;
+  /** fa-w5-notif-delivery-failure-silent-to-users — ver nota equivalente em
+   * whatsapp-notifications.worker.ts. */
+  notificationId: string;
   /** fa-w4-obs-no-request-id — opcional, só para correlação de log (ver
    * modules/notifications/notify.service.ts). */
   requestId?: string;

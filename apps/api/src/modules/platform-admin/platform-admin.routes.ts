@@ -173,7 +173,7 @@ platformAdminRouter.post("/platform-admin/tenants/:tenantId/impersonate", requir
   });
 
   const token = signSessionToken(
-    { userId: owner.id, tenantId: tenant.id, role: owner.role as any, impersonation: { platformAdminUserId: req.platformAdminSession!.platformAdminUserId, sessionId: session.id } },
+    { userId: owner.id, tenantId: tenant.id, role: owner.role as any, tokenVersion: owner.tokenVersion, impersonation: { platformAdminUserId: req.platformAdminSession!.platformAdminUserId, sessionId: session.id } },
     `${IMPERSONATION_SESSION_TTL_MINUTES}m`,
   );
   await writeAuditLog(req, "IMPERSONATION_STARTED", "Tenant", tenant.id, { impersonationSessionId: session.id, reason: parsed.data.reason, impersonatedUserId: owner.id });

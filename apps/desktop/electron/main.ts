@@ -20,6 +20,12 @@
 // entregar uma integração de pagamento físico pela metade; ver `README.md` ("Correções
 // de auditoria de segurança/robustez") para mais contexto.
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from "electron";
+// CORREÇÃO DE AUDITORIA (fa-w5-desktop-crash-reporting-missing): inicializado antes de
+// qualquer outro import "pesado" para registrar a captura de exceções/crash nativo o
+// mais cedo possível no boot do processo main (ver electron/sentry.ts — no-op sem
+// DESKTOP_SENTRY_DSN).
+import { initDesktopSentry } from "./sentry";
+initDesktopSentry();
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
@@ -140,7 +146,10 @@ function createLauncherWindow(): void {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // CORREÇÃO DE AUDITORIA (fa-w5-desktop-sandbox-disabled): sandbox do renderer
+      // reativado — preload.ts usa só contextBridge/ipcRenderer (sandbox-compatible
+      // no Electron 33), então não há perda de funcionalidade.
+      sandbox: true,
       webSecurity: true,
     },
   });
@@ -232,7 +241,10 @@ function openErpWindow(config: DesktopConfig): void {
       preload: path.join(__dirname, "erp-preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // CORREÇÃO DE AUDITORIA (fa-w5-desktop-sandbox-disabled): sandbox do renderer
+      // reativado — erp-preload.ts usa só contextBridge/ipcRenderer.sendSync
+      // (sandbox-compatible no Electron 33), então não há perda de funcionalidade.
+      sandbox: true,
       webSecurity: true,
     },
   });
@@ -704,14 +716,20 @@ app.whenReady().then(() => {
     void startBackend(config.network);
   }
 
-  // CORREÇÃO DE AUDITORIA (fa-desktop-no-auto-updater): wiring real do electron-updater
-  // (HTTPS + sha512 embutido no `latest.yml` publicado, assinatura de código do
-  // instalador verificada pelo Windows no momento da instalação quando o artefato é
-  // assinado). O provedor ("generic", URL em `package.json#build.publish`) é um
-  // placeholder — substituir pela URL HTTPS real do servidor de updates antes de
-  // publicar. Certificado de assinatura de código (`win.certificateFile`/`CSC_LINK`)
-  // ainda precisa ser configurado em CI para builds de release reais (gap documentado
-  // no README — não disponível neste ambiente sandbox).
+  // CORREÇÃO DE AUDITORIA (fa-desktop-no-auto-updater, fa-w5-desktop-update-trust-incomplete,
+  // fa-w5-desktop-code-signing-not-configured): wiring real do electron-updater (HTTPS +
+  // sha512 embutido no `latest.yml` publicado, assinatura de código do instalador
+  // verificada pelo Windows no momento da instalação quando o artefato é assinado). O
+  // provedor ("generic", URL em `package.json#build.publish`) agora é resolvido em
+  // tempo de BUILD a partir de `DESKTOP_UPDATE_FEED_URL` (interpolação `${env.*}` do
+  // electron-builder) — sem essa variável configurada em CI, `package:win`
+  // (`scripts/package-win.mjs`) já força `--publish never` automaticamente, então
+  // nunca existe um build publicado com a URL placeholder antiga. Certificado de
+  // assinatura de código (`CSC_LINK`/`CSC_KEY_PASSWORD`, convenção PADRÃO do
+  // electron-builder, não sobrescrita por nada nesta config) também precisa ser
+  // configurado como secret de CI para builds de release assinados — ver
+  // apps/desktop/.env.example e README.md ("Empacotamento"). Nada disso é validável
+  // neste ambiente sandbox (sem certificado real nem domínio de updates real).
   if (app.isPackaged) {
     autoUpdater.autoDownload = true;
     autoUpdater.on("error", (error) => console.error("[auto-updater]", error.message));

@@ -178,6 +178,18 @@ export async function accountingRecurringTasksProcessor(_job: Job): Promise<{ cr
 export function startAccountingRecurringTasksWorker(): Worker {
   return new Worker(QUEUE_NAMES.ACCOUNTING_RECURRING_TASKS, accountingRecurringTasksProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): concorrência
+    // EXPLICITAMENTE 1 (antes implícita pelo default do BullMQ, nunca declarada).
+    // Este worker é um job ÚNICO agendado via `upsertJobScheduler` (mesmo
+    // `REPEATABLE_JOB_NAME` todo mês) cujo processor PERCORRE INTERNAMENTE todos os
+    // `AccountingEngagement` ativos num único `for` sequencial — nunca existe mais
+    // de um job desta fila na BullMQ ao mesmo tempo, então elevar `concurrency`
+    // não paralelizaria nada (não há um segundo job concorrente para processar em
+    // paralelo); só serviria para permitir, por engano, que duas execuções
+    // sobrepostas do MESMO job (ex.: um redeploy lento) rodassem ao mesmo tempo e
+    // duplicassem tarefas contábeis. `concurrency: 1` é o valor correto aqui, não
+    // apenas o default — mantido, só agora de forma explícita e documentada.
+    concurrency: 1,
   });
 }
 

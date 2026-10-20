@@ -142,17 +142,24 @@ export function PosPage() {
   const scannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const products = useLiveQuery(
-    () =>
-      offlineDb.products
+    () => {
+      // CORREÇÃO DE AUDITORIA (fa-w5-hw-scanner-raw-lookup): alguns leitores de
+      // código de barras (conforme configuração de firmware) injetam espaços ou
+      // caracteres de controle (ex.: Tab em vez de Enter) junto ao payload — sem
+      // normalizar, `p.barcode === search` nunca batia, exigindo o operador apagar
+      // manualmente o lixo antes do produto ser encontrado.
+      const normalizedSearch = search.trim();
+      return offlineDb.products
         .filter(
           (p) =>
-            !search ||
-            p.name.toLowerCase().includes(search.toLowerCase()) ||
-            p.sku.toLowerCase().includes(search.toLowerCase()) ||
-            p.barcode === search,
+            !normalizedSearch ||
+            p.name.toLowerCase().includes(normalizedSearch.toLowerCase()) ||
+            p.sku.toLowerCase().includes(normalizedSearch.toLowerCase()) ||
+            p.barcode === normalizedSearch,
         )
         .limit(25)
-        .toArray(),
+        .toArray();
+    },
     [search],
   );
 
@@ -436,6 +443,7 @@ export function PosPage() {
     amountCents: number;
     transactionType: "CREDIT" | "DEBIT";
     saleReference: string;
+    cashRegisterId: string;
   }): Promise<TefSessionResult> {
     let result = await startTefTransaction(params);
     while (result.status === "AWAITING_CONTINUATION" && result.pendingContinuation) {
@@ -498,6 +506,11 @@ export function PosPage() {
           amountCents: Math.round(cardAmount * 100),
           transactionType: cardMethod === "CREDIT_CARD" ? "CREDIT" : "DEBIT",
           saleReference,
+          // CORREÇÃO DE AUDITORIA (fa-w5-hw-tef-route-contract-mismatch): faltava
+          // propagar o caixa já aberto (`cashRegisterId`, obtido no mesmo state usado
+          // para fechar a venda logo abaixo) — sem ele o backend rejeitava TODA
+          // cobrança de cartão com VALIDATION_ERROR antes de chegar à maquininha.
+          cashRegisterId,
         });
         if (result.status !== "APPROVED") {
           setHardwareMessage(`Transação recusada: ${result.rejectionReason ?? "motivo não informado."}`);
@@ -547,7 +560,12 @@ export function PosPage() {
       // venda com sucesso — se a confirmação falhar, o cupom já existe e o lojista
       // decide manualmente (mesmo princípio de "nunca travar o fechamento de caixa
       // por indisponibilidade de rede" do Capítulo 8.3).
-      confirmTefTransaction(tefSessionId).catch((error) =>
+      // CORREÇÃO DE AUDITORIA (fa-w5-hw-tef-payment-record-gap): antes este
+      // `.catch()` era disparado em "fire-and-forget" (sem `await`) — a UI podia
+      // avançar e o operador liberar o cliente do caixa ANTES de saber que a
+      // confirmação (que agora também cria o `Payment` durável no backend, ver
+      // tef.routes.ts) falhou. Aguardamos o resultado aqui antes de prosseguir.
+      await confirmTefTransaction(tefSessionId).catch((error) =>
         setHardwareMessage(`Venda registrada, mas falha ao confirmar o TEF: ${(error as Error).message}`),
       );
     }

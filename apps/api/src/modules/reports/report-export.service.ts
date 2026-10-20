@@ -4,6 +4,22 @@
 // libs ainda não estavam instaladas). Gera o arquivo em memória (Buffer) a
 // partir das mesmas linhas retornadas por `executeReportDefinition()` — nunca
 // duplica a lógica de consulta/agregação, apenas serializa o resultado.
+//
+// RISCO RESIDUAL ACEITO (fa-w5-sec-dependency-audit-cleanup, GHSA-w5hq-g745-h8pq,
+// moderado, CVSS 7.5): `exceljs@4.4.0` (versão mais recente publicada — verificado
+// em 2026, sem release posterior) fixa internamente `uuid@^8.3.0`, uma versão
+// afetada por um bug de "missing buffer bounds check" nas funções v3/v5/v6 quando
+// o CHAMADOR fornece um buffer de saída próprio (`uuid.v4(options, buffer, offset)`).
+// `exceljs` usa apenas `uuid.v4()` internamente para gerar IDs internos de
+// planilha/estilo, SEM NUNCA passar um buffer próprio — o caminho de código
+// vulnerável nunca é exercitado pelo uso real feito aqui. Não existe nenhuma
+// versão de `exceljs` (nem a mais recente, nem nenhuma futura ainda não lançada
+// comprovável) que já traga `uuid >=11.1.1`; o único "fix" sugerido pelo
+// `npm audit fix --force` é um DOWNGRADE para `exceljs@3.4.0` (major anterior),
+// que quebraria a API usada neste arquivo (`workbook.xlsx.writeBuffer()` e outras
+// APIs só disponíveis a partir da série 4.x) — rejeitado deliberadamente. Risco
+// aceito e documentado; reavaliar quando o `exceljs` upstream atualizar sua
+// dependência de `uuid`.
 import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
 

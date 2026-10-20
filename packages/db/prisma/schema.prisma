@@ -649,6 +649,16 @@ model User {
   passwordHash        String
   role                UserRole
   active              Boolean   @default(true)
+  // CORREÇÃO DE AUDITORIA (fa-w5-sec-tenant-jwt-no-revocation): o JWT de sessão de
+  // tenant (jwt.service.ts) é stateless e válido por até 8h sem NENHUM mecanismo de
+  // revogação — um token roubado continuava funcionando mesmo depois de o usuário
+  // trocar/redefinir a senha (diferente do painel de plataforma, que já usa
+  // `ActiveSession`/`sid`, Capítulo 14.4). Embutido como claim `tokenVersion` no JWT
+  // no momento do login/signup e incrementado a cada troca de senha (reset
+  // confirmado) — `auth.middleware.ts` rejeita qualquer token cujo `tokenVersion`
+  // não bata com o valor atual aqui, invalidando de uma vez todos os tokens
+  // emitidos antes da troca de senha.
+  tokenVersion        Int       @default(0)
   // Preferência de modo claro/escuro do app operacional (Capítulo 8.4.3) — sincronizada
   // entre dispositivos do mesmo usuário, nunca apenas em localStorage local.
   preferredThemeMode  String    @default("light") // "light" | "dark"
@@ -1685,6 +1695,15 @@ model Sale {
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId, status, createdAt])
   @@index([tenantId, cashRegisterId])
+  // CORREÇÃO DE AUDITORIA (fa-w5-perf-sale-date-index): vários relatórios
+  // (financial.routes.ts, fator-r-calculator.service.ts,
+  // simples-nacional-das.service.ts, abc-curve-report.service.ts,
+  // collection-turnover-report.service.ts) filtram só por tenantId + intervalo de
+  // createdAt, SEM status — o índice composto acima (tenantId, status, createdAt)
+  // não cobre esse padrão de acesso de forma eficiente (status como coluna do meio
+  // obriga o planner a escanear todas as combinações de status). Índice dedicado
+  // para esse padrão de leitura.
+  @@index([tenantId, createdAt])
   @@map("sales")
 }
 
@@ -2563,6 +2582,28 @@ model Notification {
   sourceId   String?
   readAt     DateTime?
   createdAt  DateTime             @default(now())
+  // fa-w5-notif-delivery-failure-silent-to-users — sinal VISÍVEL ao usuário sobre o
+  // resultado do fan-out multicanal externo (WhatsApp/SMS) desta Notification
+  // in-app, complementar (não substituto) ao `WorkerJobFailure` já persistido pelo
+  // listener central de `worker.ts` em qualquer falha terminal de job BullMQ.
+  // `WorkerJobFailure` é um registro técnico/operacional (payload completo,
+  // stacktrace, usado por um painel admin); este campo é o resumo ORIENTADO AO
+  // USUÁRIO final, exibido na própria lista de notificações (sininho). PENDING é o
+  // default — toda Notification é criada antes de qualquer tentativa de envio
+  // externo; só transiciona para SENT/FAILED quando (e se) o fan-out WhatsApp/SMS
+  // terminar (sucesso ou esgotamento de tentativas), atualizado por
+  // `whatsapp-notifications.worker.ts`/`sms-notifications.worker.ts` via os
+  // listeners `completed`/`failed` em `worker.ts`. Notificações sem nenhum canal
+  // externo habilitado (ex.: só in-app) permanecem PENDING para sempre — não há
+  // "NOT_APPLICABLE" porque isso exigiria saber de antemão se algum canal externo
+  // seria tentado, acoplando este model à lógica de `dispatchUserChannels`.
+  deliveryStatus NotificationDeliveryStatus @default(PENDING)
+  // Mensagem de erro curta e SANITIZADA (nunca o corpo bruto da resposta do
+  // provedor, que pode conter token/segredo vazado em texto de erro de
+  // autenticação) — mesmo cuidado de `sendWhatsAppText`/`sendSmsText`, que já
+  // truncam a resposta do provedor em 500 chars antes de virar `message` de erro;
+  // aqui trunca de novo, mais agressivamente, pois este campo é exibido na UI.
+  deliveryError  String?
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   user   User?  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -2570,6 +2611,13 @@ model Notification {
   @@index([tenantId, userId, readAt])
   @@index([tenantId, createdAt])
   @@map("notifications")
+}
+
+// fa-w5-notif-delivery-failure-silent-to-users
+enum NotificationDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
 }
 
 enum NotificationCategory {

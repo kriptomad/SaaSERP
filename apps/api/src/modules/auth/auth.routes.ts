@@ -9,13 +9,14 @@ import { prismaUnscoped } from "@filitech/db";
 import { hashPassword, verifyPassword } from "./password.service";
 import { signSessionToken } from "./jwt.service";
 import { enforceRateLimit, resetRateLimit, RateLimitExceededError } from "../../lib/rate-limit";
-import { authMiddleware, requireAuth, invalidateImpersonationSessionCache } from "../../middlewares/auth.middleware";
+import { authMiddleware, requireAuth, invalidateImpersonationSessionCache, invalidateUserTokenVersionCache } from "../../middlewares/auth.middleware";
 import { isValidCnpj } from "../../lib/br-documents";
 import { validatePasswordPolicy } from "../../lib/password-policy";
 import { sendPlatformEmail } from "../../lib/platform-email";
 import { getPlatformSecret } from "../../lib/platform-secrets";
 import { createModuleLogger } from "../../lib/logger";
 import { zodValidationErrorResponse } from "../../lib/validation-error";
+import { escapeHtml } from "../../lib/html-escape";
 
 export const authRouter = Router();
 
@@ -139,7 +140,7 @@ authRouter.post("/signup", async (req, res) => {
   }
   const { tenant, owner } = created;
 
-  const token = signSessionToken({ userId: owner.id, tenantId: tenant.id, role: "OWNER" });
+  const token = signSessionToken({ userId: owner.id, tenantId: tenant.id, role: "OWNER", tokenVersion: owner.tokenVersion });
   const authPayload = {
     token,
     tenant: {
@@ -208,7 +209,7 @@ authRouter.post("/login", async (req, res) => {
     });
   }
 
-  const token = signSessionToken({ userId: user.id, tenantId: tenant.id, role: user.role as any });
+  const token = signSessionToken({ userId: user.id, tenantId: tenant.id, role: user.role as any, tokenVersion: user.tokenVersion });
   const authPayload = {
     token,
     tenant: {
@@ -272,10 +273,22 @@ authRouter.post("/auth/password-reset/request", async (req, res) => {
 
     const appBaseUrl = await resolveAppBaseUrl();
     const resetLink = `${appBaseUrl}/redefinir-senha?token=${rawToken}`;
+    // fa-w5-notif-reset-email-html-injection — `user.name`/`tenant.tradeName` são
+    // dados editáveis pelo próprio usuário/tenant (cadastro/onboarding) e NUNCA
+    // podem ser interpolados crus em HTML de e-mail (um nome contendo
+    // `<img src=x onerror=...>` executaria no cliente de e-mail de quem abrisse o
+    // reset). `resetLink` é gerado inteiramente pelo servidor (UUID aleatório via
+    // `randomUUID()` + `appBaseUrl` configurado), nunca contém `&`/`<`/`>` na
+    // prática, mas ainda assim passa por `escapeHtml` no atributo `href` por
+    // disciplina de contexto HTML (uma URL com querystring adicional no futuro
+    // poderia legitimamente conter `&`, que precisa virar `&amp;` para HTML válido).
+    const safeUserName = escapeHtml(user.name);
+    const safeTradeName = escapeHtml(tenant.tradeName);
+    const safeResetLink = escapeHtml(resetLink);
     const emailResult = await sendPlatformEmail(
       user.email,
       "Redefinição de senha — Filitech ERP",
-      `<p>Olá, ${user.name}.</p><p>Foi solicitada a redefinição da sua senha de acesso ao Filitech ERP (${tenant.tradeName}). Clique no link abaixo para continuar (válido por ${PASSWORD_RESET_TOKEN_TTL_MINUTES} minutos):</p><p><a href="${resetLink}">${resetLink}</a></p><p>Se você não solicitou esta redefinição, ignore este e-mail — sua senha continua a mesma.</p>`,
+      `<p>Olá, ${safeUserName}.</p><p>Foi solicitada a redefinição da sua senha de acesso ao Filitech ERP (${safeTradeName}). Clique no link abaixo para continuar (válido por ${PASSWORD_RESET_TOKEN_TTL_MINUTES} minutos):</p><p><a href="${safeResetLink}">${safeResetLink}</a></p><p>Se você não solicitou esta redefinição, ignore este e-mail — sua senha continua a mesma.</p>`,
     );
     if (!emailResult.success) {
       // Nunca logar o token/link em claro — apenas o identificador do usuário e o
@@ -317,6 +330,12 @@ authRouter.post("/auth/password-reset/confirm", async (req, res) => {
   // token via `updateMany` condicional (`usedAt: null`) dentro de transação — nunca
   // aplica a troca de senha "otimisticamente" antes de garantir posse exclusiva do
   // token (evita dupla redefinição por duas requisições concorrentes com o mesmo link).
+  // CORREÇÃO DE AUDITORIA (fa-w5-sec-tenant-jwt-no-revocation): `tokenVersion` é
+  // incrementado atomicamente (`increment: 1`) na MESMA transação da troca de senha
+  // — qualquer JWT de sessão emitido antes deste reset passa a ter uma
+  // `tokenVersion` desatualizada e é rejeitado por `auth.middleware.ts` na próxima
+  // requisição (ou em até `TOKEN_VERSION_CACHE_TTL_SECONDS` depois, se o cache
+  // Redis ainda não tiver expirado — invalidado explicitamente logo abaixo).
   const tokenConsumed = await prismaUnscoped.$transaction(async (tx) => {
     const consumption = await tx.passwordResetToken.updateMany({
       where: { id: resetToken.id, usedAt: null },
@@ -324,12 +343,13 @@ authRouter.post("/auth/password-reset/confirm", async (req, res) => {
     });
     if (consumption.count === 0) return false;
 
-    await tx.user.update({ where: { id: resetToken.userId! }, data: { passwordHash: newPasswordHash } });
+    await tx.user.update({ where: { id: resetToken.userId! }, data: { passwordHash: newPasswordHash, tokenVersion: { increment: 1 } } });
     return true;
   });
   if (!tokenConsumed) {
     return res.status(401).json({ success: false, data: null, error: { code: "INVALID_TOKEN", message: "Token de redefinição inválido, já utilizado ou expirado." } });
   }
+  await invalidateUserTokenVersionCache(resetToken.userId!);
 
   return res.json({ success: true, data: { message: "Senha redefinida com sucesso. Faça login novamente." }, error: null });
 });

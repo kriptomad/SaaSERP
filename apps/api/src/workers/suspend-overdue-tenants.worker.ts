@@ -53,6 +53,11 @@ export async function suspendOverdueTenantsProcessor(_job: Job): Promise<{ suspe
 export function startSuspendOverdueTenantsWorker(): Worker {
   return new Worker(QUEUE_NAMES.SUSPEND_OVERDUE_TENANTS, suspendOverdueTenantsProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job diário
+    // único cujo processor já itera TODOS os tenants PAST_DUE vencidos num `for`
+    // sequencial dentro da mesma execução — nunca há dois jobs desta fila
+    // concorrentes. `concurrency: 1` explicitado (antes implícito).
+    concurrency: 1,
   });
 }
 

@@ -129,6 +129,11 @@ export async function personalRecurrenceGenerationProcessor(_job: Job): Promise<
 export function startPersonalRecurrenceGenerationWorker(): Worker {
   return new Worker(QUEUE_NAMES.PERSONAL_RECURRENCE_GENERATION, personalRecurrenceGenerationProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job diário
+    // único cujo processor já itera TODAS as PersonalRecurrenceRule vencidas num
+    // `for` sequencial na mesma execução — nunca há dois jobs desta fila
+    // concorrentes. `concurrency: 1` explicitado (antes implícito).
+    concurrency: 1,
   });
 }
 

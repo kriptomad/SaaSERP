@@ -95,6 +95,11 @@ export interface NotificationItem {
   sourceId: string | null;
   readAt: string | null;
   createdAt: string;
+  // fa-w5-notif-delivery-failure-silent-to-users — resultado do fan-out externo
+  // (WhatsApp/SMS) desta notificação, quando aplicável: PENDING (ainda não se sabe
+  // ou nenhum canal externo foi tentado), SENT, ou FAILED (ver `deliveryError`).
+  deliveryStatus: "PENDING" | "SENT" | "FAILED";
+  deliveryError: string | null;
 }
 
 export interface NotificationFeed {

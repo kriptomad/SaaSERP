@@ -218,6 +218,12 @@ clientRecordsRouter.post("/vaccine-records/notify-due-soon", requireAuth, requir
       linkRoute: `/petshop/pets/${record.pet.id}`,
       sourceType: "VACCINE_RECORD",
       sourceId: record.id,
+      // fa-w5-notif-no-marketing-optout-enforcement — dispara também o fan-out
+      // externo (WhatsApp/e-mail) diretamente ao TUTOR do pet (`Client`), não só o
+      // registro in-app visto pelo staff do tenant. VACCINE_REMINDER é classificado
+      // TRANSACTIONAL (lembrete de saúde/segurança do próprio pet do cliente) em
+      // notify.service.ts — nunca bloqueado por falta de opt-in de marketing.
+      recipientClientId: record.pet.ownerId,
     });
     await prisma.vaccineRecord.update({ where: { id: record.id }, data: { reminderSentAt: new Date() } });
     notified.push(record.id);

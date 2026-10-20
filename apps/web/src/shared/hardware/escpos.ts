@@ -86,13 +86,32 @@ export class EscPosBuilder {
 
 function textToLatin1Bytes(value: string): number[] {
   const bytes: number[] = [];
-  for (const char of value) {
+  for (const char of sanitizeTextForEscPos(value)) {
     const code = char.codePointAt(0) ?? 63;
     // Fora do range Latin-1 (acentuação e símbolos comerciais básicos cobertos),
     // cai para "?" em vez de corromper a trama enviada à impressora.
     bytes.push(code <= 0xff ? code : 0x3f);
   }
   return bytes;
+}
+
+// CORREÇÃO DE AUDITORIA (fa-w5-hw-escpos-injection): `textToLatin1Bytes` convertia
+// TODO code point <= 0xff diretamente para byte, incluindo bytes de controle ASCII
+// (0x00-0x1F e 0x7F) — como ESC (0x1B) e GS (0x1D) são exatamente os prefixos reais
+// dos próprios comandos ESC/POS que este arquivo emite, um nome de produto/cliente/
+// tenant contendo esses bytes (digitado ou importado via CSV/integração) conseguia
+// INJETAR comandos ESC/POS arbitrários no meio do cupom — de reconfigurar a página
+// de código até acionar repetidamente o pulso da gaveta de dinheiro. Esta função
+// sanitiza apenas o TEXTO de dados (nomes, descrições, valores) interpolado pelos
+// chamadores — nunca os bytes de comando que o próprio `EscPosBuilder` já monta
+// separadamente (align/bold/cut/openCashDrawer etc. nunca passam por aqui).
+function sanitizeTextForEscPos(value: string): string {
+  // Remove C0 controls (0x00-0x1F) e DEL (0x7F), preservando apenas texto imprimível;
+  // quebras de linha intencionais já são tratadas por `EscPosBuilder.line()` via um
+  // 0x0A próprio adicionado FORA do texto sanitizado, então \n no meio do dado nunca
+  // precisa ser preservado aqui.
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\x00-\x1f\x7f]/g, "");
 }
 
 /** Comando isolado de abertura de gaveta, para reuso direto sem montar um cupom inteiro. */

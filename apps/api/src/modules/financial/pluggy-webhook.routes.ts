@@ -28,6 +28,7 @@ import { prismaUnscoped as prisma } from "@filitech/db";
 import { getPlatformSecret } from "../../lib/platform-secrets";
 import { pluggySyncQueue } from "../../lib/queue";
 import { createModuleLogger } from "../../lib/logger";
+import { markWebhookEventProcessed, wasWebhookEventAlreadyProcessed } from "../../lib/webhook-replay-guard";
 
 const log = createModuleLogger("pluggy-webhook");
 
@@ -38,6 +39,23 @@ const pluggyWebhookEventSchema = z.object({
   eventId: z.string().min(1).optional(),
   itemId: z.string().min(1).optional(),
 });
+
+// CORREÇÃO DE AUDITORIA (fa-w5-sec-pluggy-no-signature): a Pluggy não envia nenhum
+// header de assinatura (ver nota no topo do arquivo), então o `?token=` estático é a
+// única barreira de entrada — qualquer parte de posse do token (vazamento de log,
+// painel, etc.) conseguiria reenviar manualmente uma requisição de webhook capturada
+// indefinidamente. `eventId` (quando presente no payload real) identifica um disparo
+// específico da Pluggy de forma única; quando ausente (payload fora do formato
+// esperado/versão antiga), cai num bucket de 5 minutos por item+evento — ainda
+// encurta reenvios em rajada do mesmo evento sem um identificador único, sem arriscar
+// descartar dois eventos genuinamente distintos do mesmo item no mesmo evento.
+const PLUGGY_REPLAY_GUARD_TTL_SECONDS = 60 * 60 * 24; // 24h
+const PLUGGY_REPLAY_FALLBACK_BUCKET_MS = 5 * 60_000;
+
+function pluggyReplayGuardKey(itemId: string, event: string, eventId: string | undefined): string {
+  const bucket = eventId ?? `bucket:${Math.floor(Date.now() / PLUGGY_REPLAY_FALLBACK_BUCKET_MS)}`;
+  return `pluggy-webhook:${itemId}:${event}:${bucket}`;
+}
 
 // Eventos que de fato disparam sincronização de conta/transação (Capítulo 17.4.1/22.5)
 // — os demais (item/error, item/waiting_user_input, connector/status_updated, etc.)
@@ -73,11 +91,21 @@ pluggyWebhookRouter.post("/webhooks/pluggy", async (req: Request, res: Response)
     return res.status(200).json({ success: true, data: { acknowledged: true }, error: null });
   }
 
-  const { event, itemId } = parsed.data;
+  const { event, itemId, eventId } = parsed.data;
 
   if (!SYNC_TRIGGERING_EVENTS.has(event) || !itemId) {
     log.info({ event }, "evento recebido e reconhecido, sem ação de sincronização");
     return res.status(200).json({ success: true, data: { acknowledged: true }, error: null });
+  }
+
+  // CORREÇÃO DE AUDITORIA (fa-w5-sec-pluggy-no-signature): checagem de replay ANTES
+  // de qualquer consulta/enfileiramento — um reenvio do mesmo evento (seja retry
+  // legítimo da Pluggy, seja replay manual de uma requisição capturada) é apenas
+  // reconhecido com 200, sem disparar uma nova sincronização nem bater no banco.
+  const replayGuardKey = pluggyReplayGuardKey(itemId, event, eventId);
+  if (await wasWebhookEventAlreadyProcessed(replayGuardKey)) {
+    log.info({ event, itemId, eventId }, "evento de webhook Pluggy já processado recentemente — replay ignorado");
+    return res.status(200).json({ success: true, data: { acknowledged: true, replay: true }, error: null });
   }
 
   const consent = await prisma.openFinanceConsent.findUnique({ where: { itemId } });
@@ -93,6 +121,10 @@ pluggyWebhookRouter.post("/webhooks/pluggy", async (req: Request, res: Response)
     { itemId, consentId: consent.id },
     { attempts: 5, backoff: { type: "exponential", delay: 10_000 } },
   );
+  // Só marca como processado DEPOIS de enfileirar com sucesso — se o enfileiramento
+  // falhar e a Pluggy reentregar, a reentrega deve disparar uma nova tentativa, não
+  // ser descartada como replay de algo que nunca chegou a ser enfileirado.
+  await markWebhookEventProcessed(replayGuardKey, PLUGGY_REPLAY_GUARD_TTL_SECONDS);
 
   return res.status(200).json({ success: true, data: { acknowledged: true, enqueued: true }, error: null });
 });

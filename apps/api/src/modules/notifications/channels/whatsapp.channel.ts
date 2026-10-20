@@ -23,6 +23,27 @@ export interface SendWhatsAppResult {
   message: string;
 }
 
+// fa-w5-notif-tenant-controlled-message-impersonation — MITIGAÇÃO de atribuição:
+// toda mensagem WhatsApp sai do MESMO número/identidade compartilhada da
+// plataforma (a credencial WHATSAPP_META_CLOUD é por tenant, mas o destinatário não
+// tem como saber disso só olhando o remetente), e o corpo da mensagem é montado por
+// concatenação simples de texto que um tenant controla amplamente (título/corpo de
+// qualquer `notifyTenant`, Capítulo 8.4) — um tenant mal-intencionado (ou com a
+// conta comprometida) poderia redigir conteúdo com aparência de phishing
+// (ex.: "sua conta foi bloqueada, clique aqui") que o destinatário atribuiria à
+// Filitech ERP, não ao lojista real. Como única mudança central e não dispersa por
+// cada call site de `notifyTenant` (ver nota de escopo no finding de auditoria):
+// este wrapper acrescenta um rodapé NÃO REMOVÍVEL identificando o tenant remetente
+// antes de qualquer envio. Isto é só uma mitigação de RASTREABILIDADE/ATRIBUIÇÃO —
+// não é moderação de conteúdo (não impede o tenant de escrever algo abusivo, só
+// garante que o destinatário saiba QUEM enviou); uma extensão futura fora do escopo
+// desta correção poderia adicionar varredura automática de conteúdo antes do envio.
+async function withSenderAttribution(tenantId: string, body: string): Promise<string> {
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { tradeName: true } });
+  const senderName = tenant?.tradeName?.trim() || "um lojista Filitech ERP";
+  return `${body}\n\n— Mensagem de ${senderName} via Filitech ERP`;
+}
+
 export async function sendWhatsAppText(tenantId: string, toE164Phone: string, body: string): Promise<SendWhatsAppResult> {
   const credential = await prisma.integrationCredential.findUnique({
     where: { tenantId_provider_environment: { tenantId, provider: "WHATSAPP_META_CLOUD", environment: "PRODUCTION" } },
@@ -47,6 +68,11 @@ export async function sendWhatsAppText(tenantId: string, toE164Phone: string, bo
   const accessToken = decrypted.accessToken;
   const phoneNumberId = decrypted.phoneNumberId;
 
+  // fa-w5-notif-tenant-controlled-message-impersonation — rodapé de atribuição
+  // aplicado aqui, no único ponto de envio real, nunca em cada call site de
+  // `notifyTenant`.
+  const attributedBody = await withSenderAttribution(tenantId, body);
+
   try {
     const response = await withCircuitBreaker(WHATSAPP_BREAKER, () =>
       fetch(`https://graph.facebook.com/v19.0/${encodeURIComponent(phoneNumberId)}/messages`, {
@@ -59,7 +85,7 @@ export async function sendWhatsAppText(tenantId: string, toE164Phone: string, bo
           messaging_product: "whatsapp",
           to: toE164Phone.replace(/^\+/, ""), // Graph API espera o número sem o "+" (ex.: "5511999998888")
           type: "text",
-          text: { body },
+          text: { body: attributedBody },
         }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       }),

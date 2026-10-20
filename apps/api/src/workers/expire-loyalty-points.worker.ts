@@ -106,6 +106,14 @@ export async function expireLoyaltyPointsProcessor(_job: Job): Promise<{ account
 export function startExpireLoyaltyPointsWorker(): Worker {
   return new Worker(QUEUE_NAMES.LOYALTY_POINTS_EXPIRATION, expireLoyaltyPointsProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job diário
+    // único (`upsertJobScheduler`) que já percorre internamente todas as contas
+    // candidatas num `for` sequencial — nunca há um segundo job desta fila
+    // concorrente. `concurrency: 1` explicitado (antes implícito) para nunca
+    // permitir que uma sobreposição de execuções recalcule/expire a mesma conta em
+    // paralelo (o guard atômico no `updateMany` já protege o dado, mas rodar em
+    // paralelo aqui não traria ganho real nenhum, só risco).
+    concurrency: 1,
   });
 }
 

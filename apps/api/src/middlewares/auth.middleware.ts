@@ -58,6 +58,39 @@ async function isImpersonationSessionValid(sessionId: string): Promise<boolean> 
   return isValid;
 }
 
+// CORREÇÃO DE AUDITORIA (fa-w5-sec-tenant-jwt-no-revocation): `User.tokenVersion`
+// (ver schema.prisma) é a fonte da verdade de revogação — incrementado a cada
+// troca/reset de senha (auth.routes.ts). Checar o valor atual no Postgres em TODA
+// requisição autenticada garantiria revogação imediata, mas custaria uma consulta
+// extra por requisição só para isto; como o pior caso aceitável aqui é um token
+// revogado continuar válido por, no máximo, o TTL do cache (bem menor que as até 8h
+// de validade natural do JWT), cacheamos o valor no Redis com TTL curto — mesmo
+// trade-off já usado para `ImpersonationSession` acima.
+const TOKEN_VERSION_CACHE_TTL_SECONDS = 30;
+const TOKEN_VERSION_CACHE_PREFIX = "user-token-version:";
+
+function tokenVersionCacheKey(userId: string): string {
+  return `${TOKEN_VERSION_CACHE_PREFIX}${userId}`;
+}
+
+/** Deve ser chamado sempre que `User.tokenVersion` é incrementado (troca/reset de
+ * senha), para que a revogação tenha efeito assim que o cache for invalidado, em vez
+ * de esperar o TTL do cache expirar sozinho. */
+export async function invalidateUserTokenVersionCache(userId: string): Promise<void> {
+  await redis.del(tokenVersionCacheKey(userId));
+}
+
+async function getCurrentTokenVersion(userId: string): Promise<number | null> {
+  const cacheKey = tokenVersionCacheKey(userId);
+  const cached = await redis.get(cacheKey);
+  if (cached !== null) return Number(cached);
+
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { tokenVersion: true } });
+  if (!user) return null;
+  await redis.set(cacheKey, String(user.tokenVersion), "EX", TOKEN_VERSION_CACHE_TTL_SECONDS);
+  return user.tokenVersion;
+}
+
 export async function authMiddleware(req: Request, _res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
@@ -67,6 +100,16 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
   const token = header.slice("Bearer ".length);
   try {
     const claims = verifySessionToken(token);
+
+    const currentTokenVersion = await getCurrentTokenVersion(claims.userId);
+    if (currentTokenVersion === null || currentTokenVersion !== claims.tokenVersion) {
+      logger.warn(
+        { userId: claims.userId, tenantId: claims.tenantId, tokenVersion: claims.tokenVersion, currentTokenVersion },
+        "Token de sessão com tokenVersion desatualizada (senha trocada/redefinida após a emissão) ou usuário inexistente — requisição rejeitada",
+      );
+      return next(); // segue sem sessão; rota protegida responde 401
+    }
+
     if (claims.impersonation) {
       const valid = await isImpersonationSessionValid(claims.impersonation.sessionId);
       if (!valid) {

@@ -19,6 +19,14 @@ interface SendWhatsAppNotificationJobData {
   tenantId: string;
   toPhone: string;
   body: string;
+  /** fa-w5-notif-delivery-failure-silent-to-users — id da Notification in-app que
+   * originou este envio (ver modules/notifications/notify.service.ts,
+   * `enqueueWhatsAppJob`). Usado pelo listener central `completed`/`failed` em
+   * `worker.ts` para atualizar `Notification.deliveryStatus/deliveryError` de
+   * volta, deixando o resultado do envio externo visível na própria lista de
+   * notificações do usuário (não só em `WorkerJobFailure`, registro técnico sem
+   * relação direta com a Notification que o usuário vê). */
+  notificationId: string;
   /** fa-w4-obs-no-request-id — opcional, só para correlação de log (ver
    * modules/notifications/notify.service.ts). */
   requestId?: string;

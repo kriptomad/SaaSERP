@@ -57,20 +57,20 @@ No Railway (Raw Editor das Variables) cole o conteúdo multilinha dos `.pem` ou,
 
 Observação: `R2_*`, `WHATSAPP_*` e `PLUGGY_*` do `.env.example` raiz **não são lidas** por `process.env` hoje — credenciais de integração são cadastradas no banco (`IntegrationCredential`, cifradas pela KEK acima) pelo painel.
 
-### 4. Migrações do banco (`prisma migrate deploy`)
-O schema vive em `packages/db/prisma` e as migrations em `packages/db/prisma/migrations` (já existe `0_init`). A imagem é distroless (sem shell), então rode a migração **da sua máquina** contra o Postgres do Railway, usando a URL pública:
+### 4. Migrações do banco (`prisma migrate deploy`) — automático
 
-1. Serviço Postgres → **Variables** → copie `DATABASE_PUBLIC_URL`.
-2. Na raiz do repo:
-   ```bash
-   # PowerShell: $env:DATABASE_URL="<DATABASE_PUBLIC_URL>"
-   export DATABASE_URL="<DATABASE_PUBLIC_URL>"
-   npm install
-   npm run db:deploy        # = prisma migrate deploy (workspace @filitech/db)
-   ```
-3. Repita a cada deploy que adicionar migration (`npx prisma migrate dev` localmente gera novas; commite a pasta `migrations/`).
+**fa-w5-boot-migration-not-applied (corrigido):** o schema vive em `packages/db/prisma` e as migrations em `packages/db/prisma/migrations` (já existe `0_init`). Diferente de versões anteriores deste guia, você **não precisa mais rodar `prisma migrate deploy` manualmente** a cada deploy: `apps/api/dist/start.cjs` (o launcher que o CMD da imagem invoca) roda `prisma migrate deploy` **sincronamente, antes de iniciar o Express** — nenhuma réplica da API aceita tráfego (nem o healthcheck `/health` fica verde) enquanto o schema não estiver em dia. O worker (`APP_ROLE=worker`) **não** roda esse passo (evita toda réplica de worker competir pela mesma migration).
 
-(Alternativa: rodar `npm run db:deploy` num passo de CI antes do deploy, com `DATABASE_PUBLIC_URL` como secret.)
+Como o Railway não tem um "release phase"/pre-deploy hook equivalente ao do Heroku (confirmado: `railway.toml` só aceita `[build]`/`[deploy]`, sem campo de comando pré-boot), o gate fica embutido no próprio processo da API. Isso é seguro mesmo com múltiplas réplicas da API subindo ao mesmo tempo: `prisma migrate deploy` adquire um **advisory lock do Postgres** internamente, então só uma réplica aplica as migrations pendentes por vez — as demais aguardam o lock e, ao adquiri-lo, não encontram mais nada pendente (no-op). `start.cjs` ainda faz 3 tentativas com backoff (5s/10s/15s) antes de desistir e abortar o boot com `process.exit(1)`, cobrindo o caso de uma réplica perder a espera do lock por timeout.
+
+Se precisar aplicar uma migration manualmente mesmo assim (ex.: diagnosticar um estado divergente), ainda é possível rodar da sua máquina contra a URL pública:
+```bash
+# Serviço Postgres → Variables → copie DATABASE_PUBLIC_URL
+# PowerShell: $env:DATABASE_URL="<DATABASE_PUBLIC_URL>"
+export DATABASE_URL="<DATABASE_PUBLIC_URL>"
+npm install
+npm run db:deploy        # = prisma migrate deploy (workspace @filitech/db)
+```
 
 ### 5. Healthcheck
 `railway.toml` define `healthcheckPath = "/health"` (timeout 60 s). A rota executa `SELECT 1` e devolve `200 {"status":"ok"}` ou `503` se o banco estiver fora — o Railway só promove o deploy novo quando recebe 200. Teste: `curl https://api.seudominio.com/health`.
@@ -88,6 +88,7 @@ Cada push na branch configurada (Settings → Source → Branch) dispara build. 
 Na Vercel defina `VITE_API_BASE_URL=https://api.seudominio.com` e inclua a origem do frontend em `CORS_ORIGIN` na API.
 
 ## Troubleshooting
-- Crash no boot: verifique `JWT_PRIVATE_KEY`/`JWT_PUBLIC_KEY` (sem elas a API lança erro ao iniciar).
-- Healthcheck 503: `DATABASE_URL` aponta para o serviço errado ou as migrations não foram aplicadas.
+- Crash no boot: verifique as variáveis obrigatórias de produção listadas acima — `apps/api/src/lib/env-validation.ts` loga TODAS as que estiverem ausentes/inválidas de uma vez (não só a primeira) antes de `process.exit(1)`.
+- Boot trava em "prisma migrate deploy — tentativa N/3": `DATABASE_URL` aponta para o serviço errado, está inacessível, ou há uma migration com erro — veja o log completo do comando (impresso com `stdio: "inherit"`).
+- Healthcheck 503: banco inacessível (ver item acima) — migrations em si não ficam mais pendentes nesse ponto, pois a API só começa a aceitar tráfego depois de `prisma migrate deploy` ter sido bem-sucedido no boot (`fa-w5-boot-migration-not-applied`).
 - `INTEGRATION_CREDENTIALS_MASTER_KEY não configurada`: variável ausente.

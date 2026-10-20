@@ -80,6 +80,14 @@ export async function dataRetentionPurgeProcessor(_job: Job): Promise<{ purgedEx
 export function startDataRetentionPurgeWorker(): Worker {
   return new Worker(QUEUE_NAMES.DATA_RETENTION_PURGE, dataRetentionPurgeProcessor, {
     connection: queueRedisConnection,
+    // CORREÇÃO DE AUDITORIA (fa-w5-perf-worker-default-concurrency): job único
+    // agendado (`upsertJobScheduler`, mesmo `REPEATABLE_JOB_NAME` todo dia) cujo
+    // processor percorre internamente TODOS os exports LGPD expirados do sistema
+    // inteiro num `for` sequencial — nunca há um segundo job desta fila concorrente
+    // para `concurrency` paralelizar. Explicitado em 1 (antes implícito) para que
+    // uma eventual sobreposição de duas execuções do mesmo job (redeploy lento)
+    // nunca rode em paralelo e tente deletar o mesmo artefato do R2 duas vezes.
+    concurrency: 1,
   });
 }
 
