@@ -35,11 +35,12 @@
 // abrir mão da superfície de ataque mínima. Decisão arquitetural considerada
 // DEFINITIVA, não mais um gap em aberto.
 import { Worker, Job } from "bullmq";
-import { createCipheriv, createHash, randomBytes } from "node:crypto";
-import { gzipSync } from "node:zlib";
+import { createCipheriv, randomBytes, createHash, type CipherGCM } from "node:crypto";
+import { createGzip } from "node:zlib";
+import { Readable, Transform } from "node:stream";
 import { Prisma, prismaUnscoped } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, databaseBackupQueue } from "../lib/queue";
-import { putPlatformObjectDirect } from "../lib/object-storage";
+import { queueRedisConnection, QUEUE_NAMES, databaseBackupQueue, HEAVY_RECURRING_JOB_OPTS } from "../lib/queue";
+import { putPlatformObjectStream } from "../lib/object-storage";
 import { getPlatformSecret } from "../lib/platform-secrets";
 import { createModuleLogger } from "../lib/logger";
 
@@ -49,6 +50,14 @@ const REPEATABLE_JOB_NAME = "daily-backup";
 const DAILY_CRON_3AM = "0 3 * * *";
 const PAGE_SIZE = 2000;
 const ENCRYPTION_ALGORITHM = "aes-256-gcm";
+// fa-w4-backup-worker-oom — identifica o FORMATO do arquivo cifrado: o antigo
+// (iv(12) || authTag(16) || ciphertext inteiro) exigia ter o ciphertext completo em
+// mãos para montar o cabeçalho (o authTag do GCM só é conhecido depois de cifrar
+// TUDO), o que forçava manter o backup inteiro em memória antes do upload. O novo
+// formato move o authTag para o FINAL do arquivo (depois do ciphertext em stream),
+// permitindo cifrar/fazer upload incrementalmente — `scripts/restore-encrypted-backup.mjs`
+// reconhece os dois formatos pelos 4 bytes mágicos iniciais.
+const STREAMING_FORMAT_MAGIC = Buffer.from("FBK2", "ascii");
 
 function toLowerCamelDelegateName(modelName: string): string {
   return modelName.charAt(0).toLowerCase() + modelName.slice(1);
@@ -66,23 +75,80 @@ function backupJsonReplacer(_key: string, value: unknown): unknown {
   return value;
 }
 
-/** Dump paginado de um único modelo (CROSS-TENANT — este backup é platform-wide, nunca filtrado por tenantId, ao contrário da exportação individual do Capítulo 18.4). */
-async function dumpModel(modelName: string): Promise<Record<string, unknown>[]> {
-  const delegateName = toLowerCamelDelegateName(modelName);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const delegate = (prismaUnscoped as any)[delegateName];
-  if (!delegate || typeof delegate.findMany !== "function") return [];
+/**
+ * fa-w4-backup-worker-oom — gerador assíncrono que produz o dump inteiro em NDJSON
+ * (uma linha JSON por registro, prefixada pelo nome do modelo), paginando UM modelo
+ * por vez e UMA página por vez (nunca acumulando `rows` de um modelo inteiro, muito
+ * menos do banco inteiro, em memória — ao contrário da versão anterior que montava
+ * `dump: Record<string, Record<string,unknown>[]>` com TODOS os modelos de uma vez).
+ * `stats` é preenchido como efeito colateral (lido pelo chamador só depois do stream
+ * terminar de ser consumido).
+ */
+async function* dumpAllModelsAsNdjson(stats: { totalRows: number; generatedAt: string }): AsyncGenerator<Buffer> {
+  yield Buffer.from(JSON.stringify({ __meta: true, generatedAt: stats.generatedAt }) + "\n", "utf8");
 
-  const rows: Record<string, unknown>[] = [];
-  let skip = 0;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const page: Array<Record<string, unknown>> = await delegate.findMany({ skip, take: PAGE_SIZE });
-    rows.push(...page);
-    if (page.length < PAGE_SIZE) break;
-    skip += PAGE_SIZE;
+  for (const model of Prisma.dmmf.datamodel.models) {
+    const delegateName = toLowerCamelDelegateName(model.name);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const delegate = (prismaUnscoped as any)[delegateName];
+    if (!delegate || typeof delegate.findMany !== "function") continue;
+
+    try {
+      let skip = 0;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const page: Array<Record<string, unknown>> = await delegate.findMany({ skip, take: PAGE_SIZE });
+        for (const row of page) {
+          yield Buffer.from(JSON.stringify({ __model: model.name, row }, backupJsonReplacer) + "\n", "utf8");
+          stats.totalRows += 1;
+        }
+        if (page.length < PAGE_SIZE) break;
+        skip += PAGE_SIZE;
+      }
+    } catch (error) {
+      // Um modelo problemático nunca pode derrubar o backup inteiro dos demais —
+      // mesmo princípio da versão anterior (e de `data-export-generation.worker.ts`).
+      log.error({ model: model.name, err: error }, "falha ao extrair modelo para o backup, pulando");
+    }
   }
-  return rows;
+}
+
+/**
+ * Transform que cifra (AES-256-GCM) o stream comprimido chunk a chunk: escreve o
+ * cabeçalho (magic + IV) antes do primeiro chunk cifrado, e o `authTag` (só
+ * disponível depois de `cipher.final()`) como os últimos 16 bytes do stream —
+ * mesma garantia de integridade do formato anterior, só reordenada para permitir
+ * streaming (o authTag do GCM nunca pode ser conhecido antes do fim do ciphertext).
+ */
+class EncryptAndFrameTransform extends Transform {
+  private readonly cipher: CipherGCM;
+  private readonly iv: Buffer;
+  private headerWritten = false;
+
+  constructor(key: Buffer, iv: Buffer) {
+    super();
+    this.iv = iv;
+    this.cipher = createCipheriv(ENCRYPTION_ALGORITHM, key, iv) as CipherGCM;
+  }
+
+  override _transform(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    if (!this.headerWritten) {
+      this.push(Buffer.concat([STREAMING_FORMAT_MAGIC, this.iv]));
+      this.headerWritten = true;
+    }
+    this.push(this.cipher.update(chunk));
+    callback();
+  }
+
+  override _flush(callback: (error?: Error | null) => void): void {
+    if (!this.headerWritten) {
+      this.push(Buffer.concat([STREAMING_FORMAT_MAGIC, this.iv]));
+      this.headerWritten = true;
+    }
+    this.push(this.cipher.final());
+    this.push(this.cipher.getAuthTag());
+    callback();
+  }
 }
 
 export async function encryptedDatabaseBackupProcessor(job: Job<{ triggeredBy: string }>): Promise<{ storageKey: string; fileSizeBytes: number }> {
@@ -103,47 +169,35 @@ export async function encryptedDatabaseBackupProcessor(job: Job<{ triggeredBy: s
       throw new Error(`BACKUP_ENCRYPTION_KEY inválida: esperado 32 bytes (64 caracteres hex), recebido ${backupKey.byteLength} bytes.`);
     }
 
-    // Dump lógico de TODOS os modelos do schema (plataforma inteira, cross-tenant) —
-    // nunca pula nenhum, inclusive modelos platform-wide como `PlatformSecret`
-    // (cifrados no próprio banco) e `Tenant`.
-    const dump: Record<string, Record<string, unknown>[]> = {};
-    let totalRows = 0;
-    for (const model of Prisma.dmmf.datamodel.models) {
-      try {
-        const rows = await dumpModel(model.name);
-        dump[model.name] = rows;
-        totalRows += rows.length;
-      } catch (error) {
-        // Um modelo problemático nunca pode derrubar o backup inteiro dos demais —
-        // mesmo princípio de `data-export-generation.worker.ts`.
-        log.error({ model: model.name, err: error }, "falha ao extrair modelo para o backup, pulando");
-      }
-    }
-
-    const jsonPayload = JSON.stringify({ generatedAt: new Date().toISOString(), models: dump }, backupJsonReplacer);
-    const compressed = gzipSync(Buffer.from(jsonPayload, "utf8"));
-
-    // IV (12 bytes, nunca reaproveitado) + authTag (16 bytes) + ciphertext, todos
-    // concatenados no MESMO arquivo — não depende de metadata do objeto no R2
-    // sobreviver para restaurar (o próprio arquivo .enc é autossuficiente).
+    const stats = { totalRows: 0, generatedAt: new Date().toISOString() };
     const iv = randomBytes(12);
-    const cipher = createCipheriv(ENCRYPTION_ALGORITHM, backupKey, iv);
-    const ciphertext = Buffer.concat([cipher.update(compressed), cipher.final()]);
-    const authTag = cipher.getAuthTag();
-    const encryptedFile = Buffer.concat([iv, authTag, ciphertext]);
+
+    // Pipeline 100% em stream: dump paginado (NDJSON) -> gzip -> cifra AES-256-GCM
+    // -> upload multipart direto ao R2 — em nenhum ponto o dump completo, comprimido
+    // ou cifrado existe inteiro em um único Buffer na memória do processo (ao
+    // contrário da versão anterior: `JSON.stringify` do banco inteiro + `gzipSync` +
+    // `Buffer.concat` do ciphertext inteiro, todos simultâneos antes do upload).
+    const ndjsonStream = Readable.from(dumpAllModelsAsNdjson(stats));
+    const gzipStream = ndjsonStream.pipe(createGzip());
+    const encryptStream = gzipStream.pipe(new EncryptAndFrameTransform(backupKey, iv));
+    // `.pipe()` não propaga erro de origem para o destino — garante que um erro em
+    // qualquer estágio anterior derruba o stream final (consumido pelo upload) em vez
+    // de deixá-lo pendurado esperando dados que nunca chegarão.
+    ndjsonStream.on("error", (err) => encryptStream.destroy(err));
+    gzipStream.on("error", (err) => encryptStream.destroy(err));
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const { storageKey, fileSizeBytes } = await putPlatformObjectStream({
+      category: "database-backups",
+      fileName: `database-backup-${timestamp}.enc`,
+      mimeType: "application/octet-stream",
+      body: encryptStream,
+    });
 
     // Identificador curto e não-reversível da chave usada (nunca a chave em si) —
     // permite, numa rotação futura de BACKUP_ENCRYPTION_KEY, saber qual chave
     // decifra qual backup antigo sem expor segredo nenhum no banco.
     const encryptionKeyId = createHash("sha256").update(backupKey).digest("hex").slice(0, 16);
-
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const { storageKey } = await putPlatformObjectDirect({
-      category: "database-backups",
-      fileName: `database-backup-${timestamp}.enc`,
-      mimeType: "application/octet-stream",
-      body: encryptedFile,
-    });
 
     await prismaUnscoped.databaseBackupLog.update({
       where: { id: logEntry.id },
@@ -151,13 +205,13 @@ export async function encryptedDatabaseBackupProcessor(job: Job<{ triggeredBy: s
         status: "SUCCESS",
         finishedAt: new Date(),
         storageKey,
-        fileSizeBytes: BigInt(encryptedFile.byteLength),
+        fileSizeBytes: BigInt(fileSizeBytes),
         encryptionKeyId,
       },
     });
 
-    log.info({ storageKey, totalRows, fileSizeBytes: encryptedFile.byteLength }, "backup_completed");
-    return { storageKey, fileSizeBytes: encryptedFile.byteLength };
+    log.info({ storageKey, totalRows: stats.totalRows, fileSizeBytes }, "backup_completed");
+    return { storageKey, fileSizeBytes };
   } catch (error) {
     const errorMessage = (error as Error).message;
     await prismaUnscoped.databaseBackupLog.update({
@@ -182,6 +236,6 @@ export async function scheduleEncryptedDatabaseBackupJob(): Promise<void> {
   await databaseBackupQueue.upsertJobScheduler(
     REPEATABLE_JOB_NAME,
     { pattern: DAILY_CRON_3AM },
-    { name: REPEATABLE_JOB_NAME, data: { triggeredBy: "cron" } },
+    { name: REPEATABLE_JOB_NAME, data: { triggeredBy: "cron" }, opts: HEAVY_RECURRING_JOB_OPTS },
   );
 }

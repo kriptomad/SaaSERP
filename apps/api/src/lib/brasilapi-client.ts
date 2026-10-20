@@ -7,6 +7,9 @@
 // Receita) para autopreencher razão social/nome fantasia/endereço no onboarding e
 // alertar quando o CNPJ informado está com situação cadastral diferente de ATIVA.
 import { isValidCnpj, normalizeCnpj } from "./br-documents";
+import { createModuleLogger } from "./logger";
+
+const log = createModuleLogger("brasilapi-client");
 
 const BRASILAPI_TIMEOUT_MS = 8_000;
 
@@ -48,7 +51,16 @@ export async function lookupCnpj(rawCnpj: string): Promise<BrasilApiCnpjResult> 
       headers: { Accept: "application/json" },
     });
     if (response.status === 404) {
-      throw new CnpjNotFoundError(`CNPJ ${cnpj} não encontrado na Receita Federal.`);
+      // fa-w4-brasilapi-cnpj-in-error — a mensagem de erro antiga ecoava o CNPJ
+      // completo de volta na resposta HTTP (`CNPJ ${cnpj} não encontrado...`), ou
+      // seja, qualquer caller que repassasse `error.message` ao frontend (ou a um
+      // provedor de observabilidade de terceiros) vazava de volta o documento que
+      // o próprio usuário acabou de submeter. O CNPJ em si não é segredo (é
+      // público na Receita Federal), mas não há motivo para devolvê-lo embutido no
+      // texto de erro — mensagem agora é genérica; o CNPJ consultado fica só no
+      // log estruturado do servidor (nunca chega à resposta HTTP).
+      log.info({ cnpj }, "CNPJ não encontrado na Receita Federal via BrasilAPI");
+      throw new CnpjNotFoundError("CNPJ não encontrado.");
     }
     if (!response.ok) {
       throw new BrasilApiUnavailableError(`BrasilAPI retornou HTTP ${response.status}.`);

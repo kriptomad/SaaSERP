@@ -15,6 +15,7 @@ import { validatePasswordPolicy } from "../../lib/password-policy";
 import { sendPlatformEmail } from "../../lib/platform-email";
 import { getPlatformSecret } from "../../lib/platform-secrets";
 import { createModuleLogger } from "../../lib/logger";
+import { zodValidationErrorResponse } from "../../lib/validation-error";
 
 export const authRouter = Router();
 
@@ -63,7 +64,7 @@ authRouter.post("/signup", async (req, res) => {
   }
   const parsed = signupSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+    return zodValidationErrorResponse(res, parsed.error);
   }
   const input = parsed.data;
 
@@ -164,7 +165,7 @@ const loginSchema = z.object({
 authRouter.post("/login", async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+    return zodValidationErrorResponse(res, parsed.error);
   }
   const { tenantSlug, email, password } = parsed.data;
 
@@ -236,7 +237,7 @@ const passwordResetRequestSchema = z.object({ tenantSlug: z.string().min(1), ema
 authRouter.post("/auth/password-reset/request", async (req, res) => {
   const parsed = passwordResetRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+    return zodValidationErrorResponse(res, parsed.error);
   }
   const { tenantSlug, email } = parsed.data;
 
@@ -297,7 +298,7 @@ const passwordResetConfirmSchema = z.object({ token: z.string().min(1), newPassw
 authRouter.post("/auth/password-reset/confirm", async (req, res) => {
   const parsed = passwordResetConfirmSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+    return zodValidationErrorResponse(res, parsed.error);
   }
 
   const passwordPolicy = validatePasswordPolicy(parsed.data.newPassword);

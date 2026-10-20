@@ -23,6 +23,10 @@ import { notifyTenant } from "../modules/notifications/notify.service";
 interface EmitFiscalDocumentJobData {
   fiscalDocumentId: string;
   tenantId: string;
+  /** fa-w4-obs-no-request-id — opcional, só para correlação de log (ver
+   * modules/fiscal/queues/fiscal-emission.queue.ts); nunca usado na lógica de
+   * negócio do processamento em si. */
+  requestId?: string;
 }
 
 // GAP DE COMPLIANCE CONHECIDO E DOCUMENTADO (fa-fiscal-no-formal-contingency):

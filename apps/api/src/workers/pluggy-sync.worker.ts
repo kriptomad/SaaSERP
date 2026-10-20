@@ -116,9 +116,14 @@ async function syncPersonalAccounts(tenantId: string, consentId: string, account
 
     const transactions = await fetchPluggyTransactions(account.id, windowStart, new Date());
 
-    // Idempotente via `PersonalTransaction.openFinanceExternalId @unique` (Capítulo
-    // 22.5) — mesmo princípio do lado BUSINESS, chave real do agregador em vez de id
-    // interno. `createdByUserId` exige um User real (FK obrigatória); como não existe
+    // Idempotente via `PersonalTransaction.@@unique([tenantId, accountId,
+    // openFinanceExternalId])` (GAP DE AUDITORIA FECHADO —
+    // fa-w4-pluggy-tx-dedup-not-tenant-scoped: a chave ERA só `openFinanceExternalId`
+    // GLOBAL, sem tenant/conta — um id de transação do agregador reaproveitado ou
+    // colidido entre dois tenants diferentes faria o `upsert` aplicar o `update` sobre
+    // a linha do OUTRO tenant, corrompendo dado cross-tenant. Mesmo princípio do lado
+    // BUSINESS, chave real do agregador em vez de id interno, agora sempre escopada).
+    // `createdByUserId` exige um User real (FK obrigatória); como não existe
     // um ator humano por trás de uma sincronização automática, usa o próprio dono da
     // conta (`ownerId`) quando presente, ou o primeiro OWNER do tenant como fallback
     // — nunca um `createdByUserId` inventado/fictício.
@@ -126,7 +131,13 @@ async function syncPersonalAccounts(tenantId: string, consentId: string, account
 
     for (const t of transactions) {
       await prisma.personalTransaction.upsert({
-        where: { openFinanceExternalId: t.id },
+        where: {
+          tenantId_accountId_openFinanceExternalId: {
+            tenantId,
+            accountId: personalAccount.id,
+            openFinanceExternalId: t.id,
+          },
+        },
         create: {
           tenantId,
           accountId: personalAccount.id,
@@ -157,6 +168,18 @@ export async function pluggySyncProcessor(job: Job<PluggySyncJobData>): Promise<
   // consentimento (é exatamente o que esta consulta resolve) — usa o client
   // `prismaUnscoped`, nunca o tenant-scoped, para este único lookup inicial.
   const consent = await prismaUnscoped.openFinanceConsent.findUniqueOrThrow({ where: { id: consentId } });
+  // GAP DE AUDITORIA FECHADO (fa-w4-pluggy-item-consent-mismatch): o job carrega o
+  // consentimento só por `consentId` e nunca conferia se o `itemId` do job
+  // correspondia de fato ao `OpenFinanceConsent.itemId` carregado — um job
+  // forjado/corrompido (ou um bug de enfileiramento que casasse o `consentId` errado
+  // com o `itemId` de outro item) faria o worker buscar contas da Pluggy de UM item
+  // e gravá-las vinculadas ao consentimento (e tenant) de OUTRO. Falha explícita e
+  // aborta o job em vez de prosseguir silenciosamente.
+  if (consent.itemId !== itemId) {
+    throw new Error(
+      `pluggySyncProcessor: itemId do job ("${itemId}") não corresponde ao itemId do consentimento ("${consent.itemId}", consentId="${consentId}") — job abortado para evitar mistura de contas entre items/consentimentos.`,
+    );
+  }
   const tenant = await prismaUnscoped.tenant.findUniqueOrThrow({ where: { id: consent.tenantId }, select: { tenantType: true } });
   const windowStart = resolveSyncWindowStart(consent.lastSyncedAt);
 

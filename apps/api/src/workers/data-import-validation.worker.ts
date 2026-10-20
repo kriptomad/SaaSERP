@@ -42,7 +42,7 @@ function errorReportToCsv(entries: RowErrorReportEntry[]): string {
 export async function dataImportValidationProcessor(job: Job<DataImportValidationJobData>): Promise<{ totalRows: number; errorCount: number }> {
   const { jobId, tenantId } = job.data;
 
-  await prismaUnscoped.dataImportJob.update({ where: { id: jobId }, data: { status: "VALIDATING" } });
+  await prismaUnscoped.dataImportJob.update({ where: { id: jobId }, data: { status: "VALIDATING", processingStartedAt: new Date() } });
 
   try {
     const importJob = await prismaUnscoped.dataImportJob.findFirstOrThrow({ where: { id: jobId, tenantId } });

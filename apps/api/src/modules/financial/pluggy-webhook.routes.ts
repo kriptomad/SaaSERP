@@ -59,11 +59,17 @@ pluggyWebhookRouter.post("/webhooks/pluggy", async (req: Request, res: Response)
 
   const parsed = pluggyWebhookEventSchema.safeParse(req.body);
   if (!parsed.success) {
-    // Melhor prática documentada pela própria Pluggy: reconhecer rápido (200) mesmo
-    // em payload inesperado, para nunca entrar em loop de retry por um formato de
-    // evento novo que ainda não mapeamos — mas o corpo bruto fica logado para
-    // investigação manual.
-    log.warn({ body: req.body }, "payload em formato inesperado");
+    // fa-w4-pluggy-webhook-raw-body-logged — logar `req.body` bruto aqui exporia
+    // dado de Open Finance (bancário) de terceiros em texto puro no agregador de
+    // logs sempre que a Pluggy mandar um payload fora do schema esperado. Melhor
+    // prática documentada pela própria Pluggy continua sendo reconhecer rápido
+    // (200) mesmo em payload inesperado, para nunca entrar em loop de retry — mas
+    // só logamos campos não sensíveis (evento/itemId, quando presentes) e o
+    // resumo estruturado do erro de validação do Zod, nunca o corpo inteiro.
+    log.warn(
+      { eventType: (req.body as Record<string, unknown> | undefined)?.event, itemId: (req.body as Record<string, unknown> | undefined)?.itemId, validationError: parsed.error.flatten() },
+      "payload em formato inesperado",
+    );
     return res.status(200).json({ success: true, data: { acknowledged: true }, error: null });
   }
 

@@ -9,7 +9,7 @@
 // aqui, de forma idempotente).
 import { Worker, Job } from "bullmq";
 import { prismaUnscoped } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, scheduledSubscriptionCancellationsQueue } from "../lib/queue";
+import { queueRedisConnection, QUEUE_NAMES, scheduledSubscriptionCancellationsQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 import { cancelAsaasSubscription } from "../modules/billing/asaas.client";
 import { createModuleLogger } from "../lib/logger";
 
@@ -58,6 +58,6 @@ export async function scheduleEnforceScheduledCancellationsJob(): Promise<void> 
   await scheduledSubscriptionCancellationsQueue.upsertJobScheduler(
     REPEATABLE_JOB_NAME,
     { pattern: DAILY_CRON_4AM },
-    { name: REPEATABLE_JOB_NAME },
+    { name: REPEATABLE_JOB_NAME, opts: DEFAULT_RECURRING_JOB_OPTS },
   );
 }

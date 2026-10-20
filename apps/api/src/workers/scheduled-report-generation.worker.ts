@@ -12,7 +12,7 @@
 // usado por todo o resto do sistema (retry, backoff, observabilidade única).
 import { Worker, Job } from "bullmq";
 import { prismaUnscoped, TenantScopedPrismaClient } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, reportGenerationQueue } from "../lib/queue";
+import { queueRedisConnection, QUEUE_NAMES, reportGenerationQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 import { executeReportDefinition, InvalidReportFieldError, ReportFilterCondition } from "../modules/reports/execute-report-definition";
 import { buildReportPdf, buildReportXlsx } from "../modules/reports/report-export.service";
 import { sendTransactionalEmail } from "../modules/notifications/channels/email.channel";
@@ -108,7 +108,7 @@ export async function syncScheduledReportJobSchedulers(): Promise<void> {
     await reportGenerationQueue.upsertJobScheduler(
       schedule.id,
       { pattern: schedule.cronExpression },
-      { name: "run-scheduled-report", data: { scheduledReportId: schedule.id } satisfies ScheduledReportJobData },
+      { name: "run-scheduled-report", data: { scheduledReportId: schedule.id } satisfies ScheduledReportJobData, opts: DEFAULT_RECURRING_JOB_OPTS },
     );
   }
 }

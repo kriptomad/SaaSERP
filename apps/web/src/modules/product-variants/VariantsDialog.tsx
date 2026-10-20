@@ -39,6 +39,7 @@ function AxesSection({ productId }: { productId: string }) {
   const axes = useQuery({ queryKey: ["variant-axes", productId], queryFn: () => productVariantsApi.listAxes(productId) });
   const [newAxisName, setNewAxisName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [axisToDelete, setAxisToDelete] = useState<{ id: string; name: string; variantCount: number } | null>(null);
 
   const create = useMutation({
     mutationFn: (name: string) => productVariantsApi.createAxis(productId, name),
@@ -54,8 +55,12 @@ function AxesSection({ productId }: { productId: string }) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["variant-axes", productId] });
       toast.success("Eixo removido.");
+      setAxisToDelete(null);
     },
-    onError: (e) => toast.error(errorMessage(e)),
+    onError: (e) => {
+      toast.error(errorMessage(e));
+      setAxisToDelete(null);
+    },
   });
 
   return (
@@ -88,7 +93,12 @@ function AxesSection({ productId }: { productId: string }) {
                 </Typography>
                 <Tooltip title="Remover eixo">
                   <span>
-                    <IconButton size="small" onClick={() => remove.mutate(axis.id)} disabled={remove.isPending}>
+                    <IconButton
+                      size="small"
+                      aria-label="Remover eixo"
+                      onClick={() => setAxisToDelete({ id: axis.id, name: axis.name, variantCount: axis._count.variants })}
+                      disabled={remove.isPending}
+                    >
                       <DeleteIcon fontSize="inherit" />
                     </IconButton>
                   </span>
@@ -98,6 +108,19 @@ function AxesSection({ productId }: { productId: string }) {
           </Stack>
         )}
       </QueryState>
+      <ConfirmDialog
+        open={axisToDelete !== null}
+        title="Remover eixo"
+        message={`Remover o eixo "${axisToDelete?.name}"? ${
+          axisToDelete && axisToDelete.variantCount > 0
+            ? `Isso afeta ${axisToDelete.variantCount} variante(s) associada(s) a este eixo.`
+            : "Esta ação não pode ser desfeita."
+        }`}
+        confirmLabel="Remover eixo"
+        busy={remove.isPending}
+        onConfirm={() => axisToDelete && remove.mutate(axisToDelete.id)}
+        onClose={() => setAxisToDelete(null)}
+      />
     </Stack>
   );
 }
@@ -204,12 +227,20 @@ function VariantsSection({ productId }: { productId: string }) {
                     <TableCell align="right">{qty(v.stockQuantity)}</TableCell>
                     <TableCell align="right">
                       <Tooltip title="Ajustar estoque">
-                        <IconButton size="small" onClick={() => setAdjusting({ id: v.id, label: `${v.axis.name}: ${v.axisValue}` })}>
+                        <IconButton
+                          size="small"
+                          aria-label={`Ajustar estoque da variante ${v.axis.name}: ${v.axisValue}`}
+                          onClick={() => setAdjusting({ id: v.id, label: `${v.axis.name}: ${v.axisValue}` })}
+                        >
                           <TuneIcon fontSize="small" />
                         </IconButton>
                       </Tooltip>
                       <Tooltip title="Remover">
-                        <IconButton size="small" onClick={() => setToDelete(v.id)}>
+                        <IconButton
+                          size="small"
+                          aria-label={`Remover variante ${v.axis.name}: ${v.axisValue}`}
+                          onClick={() => setToDelete(v.id)}
+                        >
                           <DeleteIcon fontSize="small" />
                         </IconButton>
                       </Tooltip>

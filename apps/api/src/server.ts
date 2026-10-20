@@ -7,6 +7,9 @@ import "express-async-errors";
 import cors from "cors";
 import helmet from "helmet";
 import { logger } from "./lib/logger";
+import { initSentry, Sentry } from "./lib/sentry";
+import { installProcessCrashGuards } from "./lib/process-guards";
+import { requestIdMiddleware } from "./middlewares/request-id.middleware";
 import { authMiddleware, requireAuth, impersonationAuditMiddleware } from "./middlewares/auth.middleware";
 import { tenantContextMiddleware } from "./middlewares/tenant-context.middleware";
 import { tenantLockoutMiddleware } from "./middlewares/tenant-lockout.middleware";
@@ -79,6 +82,7 @@ import { tireServiceOrdersRouter } from "./modules/tires/tire-service-orders.rou
 import { carWashQueueRouter } from "./modules/car-wash/car-wash-queue.routes";
 import { carWashServiceRouter } from "./modules/car-wash/car-wash-service.routes";
 import { dataExportRouter } from "./modules/data-portability/data-export.routes";
+import { dataDeletionRequestRouter } from "./modules/data-portability/data-deletion-request.routes";
 import { dataImportRouter } from "./modules/data-portability/data-import.routes";
 import { productPricingRouter } from "./modules/catalog/product-pricing.routes";
 import { variantTurnoverRouter } from "./modules/catalog/variant-turnover.routes";
@@ -94,7 +98,20 @@ import { redis } from "./lib/redis";
 import { closeAllSseConnections } from "./lib/sse";
 import { getPlatformSecret } from "./lib/platform-secrets";
 
+// fa-w4-obs-no-error-tracking-apm / fa-w4-obs-no-crash-handlers-server: inicializa
+// Sentry (no-op sem SENTRY_DSN) e instala os handlers de uncaughtException/
+// unhandledRejection ANTES de montar qualquer rota — se algo explodir durante o
+// próprio boot (ex.: um middleware lançando de forma síncrona na primeira
+// requisição), a rede de segurança já está de pé.
+initSentry("filitech-api");
+installProcessCrashGuards("filitech-api");
+
 const app = express();
+
+// fa-w4-obs-no-request-id: primeiro middleware da cadeia, de propósito — toda
+// requisição (inclusive os webhooks montados antes do express.json() abaixo)
+// precisa ter `req.requestId`/`req.log` disponíveis desde a primeira linha de log.
+app.use(requestIdMiddleware);
 
 // Railway e Vercel terminam TLS/proxy antes da aplicação — sem isso, `req.ip`
 // retornaria o IP interno do proxy reverso, nunca o IP real do cliente, quebrando
@@ -156,11 +173,27 @@ app.use(pluggyWebhookRouter);
 
 app.use(express.json({ limit: "2mb" }));
 
-// Health check — usado pelo Railway/Docker/Vercel para liveness/readiness probes, e
-// também pelo dashboard do Filitech ERP Desktop (apps/desktop) em modo HOST para medir
-// saúde do backend local. Inclui Redis (fila BullMQ) para o dashboard não precisar de
-// um endpoint dedicado só para isso.
-app.get("/health", async (_req, res) => {
+// fa-w4-obs-redis-healthcheck-shallow: timeout curto para o PING real — um Redis
+// gerenciado travado/em failover não pode deixar o healthcheck inteiro pendurado
+// esperando resposta que nunca chega.
+const REDIS_PING_TIMEOUT_MS = 1_500;
+
+async function pingRedisWithTimeout(): Promise<boolean> {
+  try {
+    const pong = await Promise.race([
+      redis.ping(),
+      new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("redis ping timeout")), REDIS_PING_TIMEOUT_MS);
+        timer.unref();
+      }),
+    ]);
+    return pong === "PONG";
+  } catch {
+    return false;
+  }
+}
+
+async function buildHealthResult(): Promise<{ status: string; database: string; redis: string; timestamp: string; error?: string }> {
   const result: { status: string; database: string; redis: string; timestamp: string; error?: string } = {
     status: "ok",
     database: "unknown",
@@ -175,8 +208,52 @@ app.get("/health", async (_req, res) => {
     result.database = "down";
     result.error = (error as Error).message;
   }
-  result.redis = redis.status === "ready" ? "up" : "down";
-  res.status(result.database === "up" ? 200 : 503).json(result);
+
+  // CORREÇÃO (fa-w4-obs-redis-healthcheck-shallow): antes só checava
+  // `redis.status === "ready"` — estado de conexão LOCAL do cliente ioredis, que
+  // pode continuar "ready" por um bom tempo mesmo com o Redis gerenciado travado/
+  // catatônico (failover em andamento, processo preso) sem responder a comandos
+  // reais. Agora faz um PING de verdade (com timeout acima) antes de reportar "up".
+  const redisUp = await pingRedisWithTimeout();
+  result.redis = redisUp ? "up" : "down";
+  if (!redisUp) {
+    result.status = "degraded";
+  }
+
+  return result;
+}
+
+// Health check combinado — usado pelo Railway/Docker/Vercel (`healthcheckPath =
+// "/health"` em railway.toml) e pelo dashboard do Filitech ERP Desktop (apps/desktop,
+// modo HOST) para medir saúde do backend local.
+//
+// NOTA (fa-w4-obs-redis-healthcheck-shallow): este endpoint único mistura
+// liveness+readiness DE PROPÓSITO para este MVP — separar formalmente exigiria
+// também atualizar `healthcheckPath` no railway.toml e qualquer outro orquestrador/
+// monitor externo já apontando para `/health` hoje, uma mudança de configuração
+// coordenada fora do alcance desta correção pontual. `/health/live` e
+// `/health/ready` abaixo já existem, de forma puramente ADITIVA (não quebram nada
+// que já aponta para `/health`), para quem quiser configurar um orquestrador novo/
+// healthcheck mais granular (ex.: liveness sem dependência de Postgres/Redis) no
+// futuro.
+app.get("/health", async (_req, res) => {
+  const result = await buildHealthResult();
+  res.status(result.database === "up" && result.redis === "up" ? 200 : 503).json(result);
+});
+
+// Liveness: só responde que o processo HTTP está de pé e com o event loop livre —
+// nunca verifica dependências externas. Um "down" aqui (timeout/sem resposta)
+// significa "o processo travou, mate e reinicie"; nunca "espere ele se recuperar".
+app.get("/health/live", (_req, res) => {
+  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// Readiness: processo está de pé E consegue falar com Postgres/Redis de verdade —
+// um "down" aqui significa "não roteie tráfego novo para este processo ainda" (tira
+// da rotação do load balancer), sem necessariamente matar o processo.
+app.get("/health/ready", async (_req, res) => {
+  const result = await buildHealthResult();
+  res.status(result.database === "up" && result.redis === "up" ? 200 : 503).json(result);
 });
 
 // Rotas públicas (signup/login) — não passam por auth/tenant middlewares.
@@ -303,12 +380,22 @@ app.use(tireServiceOrdersRouter);
 app.use(carWashQueueRouter);
 app.use(carWashServiceRouter);
 app.use(dataExportRouter);
+app.use(dataDeletionRequestRouter);
 app.use(dataImportRouter);
 app.use(onlineStoreRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ error: { code: "NOT_FOUND", message: "Rota não encontrada." } });
 });
+
+// fa-w4-obs-no-error-tracking-apm: captura toda exceção que chegar até aqui (mesmas
+// que o middleware de erro abaixo trata) e envia ao Sentry — precisa vir DEPOIS de
+// todas as rotas e ANTES do error handler final de 4 argumentos (ordem exigida pelo
+// próprio SDK). No-op transparente quando SENTRY_DSN não está configurado (ver
+// lib/sentry.ts): `Sentry.setupExpressErrorHandler` sem `Sentry.init()` prévio não
+// lança nem altera o comportamento de erro existente, apenas não envia nada a lugar
+// nenhum.
+Sentry.setupExpressErrorHandler(app);
 
 // Error-handling middleware global — GAP DE AUDITORIA ENCONTRADO E CORRIGIDO:
 // o Express 4 NÃO captura rejeições de Promise lançadas dentro de handlers
@@ -323,15 +410,26 @@ app.use((_req, res) => {
 // Node morria em vez de responder 500/503. Agora toda exceção não tratada
 // retorna um envelope JSON consistente, e o processo continua no ar.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  logger.error({ err }, "unhandled-error");
+app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  // fa-w4-obs-no-request-id: usa o logger já amarrado ao requestId desta requisição
+  // (populado por requestIdMiddleware, primeiro middleware da cadeia) — nunca o
+  // `logger` cru aqui, para que esta linha (frequentemente a única pista de um bug
+  // em produção) seja correlacionável com o resto do log da mesma requisição.
+  (req.log ?? logger).error({ err }, "unhandled-error");
   if (res.headersSent) {
     return;
   }
   res.status(500).json({
     success: false,
     data: null,
-    error: { code: "INTERNAL_ERROR", message: "Erro interno inesperado. Nossa equipe já foi notificada." },
+    error: {
+      code: "INTERNAL_ERROR",
+      message: "Erro interno inesperado. Nossa equipe já foi notificada.",
+      // fa-w4-obs-no-request-id: devolve o requestId no próprio corpo do erro (além
+      // do header x-request-id já setado por requestIdMiddleware) — facilita o
+      // suporte/usuário citar um único identificador ao reportar o problema.
+      requestId: req.requestId,
+    },
   });
 });
 

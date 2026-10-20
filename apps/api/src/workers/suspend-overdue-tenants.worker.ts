@@ -9,7 +9,7 @@
 // falha de infraestrutura externa ao Filitech.
 import { Worker, Job } from "bullmq";
 import { prismaUnscoped } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, suspendOverdueTenantsQueue } from "../lib/queue";
+import { queueRedisConnection, QUEUE_NAMES, suspendOverdueTenantsQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 import { notifyTenant } from "../modules/notifications/notify.service";
 
 const REPEATABLE_JOB_NAME = "daily-sweep";
@@ -63,6 +63,6 @@ export async function scheduleSuspendOverdueTenantsJob(): Promise<void> {
   await suspendOverdueTenantsQueue.upsertJobScheduler(
     REPEATABLE_JOB_NAME,
     { pattern: DAILY_CRON_3AM },
-    { name: REPEATABLE_JOB_NAME },
+    { name: REPEATABLE_JOB_NAME, opts: DEFAULT_RECURRING_JOB_OPTS },
   );
 }

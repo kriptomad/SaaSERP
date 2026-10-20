@@ -190,6 +190,20 @@ async function markBillingEventFailed(provider: string, externalEventKey: string
   await prismaUnscoped.billingEvent.updateMany({ where: { provider, externalEventKey }, data: { status: "FAILED" } }).catch(() => undefined);
 }
 
+// Resposta padronizada para qualquer falha de processamento de webhook (handler de
+// negócio lançou exceção): nunca expõe `err.message` cru ao provedor (pode vazar
+// stack trace/detalhes internos de infraestrutura em um endpoint sem autenticação
+// de usuário) — a mensagem pública é sempre genérica, e o erro real vai para o
+// logger estruturado com o contexto completo para investigação.
+function webhookProcessingFailedResponse(res: Response, err: unknown, context: Record<string, unknown>): Response {
+  log.error({ err, ...context }, "falha ao processar webhook de billing");
+  return res.status(500).json({
+    success: false,
+    data: null,
+    error: { code: "WEBHOOK_PROCESSING_FAILED", message: "Falha ao processar o evento de webhook. Será reprocessado." },
+  });
+}
+
 function respondToBillingEventClaim(res: Response, claim: BillingEventClaim): Response | null {
   if (claim.outcome === "duplicate-succeeded") {
     return res.json({ received: true, duplicate: true });
@@ -198,7 +212,11 @@ function respondToBillingEventClaim(res: Response, claim: BillingEventClaim): Re
     // Não-2xx deliberado: o provedor (Stripe/Asaas) reentrega webhooks que não
     // recebem 2xx — nunca respondemos 200 para um evento cujo processamento
     // concorrente ainda não terminou nem falhou.
-    return res.status(409).json({ error: { code: "EVENT_PROCESSING_IN_PROGRESS" } });
+    return res.status(409).json({
+      success: false,
+      data: null,
+      error: { code: "EVENT_PROCESSING_IN_PROGRESS", message: "Este evento já está sendo processado por outra requisição." },
+    });
   }
   return null; // "claimed" — segue para o processamento normal
 }
@@ -208,7 +226,11 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
   const endpointSecret = await getPlatformSecret("STRIPE_WEBHOOK_SECRET");
 
   if (!signature || !endpointSecret) {
-    return res.status(400).json({ error: { code: "MISSING_SIGNATURE" } });
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: { code: "MISSING_SIGNATURE", message: "Assinatura do webhook ausente ou segredo não configurado." },
+    });
   }
 
   const stripe = await getStripeClient();
@@ -218,7 +240,15 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
     // obrigatório para a verificação HMAC funcionar; nunca o corpo já parseado em JSON.
     event = stripe.webhooks.constructEvent(req.body, signature, endpointSecret);
   } catch (err) {
-    return res.status(400).json({ error: { code: "INVALID_SIGNATURE", message: (err as Error).message } });
+    // Nunca expõe a mensagem crua da verificação HMAC (pode vazar detalhes internos
+    // do SDK/segredo) — loga o erro real via logger estruturado e responde com uma
+    // mensagem pública genérica, seguindo o envelope padrão do resto da API.
+    log.warn({ err }, "assinatura de webhook Stripe inválida");
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: { code: "INVALID_SIGNATURE", message: "Assinatura do webhook inválida." },
+    });
   }
 
   // Capítulo 9.3 — conclusão do Checkout hospedado: tratado ANTES do lookup genérico
@@ -251,7 +281,7 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
       await markBillingEventSucceeded("stripe", event.id);
     } catch (err) {
       await markBillingEventFailed("stripe", event.id);
-      return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
+      return webhookProcessingFailedResponse(res, err, { provider: "stripe", eventType: event.type, eventId: event.id });
     }
 
     return res.json({ received: true });
@@ -297,7 +327,7 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
       await markBillingEventSucceeded("stripe", event.id);
     } catch (err) {
       await markBillingEventFailed("stripe", event.id);
-      return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
+      return webhookProcessingFailedResponse(res, err, { provider: "stripe", eventType: event.type, eventId: event.id });
     }
     return res.json({ received: true });
   }
@@ -327,7 +357,7 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
   try {
     switch (event.type) {
       case "invoice.payment_failed":
-        await handlePaymentFailure(subscription.tenantId, subscription.id, object.id, eventAt);
+        await handlePaymentFailure(subscription.tenantId, subscription.id, object.id, eventAt, req.requestId);
         break;
       case "invoice.paid":
         // Confirmação real de pagamento (fatura efetivamente paga) — a fonte
@@ -382,7 +412,7 @@ stripeWebhookRouter.post("/webhooks/stripe", async (req: Request, res: Response)
     await markBillingEventSucceeded("stripe", event.id);
   } catch (err) {
     await markBillingEventFailed("stripe", event.id);
-    return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
+    return webhookProcessingFailedResponse(res, err, { provider: "stripe", eventType: event.type, eventId: event.id });
   }
 
   return res.json({ received: true });
@@ -398,7 +428,11 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
     receivedBuf.length === expectedBuf.length && expectedBuf.length > 0 && crypto.timingSafeEqual(receivedBuf, expectedBuf);
 
   if (!isValid) {
-    return res.status(401).json({ error: { code: "INVALID_WEBHOOK_TOKEN" } });
+    return res.status(401).json({
+      success: false,
+      data: null,
+      error: { code: "INVALID_WEBHOOK_TOKEN", message: "Token de webhook inválido ou ausente." },
+    });
   }
 
   const {
@@ -465,7 +499,7 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
         await markBillingEventSucceeded("asaas", `${eventType}:${payment.id}`);
       } catch (err) {
         await markBillingEventFailed("asaas", `${eventType}:${payment.id}`);
-        return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
+        return webhookProcessingFailedResponse(res, err, { provider: "asaas", eventType, paymentId: payment.id });
       }
       return res.json({ received: true });
     }
@@ -487,7 +521,7 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
     switch (eventType) {
       case "PAYMENT_OVERDUE":
       case "PAYMENT_FAILED":
-        await handlePaymentFailure(subscription.tenantId, subscription.id, payment.id, eventAt);
+        await handlePaymentFailure(subscription.tenantId, subscription.id, payment.id, eventAt, req.requestId);
         break;
       case "PAYMENT_RECEIVED":
       case "PAYMENT_CONFIRMED":
@@ -509,7 +543,7 @@ asaasWebhookRouter.post("/webhooks/asaas", async (req: Request, res: Response) =
     await markBillingEventSucceeded("asaas", `${eventType}:${payment.id}`);
   } catch (err) {
     await markBillingEventFailed("asaas", `${eventType}:${payment.id}`);
-    return res.status(500).json({ error: { code: "WEBHOOK_PROCESSING_FAILED", message: (err as Error).message } });
+    return webhookProcessingFailedResponse(res, err, { provider: "asaas", eventType, paymentId: payment.id });
   }
 
   return res.json({ received: true });

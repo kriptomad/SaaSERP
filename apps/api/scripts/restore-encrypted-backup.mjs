@@ -9,7 +9,14 @@
 //   BACKUP_ENCRYPTION_KEY=<hex64> DATABASE_URL=<postgres://...destino...> \
 //     node apps/api/scripts/restore-encrypted-backup.mjs ./database-backup-2026-10-27.enc
 //
-// Formato do arquivo: 12 bytes IV || 16 bytes authTag || ciphertext (gzip do JSON).
+// Formato do arquivo:
+//   - Legado ("v1"): 12 bytes IV || 16 bytes authTag || ciphertext (gzip de um único
+//     JSON `{ generatedAt, models: { ModelName: [...] } }`).
+//   - Atual ("v2", fa-w4-backup-worker-oom): 4 bytes mágicos "FBK2" || 12 bytes IV ||
+//     ciphertext (gzip de NDJSON, uma linha JSON por registro) || 16 bytes authTag no
+//     FINAL do arquivo — reordenado em relação ao v1 porque o authTag do GCM só é
+//     conhecido depois de cifrar TUDO, e o worker agora cifra em stream (nunca monta
+//     o ciphertext inteiro em memória antes de gravar o arquivo).
 // Importante: este script faz `createMany({ skipDuplicates: true })` por modelo, na
 // ORDEM EM QUE OS MODELOS APARECEM NO DMMF (que já respeita, na prática, a ordem de
 // declaração no schema.prisma — tabelas "pai" tendem a vir antes das "filhas", mas
@@ -35,14 +42,26 @@ if (!backupKeyHex) {
 const backupKey = Buffer.from(backupKeyHex, "hex");
 
 const fileBuffer = readFileSync(filePath);
-const iv = fileBuffer.subarray(0, 12);
-const authTag = fileBuffer.subarray(12, 28);
-const ciphertext = fileBuffer.subarray(28);
+const STREAMING_FORMAT_MAGIC = Buffer.from("FBK2", "ascii");
+const isStreamingFormat = fileBuffer.subarray(0, 4).equals(STREAMING_FORMAT_MAGIC);
+
+let iv;
+let authTag;
+let ciphertext;
+if (isStreamingFormat) {
+  iv = fileBuffer.subarray(4, 16);
+  authTag = fileBuffer.subarray(fileBuffer.length - 16);
+  ciphertext = fileBuffer.subarray(16, fileBuffer.length - 16);
+} else {
+  iv = fileBuffer.subarray(0, 12);
+  authTag = fileBuffer.subarray(12, 28);
+  ciphertext = fileBuffer.subarray(28);
+}
 
 const decipher = createDecipheriv("aes-256-gcm", backupKey, iv);
 decipher.setAuthTag(authTag);
 const compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-const jsonPayload = gunzipSync(compressed).toString("utf8");
+const decompressed = gunzipSync(compressed).toString("utf8");
 
 // Reverte o replacer de `backupJsonReplacer` (Date/Buffer/BigInt/Decimal marcados
 // com `__type`) — o reviver é o espelho exato da serialização do worker.
@@ -56,7 +75,26 @@ function backupJsonReviver(_key, value) {
   return value;
 }
 
-const parsed = JSON.parse(jsonPayload, backupJsonReviver);
+/** Reconstrói o mesmo formato em memória `{ generatedAt, models: { ModelName: [...] } }` a partir do NDJSON v2, para reaproveitar o loop de restauração abaixo sem duplicar lógica. */
+function parseStreamingNdjson(text) {
+  const models = {};
+  let generatedAt = null;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    const parsed = JSON.parse(line, backupJsonReviver);
+    if (parsed.__meta) {
+      generatedAt = parsed.generatedAt;
+      continue;
+    }
+    if (parsed.__model) {
+      if (!models[parsed.__model]) models[parsed.__model] = [];
+      models[parsed.__model].push(parsed.row);
+    }
+  }
+  return { generatedAt, models };
+}
+
+const parsed = isStreamingFormat ? parseStreamingNdjson(decompressed) : JSON.parse(decompressed, backupJsonReviver);
 const prisma = new PrismaClient();
 
 function toLowerCamelDelegateName(modelName) {

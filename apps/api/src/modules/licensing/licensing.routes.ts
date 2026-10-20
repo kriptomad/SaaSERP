@@ -69,9 +69,29 @@ licensingRouter.post("/licensing/trial", requireAuth, async (req: Request, res: 
   }
 
   const trialEndsAt = new Date(Date.now() + TRIAL_DURATION_DAYS * 24 * 60 * 60 * 1000);
-  const license = await prisma.tenantLicense.create({
-    data: { tenantId, status: "TRIAL", trialEndsAt, licensedModules: [] },
-  });
+  // GAP DE AUDITORIA FECHADO (fa-w4-licensing-trial-race): o `findUnique` acima e o
+  // `create` abaixo não rodavam dentro de uma transação/lock — duas requisições
+  // concorrentes (duplo-clique, retry de rede) podiam ambas passar pela checagem de
+  // "não existe licença ainda" e colidir na constraint única de `tenantId` do banco,
+  // vazando um erro Prisma P2002 não tratado como 500 para o cliente. A proteção real
+  // contra a corrida já era a constraint única do banco (nunca o SELECT acima, que é
+  // só uma otimização de resposta rápida/amigável no caminho feliz); agora o P2002 é
+  // capturado e traduzido na MESMA resposta 409/TRIAL_ALREADY_GRANTED já usada acima.
+  let license;
+  try {
+    license = await prisma.tenantLicense.create({
+      data: { tenantId, status: "TRIAL", trialEndsAt, licensedModules: [] },
+    });
+  } catch (err: any) {
+    if (err?.code === "P2002") {
+      return res.status(409).json({
+        success: false,
+        data: null,
+        error: { code: "TRIAL_ALREADY_GRANTED", message: "Este tenant já possui uma licença mestra (trial ou paga) — o trial é concedido uma única vez." },
+      });
+    }
+    throw err;
+  }
 
   return res.status(201).json({
     success: true,

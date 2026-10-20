@@ -17,6 +17,7 @@ import {
   validateMappedPartyRow,
   buildClientCreateData,
   buildSupplierCreateData,
+  normalizeDocument,
   MappedProductRow,
   MappedPartyRow,
 } from "../modules/data-portability/product-import-mapping";
@@ -66,6 +67,35 @@ function buildProductCreateData(tenantId: string, mapped: MappedProductRow) {
   };
 }
 
+/**
+ * fa-w4-import-not-idempotent — dados de ATUALIZAÇÃO para o ramo `update` do
+ * `upsert` de produto (usado quando a linha tem um `barcode` válido, nossa única
+ * chave natural disponível no wizard). Deliberadamente SEM `sku`: se incluíssemos
+ * `sku` aqui, um reenfileiramento do mesmo job pelo BullMQ (job travado/stalled)
+ * geraria um NOVO sku aleatório a cada tentativa e sobrescreveria o sku original do
+ * produto já gravado na tentativa anterior — inofensivo para o dado em si, mas uma
+ * mudança espúria e desnecessária de identificador público a cada retry.
+ */
+function buildProductUpdateData(mapped: MappedProductRow) {
+  return {
+    name: mapped.name!,
+    category: mapped.categoryName ?? null,
+    unitPrice: parseLocaleNumber(mapped.unitPrice!),
+    costPrice: mapped.costPrice ? parseLocaleNumber(mapped.costPrice) : null,
+    stockQuantity: mapped.stockQuantity ? parseLocaleNumber(mapped.stockQuantity) : 0,
+  };
+}
+
+/** Mesmo princípio de `buildProductUpdateData`, para CLIENT/SUPPLIER — sem `document`
+ * (é a própria chave do upsert) e preservando o valor já normalizado. */
+function buildPartyUpdateData(mapped: MappedPartyRow) {
+  return {
+    name: mapped.name!,
+    phone: mapped.phone ?? null,
+    email: mapped.email ?? null,
+  };
+}
+
 export async function dataImportExecutionProcessor(job: Job<DataImportExecutionJobData>): Promise<{ processedRows: number; status: string }> {
   const { jobId, tenantId } = job.data;
 
@@ -77,7 +107,7 @@ export async function dataImportExecutionProcessor(job: Job<DataImportExecutionJ
     throw new Error(`Job de importação "${jobId}" não está em VALIDATED_CLEAN (estado atual: ${importJob.status}) — importação abortada.`);
   }
 
-  await prismaUnscoped.dataImportJob.update({ where: { id: jobId }, data: { status: "IMPORTING" } });
+  await prismaUnscoped.dataImportJob.update({ where: { id: jobId }, data: { status: "IMPORTING", processingStartedAt: new Date() } });
 
   const columnMapping = importJob.columnMapping as Record<string, string>;
   const fileBuffer = await getObjectDirect(importJob.sourceFileKey);
@@ -86,8 +116,15 @@ export async function dataImportExecutionProcessor(job: Job<DataImportExecutionJ
   const [headers, ...dataRows] = rows;
   const totalRows = dataRows.length;
 
-  let processedRows = 0;
-  for (let i = 0; i < dataRows.length; i += BATCH_SIZE) {
+  // fa-w4-import-not-idempotent — retoma a partir de `processedRows` em vez de
+  // recomeçar do zero: um job reenfileirado pelo BullMQ após o processo cair no
+  // meio do trabalho (stalled job) já tem alguns lotes commitados; reprocessá-los
+  // duplicaria as linhas (cada `create()` geraria um novo registro, com um SKU
+  // aleatório novo no caso de produtos). Seguro porque `processedRows` só avança
+  // DENTRO da mesma transação que grava o lote (ver abaixo) — nunca fica
+  // "adiantado" em relação ao que de fato foi commitado.
+  let processedRows = importJob.processedRows;
+  for (let i = processedRows; i < dataRows.length; i += BATCH_SIZE) {
     const batch = dataRows.slice(i, i + BATCH_SIZE);
     try {
       await prismaUnscoped.$transaction(async (tx) => {
@@ -101,17 +138,49 @@ export async function dataImportExecutionProcessor(job: Job<DataImportExecutionJ
               // mesmo princípio de "fail-closed" usado na extensão de tenant (Capítulo 7.2).
               throw new Error(`Linha reprovaria na validação durante a gravação: ${errors.join(" | ")}`);
             }
-            await tx.product.create({ data: buildProductCreateData(tenantId, mapped) });
+            const barcode = mapped.barcodeEan13 ? mapped.barcodeEan13.replace(/\D/g, "") : null;
+            if (barcode) {
+              // fa-w4-import-not-idempotent — chave natural disponível: upsert em vez
+              // de create, para um retry (mesma linha reprocessada por qualquer
+              // motivo) nunca duplicar o produto.
+              await tx.product.upsert({
+                where: { tenantId_barcode: { tenantId, barcode } },
+                create: buildProductCreateData(tenantId, mapped),
+                update: buildProductUpdateData(mapped),
+              });
+            } else {
+              // Sem EAN-13 informado não há chave natural — mantém `create()` (o
+              // checkpoint de `processedRows` já evita o reprocessamento do lote
+              // inteiro, que é a causa raiz real do bug reportado).
+              await tx.product.create({ data: buildProductCreateData(tenantId, mapped) });
+            }
           } else {
             const mapped = applyColumnMapping<MappedPartyRow>(headers, rawRow, columnMapping);
             const errors = validateMappedPartyRow(mapped);
             if (errors.length > 0) {
               throw new Error(`Linha reprovaria na validação durante a gravação: ${errors.join(" | ")}`);
             }
+            const document = mapped.document ? normalizeDocument(mapped.document) : null;
             if (importJob.targetEntity === "CLIENT") {
-              await tx.client.create({ data: buildClientCreateData(tenantId, mapped) });
+              if (document) {
+                await tx.client.upsert({
+                  where: { tenantId_document: { tenantId, document } },
+                  create: buildClientCreateData(tenantId, mapped),
+                  update: buildPartyUpdateData(mapped),
+                });
+              } else {
+                await tx.client.create({ data: buildClientCreateData(tenantId, mapped) });
+              }
             } else {
-              await tx.supplier.create({ data: buildSupplierCreateData(tenantId, mapped) });
+              if (document) {
+                await tx.supplier.upsert({
+                  where: { tenantId_document: { tenantId, document } },
+                  create: buildSupplierCreateData(tenantId, mapped),
+                  update: buildPartyUpdateData(mapped),
+                });
+              } else {
+                await tx.supplier.create({ data: buildSupplierCreateData(tenantId, mapped) });
+              }
             }
           }
         }

@@ -8,7 +8,7 @@
 // um único `status`/`lastPaidAt` reaproveitado ciclo a ciclo).
 import { Worker, Job } from "bullmq";
 import { prismaUnscoped } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, personalBillRemindersQueue } from "../lib/queue";
+import { queueRedisConnection, QUEUE_NAMES, personalBillRemindersQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 import { notifyTenant } from "../modules/notifications/notify.service";
 import { createModuleLogger } from "../lib/logger";
 
@@ -104,6 +104,6 @@ export async function schedulePersonalBillRemindersJob(): Promise<void> {
   await personalBillRemindersQueue.upsertJobScheduler(
     REPEATABLE_JOB_NAME,
     { pattern: DAILY_CRON_7AM },
-    { name: REPEATABLE_JOB_NAME },
+    { name: REPEATABLE_JOB_NAME, opts: DEFAULT_RECURRING_JOB_OPTS },
   );
 }

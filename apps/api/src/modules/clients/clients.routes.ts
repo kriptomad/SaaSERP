@@ -9,6 +9,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { zodValidationErrorResponse } from "../../lib/validation-error";
 
 export const clientsRouter = Router();
 
@@ -94,7 +95,7 @@ clientsRouter.post("/clients", requireAuth, async (req: Request, res: Response) 
 
   const parsed = createClientSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+    return zodValidationErrorResponse(res, parsed.error);
   }
   const input = parsed.data;
 
@@ -143,7 +144,7 @@ clientsRouter.patch("/clients/:id", requireAuth, async (req: Request, res: Respo
 
   const parsed = updateClientSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+    return zodValidationErrorResponse(res, parsed.error);
   }
   const input = parsed.data;
   // GAP DE AUDITORIA FECHADO (Rodada 13): CREATE já checava unicidade de

@@ -102,6 +102,7 @@ function ComandaDetailDialog({ comandaId, onClose }: { comandaId: string; onClos
   const [itemError, setItemError] = useState<string | null>(null);
   const [closeOpen, setCloseOpen] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
+  const [itemToRemove, setItemToRemove] = useState<{ id: string; label: string } | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH");
   const [closeError, setCloseError] = useState<string | null>(null);
 
@@ -137,8 +138,12 @@ function ComandaDetailDialog({ comandaId, onClose }: { comandaId: string; onClos
     onSuccess: () => {
       invalidate();
       toast.success("Item removido.");
+      setItemToRemove(null);
     },
-    onError: (e) => toast.error(errorMessage(e)),
+    onError: (e) => {
+      toast.error(errorMessage(e));
+      setItemToRemove(null);
+    },
   });
 
   const cancel = useMutation({
@@ -320,7 +325,14 @@ function ComandaDetailDialog({ comandaId, onClose }: { comandaId: string; onClos
                           <TableCell align="right">{money(Number(item.quantity) * Number(item.unitPrice))}</TableCell>
                           {isOpen && (
                             <TableCell align="right">
-                              <IconButton size="small" onClick={() => removeItem.mutate(item.id)} disabled={removeItem.isPending}>
+                              <IconButton
+                                size="small"
+                                aria-label="Remover item"
+                                onClick={() =>
+                                  setItemToRemove({ id: item.id, label: item.product?.name ?? item.service?.name ?? "item" })
+                                }
+                                disabled={removeItem.isPending}
+                              >
                                 <DeleteIcon fontSize="small" />
                               </IconButton>
                             </TableCell>
@@ -361,6 +373,16 @@ function ComandaDetailDialog({ comandaId, onClose }: { comandaId: string; onClos
         busy={cancel.isPending}
         onConfirm={() => cancel.mutate()}
         onClose={() => setCancelOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={itemToRemove !== null}
+        title="Remover item"
+        message={`Remover "${itemToRemove?.label}" da comanda? Esta ação não pode ser desfeita.`}
+        confirmLabel="Remover item"
+        busy={removeItem.isPending}
+        onConfirm={() => itemToRemove && removeItem.mutate(itemToRemove.id)}
+        onClose={() => setItemToRemove(null)}
       />
 
       <Dialog open={closeOpen} onClose={() => setCloseOpen(false)} fullWidth maxWidth="xs">

@@ -12,11 +12,25 @@
 // Convenção de bucket único (Capítulo 3): um único bucket de plataforma, isolamento
 // lógico 100% via prefixo de chave `tenants/<tenantId>/<categoria>/<arquivo>` — nunca
 // um bucket por tenant (inviável operacionalmente em escala).
-import { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  HeadBucketCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
+  DeleteObjectCommand,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import crypto from "node:crypto";
+import { Readable } from "node:stream";
 import { getPlatformSecret } from "./platform-secrets";
 import { isTenantStorageKey } from "./storage-key";
+import { createModuleLogger } from "./logger";
+
+const log = createModuleLogger("object-storage");
 
 const PRESIGNED_UPLOAD_EXPIRES_SECONDS = 5 * 60; // 5 min — suficiente para o upload direto do navegador, curto o bastante para não deixar a URL viva por muito tempo.
 const PRESIGNED_DOWNLOAD_EXPIRES_SECONDS = 15 * 60; // 15 min — tempo de visualizar/baixar uma foto/XML no painel.
@@ -379,4 +393,189 @@ export async function getObjectDirect(storageKey: string): Promise<Buffer> {  co
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
+}
+
+/**
+ * fa-w4-export-worker-oom / fa-w4-backup-worker-oom — versão EM STREAM de
+ * `getObjectDirect`: devolve o `Readable` do SDK diretamente, sem nunca materializar
+ * o objeto inteiro em memória (usado para empacotar XMLs/fotos grandes direto no ZIP
+ * de exportação sem baixar o arquivo inteiro primeiro).
+ */
+export async function getObjectStream(storageKey: string): Promise<Readable> {
+  const { client, config } = await getR2Client();
+  const result = await client.send(new GetObjectCommand({ Bucket: config.bucket, Key: storageKey }));
+  if (!result.Body) {
+    throw new Error(`Objeto "${storageKey}" não retornou corpo de resposta do R2.`);
+  }
+  // Mesma observação de `getObjectDirect`: em runtime Node.js o `Body` do SDK v3 é
+  // sempre um `Readable` real (não um `Blob`/`ReadableStream` do browser).
+  return result.Body as Readable;
+}
+
+/**
+ * fa-w4-lgpd-no-retention-purge — apaga DEFINITIVAMENTE um objeto do R2 pela sua
+ * `storageKey`. Usado exclusivamente por jobs de expurgo de retenção (ex.:
+ * `workers/data-retention-purge.worker.ts`) sobre artefatos cujo ciclo de vida já
+ * terminou (ex.: ZIP de exportação LGPD já baixado/expirado) — nunca deve ser
+ * chamado a partir de um fluxo de usuário comum. DeleteObjectCommand do R2/S3 é
+ * idempotente (não lança se a chave já não existir), então um expurgo repetido
+ * sobre a mesma chave é seguro.
+ */
+export async function deleteObjectDirect(storageKey: string): Promise<void> {
+  const { client, config } = await getR2Client();
+  await client.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: storageKey }));
+}
+
+// Tamanho de parte do upload multipart — o mínimo exigido pela API S3 (e compatíveis
+// como o R2) é 5 MiB para toda parte exceto a última; 8 MiB dá folga confortável
+// mantendo o uso de memória do processo limitado a poucas partes em trânsito por vez,
+// nunca ao tamanho do arquivo inteiro (fa-w4-backup-worker-oom/fa-w4-export-worker-oom).
+const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Upload multipart EM STREAM: consome `body` em pedaços, fazendo upload de cada
+ * parte assim que acumula `MULTIPART_PART_SIZE_BYTES` — nunca materializa o arquivo
+ * inteiro em memória de uma vez (ao contrário de `PutObjectCommand` com um `Buffer`
+ * completo). Em caso de erro, aborta o upload multipart no R2 (nunca deixa partes
+ * órfãs ocupando espaço/cobrança no bucket).
+ */
+async function uploadReadableAsMultipart(params: {
+  client: S3Client;
+  bucket: string;
+  key: string;
+  contentType: string;
+  body: Readable | AsyncIterable<Buffer | Uint8Array>;
+}): Promise<{ fileSizeBytes: number }> {
+  const { client, bucket, key, contentType, body } = params;
+  const create = await client.send(new CreateMultipartUploadCommand({ Bucket: bucket, Key: key, ContentType: contentType }));
+  const uploadId = create.UploadId;
+  if (!uploadId) {
+    throw new Error(`R2/S3 não retornou UploadId ao iniciar o multipart upload de "${key}".`);
+  }
+
+  const parts: { ETag: string; PartNumber: number }[] = [];
+  let partNumber = 1;
+  let totalBytes = 0;
+  let buffered: Buffer[] = [];
+  let bufferedBytes = 0;
+
+  async function flushPart(isFinal: boolean): Promise<void> {
+    if (bufferedBytes === 0) {
+      // Nunca envia uma parte vazia — só é um problema real se for a ÚNICA parte
+      // (arquivo vazio), caso em que o S3/R2 exige pelo menos uma parte não vazia;
+      // um arquivo de backup/ZIP vazio não é um cenário esperado, mas não quebra:
+      // a `CompleteMultipartUploadCommand` abaixo simplesmente falharia de forma
+      // clara nesse caso extremo em vez de silenciosamente.
+      return;
+    }
+    const partBody = Buffer.concat(buffered, bufferedBytes);
+    buffered = [];
+    bufferedBytes = 0;
+    const result = await client.send(
+      new UploadPartCommand({ Bucket: bucket, Key: key, UploadId: uploadId, PartNumber: partNumber, Body: partBody }),
+    );
+    if (!result.ETag) {
+      throw new Error(`R2/S3 não retornou ETag para a parte ${partNumber} do upload multipart de "${key}".`);
+    }
+    parts.push({ ETag: result.ETag, PartNumber: partNumber });
+    partNumber += 1;
+    void isFinal;
+  }
+
+  try {
+    for await (const chunk of body) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      buffered.push(buf);
+      bufferedBytes += buf.byteLength;
+      totalBytes += buf.byteLength;
+      if (bufferedBytes >= MULTIPART_PART_SIZE_BYTES) {
+        await flushPart(false);
+      }
+    }
+    await flushPart(true); // última parte, pode ser menor que MULTIPART_PART_SIZE_BYTES (permitido pela API)
+    if (parts.length === 0) {
+      throw new Error(`Upload multipart de "${key}" não produziu nenhuma parte — stream de origem estava vazio.`);
+    }
+    await client.send(
+      new CompleteMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: uploadId, MultipartUpload: { Parts: parts } }),
+    );
+    return { fileSizeBytes: totalBytes };
+  } catch (error) {
+    await client
+      .send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: uploadId }))
+      .catch((abortError) => {
+        log.error({ key, err: abortError }, "falha ao abortar multipart upload após erro — pode deixar partes órfãs no bucket");
+      });
+    throw error;
+  }
+}
+
+export interface PutObjectStreamInput {
+  tenantId: string;
+  category: StorageCategory;
+  fileName: string;
+  mimeType: string;
+  body: Readable;
+}
+
+/**
+ * fa-w4-export-worker-oom — equivalente EM STREAM de `putObjectDirect`: usado pelo
+ * worker de exportação de dados para gravar o ZIP diretamente do `archiver` sem
+ * nunca concatenar o arquivo inteiro em um `Buffer` antes do upload.
+ */
+export async function putObjectStream(input: PutObjectStreamInput): Promise<{ storageKey: string; fileSizeBytes: number }> {
+  const categoryDef = STORAGE_CATEGORIES[input.category];
+  if (!categoryDef.allowedMimeTypes.includes(input.mimeType as never)) {
+    throw new Error(`Tipo de arquivo não permitido para "${input.category}": ${input.mimeType}.`);
+  }
+  const { client, config } = await getR2Client();
+  const storageKey = `tenants/${input.tenantId}/${input.category}/${crypto.randomUUID()}-${sanitizeFileName(input.fileName)}`;
+  const { fileSizeBytes } = await uploadReadableAsMultipart({
+    client,
+    bucket: config.bucket,
+    key: storageKey,
+    contentType: input.mimeType,
+    body: input.body,
+  });
+  if (fileSizeBytes > categoryDef.maxBytes) {
+    // O limite de tamanho só pode ser verificado DEPOIS do upload em modo stream (o
+    // tamanho final não é conhecido antecipadamente) — remove o objeto já enviado em
+    // vez de deixar um arquivo acima do limite da categoria silenciosamente no bucket.
+    await client.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: storageKey })).catch(() => {});
+    throw new Error(`Arquivo de ${fileSizeBytes} bytes excede o máximo de ${categoryDef.maxBytes} bytes para "${input.category}".`);
+  }
+  return { storageKey, fileSizeBytes };
+}
+
+export interface PutPlatformObjectStreamInput {
+  category: Extract<StorageCategory, "database-backups">;
+  fileName: string;
+  mimeType: string;
+  body: Readable;
+}
+
+/**
+ * fa-w4-backup-worker-oom — equivalente EM STREAM de `putPlatformObjectDirect`: usado
+ * pelo worker de backup criptografado para fazer upload do dump comprimido/cifrado
+ * conforme ele é gerado, nunca depois de montar o `.enc` inteiro em memória.
+ */
+export async function putPlatformObjectStream(input: PutPlatformObjectStreamInput): Promise<{ storageKey: string; fileSizeBytes: number }> {
+  const categoryDef = STORAGE_CATEGORIES[input.category];
+  if (!categoryDef.allowedMimeTypes.includes(input.mimeType as never)) {
+    throw new Error(`Tipo de arquivo não permitido para "${input.category}": ${input.mimeType}.`);
+  }
+  const { client, config } = await getR2Client();
+  const storageKey = `platform/${input.category}/${crypto.randomUUID()}-${sanitizeFileName(input.fileName)}`;
+  const { fileSizeBytes } = await uploadReadableAsMultipart({
+    client,
+    bucket: config.bucket,
+    key: storageKey,
+    contentType: input.mimeType,
+    body: input.body,
+  });
+  if (fileSizeBytes > categoryDef.maxBytes) {
+    await client.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: storageKey })).catch(() => {});
+    throw new Error(`Arquivo de ${fileSizeBytes} bytes excede o máximo de ${categoryDef.maxBytes} bytes para "${input.category}".`);
+  }
+  return { storageKey, fileSizeBytes };
 }

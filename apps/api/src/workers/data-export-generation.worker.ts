@@ -13,12 +13,14 @@
 // adicionado/removido daquela lista automaticamente entra/sai desta exportação.
 import { Worker, Job } from "bullmq";
 import archiver from "archiver";
-import { PassThrough } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
+import crypto from "node:crypto";
 import { Prisma, prismaUnscoped, TENANT_SCOPED_MODELS } from "@filitech/db";
 import { queueRedisConnection, QUEUE_NAMES } from "../lib/queue";
-import { putObjectDirect, getObjectDirect } from "../lib/object-storage";
+import { putObjectStream, getObjectStream } from "../lib/object-storage";
 import { notifyTenant } from "../modules/notifications/notify.service";
 import { createModuleLogger } from "../lib/logger";
+import { writeTenantAuditLog } from "../lib/tenant-audit-log";
 
 const log = createModuleLogger("data-export-generation.worker");
 
@@ -28,6 +30,9 @@ const FILE_BATCH_SIZE = 100; // XMLs/fotos baixados do R2 por lote, mesmo princ�
 interface DataExportGenerationJobData {
   jobId: string;
   tenantId: string;
+  /** fa-w4-obs-no-request-id — opcional, só para correlação de log (ver
+   * modules/data-portability/data-export.routes.ts). */
+  requestId?: string;
 }
 
 function toPascalCaseModelName(modelName: string): string {
@@ -81,55 +86,121 @@ function getModelColumns(modelName: string): string[] {
   return model.fields.filter((f) => f.kind !== "object").map((f) => f.name);
 }
 
-function createZipCollector(): { archive: archiver.Archiver; done: Promise<Buffer> } {
-  const archive = archiver("zip", { zlib: { level: 9 } });
-  const chunks: Buffer[] = [];
-  const passThrough = new PassThrough();
-  passThrough.on("data", (chunk: Buffer) => chunks.push(chunk));
-  const done = new Promise<Buffer>((resolve, reject) => {
-    passThrough.on("end", () => resolve(Buffer.concat(chunks)));
-    archive.on("error", (err) => reject(err));
-    passThrough.on("error", (err) => reject(err));
-  });
-  archive.pipe(passThrough);
-  return { archive, done };
+/**
+ * fa-w4-export-worker-oom — fábrica de um `Readable` que produz o CSV de um modelo
+ * EM STREAM (página a página, nunca o CSV inteiro concatenado em uma única string
+ * antes de entrar no ZIP, como a versão anterior fazia). `stats.rowCount` é
+ * preenchido como efeito colateral, só seguro de ler depois que `archive.finalize()`
+ * resolver (momento em que TODAS as entradas, inclusive as baseadas em stream, já
+ * foram completamente lidas pelo `archiver`).
+ *
+ * Um erro de banco no meio da paginação NUNCA pode derrubar o ZIP inteiro (um
+ * `archive.on("error")` abortaria a exportação completa por causa de um único
+ * modelo) — por isso o erro é capturado AQUI DENTRO do gerador (mesmo princípio do
+ * `try/catch` por modelo da versão anterior), fechando o stream normalmente com o
+ * que já foi produzido até então em vez de propagar a exceção para o `archiver`.
+ */
+function makeCsvEntryStream(
+  modelName: string,
+  fetchPage: (skip: number, take: number) => Promise<Array<Record<string, unknown>>>,
+  columns: string[],
+  stats: { rowCount: number },
+): Readable {
+  async function* generate(): AsyncGenerator<string> {
+    let skip = 0;
+    let headerWritten = false;
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const page = await fetchPage(skip, PAGE_SIZE);
+        if (page.length === 0) break;
+        yield rowsToCsvChunk(page, columns, !headerWritten);
+        headerWritten = true;
+        stats.rowCount += page.length;
+        skip += PAGE_SIZE;
+        if (page.length < PAGE_SIZE) break;
+      }
+      if (!headerWritten) {
+        // Tabela vazia para este tenant — ainda assim grava o cabeçalho, para o CSV
+        // nunca ficar vazio/sem colunas (facilita a reimportação em outro sistema).
+        yield rowsToCsvChunk([], columns, true);
+      }
+    } catch (error) {
+      log.error({ modelName, err: error }, "falha ao exportar modelo para CSV, incluindo parcial/vazio e seguindo para os demais");
+      if (!headerWritten) {
+        yield rowsToCsvChunk([], columns, true);
+      }
+    }
+  }
+  return Readable.from(generate());
 }
 
-/** Exporta um único modelo tenant-scoped em CSV, paginado (nunca um findMany sem limite). */
-async function exportModelToCsv(tenantId: string, modelName: string): Promise<{ csv: string; columns: string[]; rowCount: number }> {
+function tenantScopedCsvEntry(tenantId: string, modelName: string, stats: { rowCount: number }): { stream: Readable; columns: string[] } {
   const delegateName = toLowerCamelDelegateName(toPascalCaseModelName(modelName));
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const delegate = (prismaUnscoped as any)[delegateName];
   const columns = getModelColumns(modelName);
-
-  let csv = "";
-  let skip = 0;
-  let rowCount = 0;
-  let headerWritten = false;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const page: Array<Record<string, unknown>> = await delegate.findMany({
-      where: { tenantId },
-      skip,
-      take: PAGE_SIZE,
-      orderBy: { id: "asc" },
-    });
-    if (page.length === 0) break;
-    csv += rowsToCsvChunk(page, columns, !headerWritten);
-    headerWritten = true;
-    rowCount += page.length;
-    skip += PAGE_SIZE;
-    if (page.length < PAGE_SIZE) break;
-  }
-  if (!headerWritten) {
-    // Tabela vazia para este tenant — ainda assim grava o cabeçalho, para o CSV
-    // nunca ficar vazio/sem colunas (facilita a reimportação em outro sistema).
-    csv = rowsToCsvChunk([], columns, true);
-  }
-  return { csv, columns, rowCount };
+  const stream = makeCsvEntryStream(
+    modelName,
+    (skip, take) => delegate.findMany({ where: { tenantId }, skip, take, orderBy: { id: "asc" } }),
+    columns,
+    stats,
+  );
+  return { stream, columns };
 }
 
-/** Baixa e empacota, em lotes, os binários do R2 referenciados por uma coluna de storageKey. */
+// fa-w4-lgpd-export-incomplete-graph — modelos que NÃO possuem coluna tenantId
+// própria (ver as notas "CORREÇÃO DE AUDITORIA" correspondentes em
+// `packages/db/src/prisma-tenant-extension.ts`, de onde esta lista foi extraída
+// 1:1) e por isso ficam fora de `TENANT_SCOPED_MODELS`/do loop acima — mas ainda
+// assim são dado pessoal/transacional do tenant, herdado via relação com um
+// modelo pai que ESTE SIM possui tenantId. Sem esta segunda passada, o ZIP de
+// portabilidade (Capítulo 18.4) ficava incompleto: um titular de dados pedindo
+// "todos os meus dados" nunca recebia, por exemplo, o histórico de mensagens de
+// suporte que ele mesmo escreveu, ou o parcelamento das próprias dívidas pessoais.
+// `relationField` é o nome do campo de relação (não a coluna FK escalar) usado
+// para filtrar por `{ [relationField]: { tenantId } }` — um join implícito do
+// Prisma, não uma segunda query manual por tenantId.
+const RELATION_OWNED_MODELS: ReadonlyArray<{ modelName: string; relationField: string }> = [
+  { modelName: "BillingEvent", relationField: "subscription" },
+  { modelName: "CashRegisterMovement", relationField: "cashRegister" },
+  { modelName: "SupportTicketMessage", relationField: "ticket" },
+  { modelName: "PersonalTransactionSplit", relationField: "transaction" },
+  { modelName: "PersonalInvestmentPriceHistory", relationField: "investment" },
+  { modelName: "PersonalDebtInstallment", relationField: "debt" },
+  { modelName: "LoyaltyTransaction", relationField: "loyaltyAccount" },
+  { modelName: "OnlineOrderItem", relationField: "onlineOrder" },
+  { modelName: "InventoryCountItem", relationField: "inventoryCount" },
+];
+
+/** Mesmo princípio de `tenantScopedCsvEntry`, mas filtrando por tenant através da
+ * relação com o modelo pai (`where: { [relationField]: { tenantId } }`) em vez de
+ * uma coluna `tenantId` direta, que este modelo não possui. */
+function relationOwnedCsvEntry(
+  tenantId: string,
+  modelName: string,
+  relationField: string,
+  stats: { rowCount: number },
+): { stream: Readable; columns: string[] } {
+  const delegateName = toLowerCamelDelegateName(toPascalCaseModelName(modelName));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const delegate = (prismaUnscoped as any)[delegateName];
+  const columns = getModelColumns(modelName);
+  const stream = makeCsvEntryStream(
+    modelName,
+    (skip, take) => delegate.findMany({ where: { [relationField]: { tenantId } }, skip, take, orderBy: { id: "asc" } }),
+    columns,
+    stats,
+  );
+  return { stream, columns };
+}
+
+/**
+ * Empacota, em lotes, os binários do R2 referenciados por uma coluna de storageKey —
+ * EM STREAM (`getObjectStream`): cada arquivo flui diretamente do R2 para dentro do
+ * ZIP sendo montado, nunca é baixado inteiro para um `Buffer` em memória primeiro
+ * (fa-w4-export-worker-oom).
+ */
 async function bundleStorageFiles(
   archive: archiver.Archiver,
   tenantId: string,
@@ -156,8 +227,8 @@ async function bundleStorageFiles(
       const storageKey = row[storageKeyColumn] as string | null;
       if (!storageKey) continue;
       try {
-        const buffer = await getObjectDirect(storageKey);
-        archive.append(buffer, { name: `${zipFolder}/${row.id}${extension}` });
+        const stream = await getObjectStream(storageKey);
+        archive.append(stream, { name: `${zipFolder}/${row.id}${extension}` });
         bundled++;
       } catch (error) {
         // Objeto ausente/corrompido no R2 nunca pode derrubar a exportação inteira —
@@ -174,25 +245,57 @@ async function bundleStorageFiles(
 export async function dataExportGenerationProcessor(job: Job<DataExportGenerationJobData>): Promise<{ resultStorageKey: string }> {
   const { jobId, tenantId } = job.data;
 
-  await prismaUnscoped.tenantDataExportJob.update({
+  const exportJob = await prismaUnscoped.tenantDataExportJob.update({
     where: { id: jobId },
-    data: { status: "GENERATING" },
+    data: { status: "GENERATING", processingStartedAt: new Date() },
+    select: { requestedByUserId: true },
   });
 
   try {
-    const { archive, done } = createZipCollector();
-    const schemaReference: Record<string, { columns: string[]; rowCount: number }> = {};
+    // fa-w4-export-worker-oom — pipeline em stream: o `archiver` grava direto num
+    // `PassThrough` que é consumido pelo upload multipart (`putObjectStream`) — em
+    // nenhum momento o ZIP completo existe como um único `Buffer` na memória do
+    // processo (ao contrário da versão anterior, que acumulava TODOS os chunks do
+    // ZIP e só então fazia `Buffer.concat` + um único `PutObjectCommand`).
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    const uploadPassThrough = new PassThrough();
+    archive.on("error", (err) => uploadPassThrough.destroy(err));
+    archive.pipe(uploadPassThrough);
+    const uploadPromise = putObjectStream({
+      tenantId,
+      category: "data-export",
+      fileName: `export-${tenantId}-${Date.now()}.zip`,
+      mimeType: "application/zip",
+      body: uploadPassThrough,
+    });
+
+    const pendingStats: Array<{ modelName: string; columns: string[]; stats: { rowCount: number } }> = [];
 
     for (const modelName of TENANT_SCOPED_MODELS) {
       try {
-        const { csv, columns, rowCount } = await exportModelToCsv(tenantId, modelName);
-        archive.append(csv, { name: `tabelas/${modelName}.csv` });
-        schemaReference[modelName] = { columns, rowCount };
+        const stats = { rowCount: 0 };
+        const { stream, columns } = tenantScopedCsvEntry(tenantId, modelName, stats);
+        archive.append(stream, { name: `tabelas/${modelName}.csv` });
+        pendingStats.push({ modelName, columns, stats });
       } catch (error) {
         // Um modelo com schema inesperado (ex.: delegate inexistente por erro de
         // digitação futuro na lista) nunca pode derrubar a exportação inteira dos
         // demais ~90 modelos — loga e segue, o modelo simplesmente fica fora do ZIP.
-        log.error({ tenantId, modelName, err: error }, "falha ao exportar modelo para CSV, pulando");
+        log.error({ tenantId, modelName, err: error }, "falha ao preparar exportação de modelo para CSV, pulando");
+      }
+    }
+
+    // fa-w4-lgpd-export-incomplete-graph — segunda passada para os modelos que
+    // herdam o tenant via relação (ver `RELATION_OWNED_MODELS` acima), que ficavam
+    // de fora do ZIP sem esta passada.
+    for (const { modelName, relationField } of RELATION_OWNED_MODELS) {
+      try {
+        const stats = { rowCount: 0 };
+        const { stream, columns } = relationOwnedCsvEntry(tenantId, modelName, relationField, stats);
+        archive.append(stream, { name: `tabelas/${modelName}.csv` });
+        pendingStats.push({ modelName, columns, stats });
+      } catch (error) {
+        log.error({ tenantId, modelName, err: error }, "falha ao preparar exportação de modelo (relation-owned) para CSV, pulando");
       }
     }
 
@@ -201,6 +304,16 @@ export async function dataExportGenerationProcessor(job: Job<DataExportGeneratio
     // `storageKey` como texto), o binário real é baixado e incluído no ZIP.
     const xmlCount = await bundleStorageFiles(archive, tenantId, "fiscalDocument", "xmlStorageKey", "documentos-fiscais", ".xml");
     const photoCount = await bundleStorageFiles(archive, tenantId, "osPhoto", "storageKey", "fotos-os", ".jpg");
+
+    // `archive.finalize()` só resolve depois que TODAS as entradas (inclusive as
+    // baseadas em stream acima) terminaram de ser lidas e gravadas no ZIP — só então
+    // é seguro ler `stats.rowCount` de cada entrada abaixo.
+    await archive.finalize();
+
+    const schemaReference: Record<string, { columns: string[]; rowCount: number }> = {};
+    for (const { modelName, columns, stats } of pendingStats) {
+      schemaReference[modelName] = { columns, rowCount: stats.rowCount };
+    }
 
     archive.append(
       JSON.stringify(
@@ -216,16 +329,7 @@ export async function dataExportGenerationProcessor(job: Job<DataExportGeneratio
       { name: "schema-reference.json" },
     );
 
-    await archive.finalize();
-    const zipBuffer = await done;
-
-    const { storageKey } = await putObjectDirect({
-      tenantId,
-      category: "data-export",
-      fileName: `export-${tenantId}-${Date.now()}.zip`,
-      mimeType: "application/zip",
-      body: zipBuffer,
-    });
+    const { storageKey } = await uploadPromise;
 
     await prismaUnscoped.tenantDataExportJob.update({
       where: { id: jobId },
@@ -243,9 +347,28 @@ export async function dataExportGenerationProcessor(job: Job<DataExportGeneratio
       sourceId: jobId,
     });
 
+    // fa-w4-lgpd-portability-no-audit-log
+    await writeTenantAuditLog({
+      tenantId,
+      userId: exportJob.requestedByUserId,
+      action: "DATA_EXPORT_GENERATION_COMPLETED",
+      targetType: "TenantDataExportJob",
+      targetId: jobId,
+      outcome: "SUCCESS",
+      metadata: { storageKey, modelsExported: Object.keys(schemaReference).length },
+    });
+
     return { resultStorageKey: storageKey };
   } catch (error) {
-    const failureReason = (error as Error).message;
+    // fa-w4-export-failure-leaks-internal-error: o erro real (que pode conter
+    // chave de storage, trecho de SQL, mensagem de provedor/R2 etc.) NUNCA é
+    // enviado ao tenant — fica só no log estruturado do servidor, correlacionado
+    // por `correlationId`. O tenant recebe uma mensagem genérica + esse mesmo id,
+    // que ele pode citar ao abrir um chamado de suporte.
+    const correlationId = crypto.randomUUID();
+    log.error({ tenantId, jobId, correlationId, err: error }, "geração de exportação de dados falhou");
+
+    const failureReason = `Falha interna (ref: ${correlationId}). Detalhes registrados internamente para a equipe de suporte.`;
     await prismaUnscoped.tenantDataExportJob.update({
       where: { id: jobId },
       data: { status: "FAILED", failureReason },
@@ -256,17 +379,28 @@ export async function dataExportGenerationProcessor(job: Job<DataExportGeneratio
       category: "SYSTEM_ANNOUNCEMENT",
       severity: "WARNING",
       title: "Falha na exportação de dados",
-      body: `Não foi possível gerar seu pacote de exportação: ${failureReason}. Tente novamente em Configurações → Dados.`,
+      body: `Não foi possível gerar seu pacote de exportação. Nossa equipe foi notificada. Caso precise abrir um chamado de suporte, informe esta referência: ${correlationId}. Tente novamente em Configurações → Dados.`,
       linkRoute: "/configuracoes/dados",
       sourceType: "TENANT_DATA_EXPORT_JOB",
       sourceId: jobId,
     });
 
+    // fa-w4-lgpd-portability-no-audit-log
+    await writeTenantAuditLog({
+      tenantId,
+      userId: exportJob.requestedByUserId,
+      action: "DATA_EXPORT_GENERATION_FAILED",
+      targetType: "TenantDataExportJob",
+      targetId: jobId,
+      outcome: "FAILED",
+      metadata: { correlationId },
+    });
+
     // Não relança o erro: o job BullMQ é sob demanda (sem retry automático
     // configurado em enqueue), e o estado FAILED já foi persistido acima — relançar
     // aqui só faria o BullMQ marcar o job como "failed" redundantemente sem
-    // nenhum benefício, e o processo do worker nunca deve cair por causa disso.
-    log.error({ tenantId, jobId, err: error }, "geração de exportação de dados falhou");
+    // nenhum benefício, e o processo do worker nunca deve cair por causa disso
+    // (o `log.error` com o erro completo já foi emitido acima, junto do correlationId).
     return { resultStorageKey: "" };
   }
 }

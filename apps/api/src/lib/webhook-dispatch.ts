@@ -20,12 +20,24 @@ export interface WebhookDeliveryJobData {
   endpointId: string;
   eventType: string;
   payload: Record<string, unknown>;
+  /** fa-w4-obs-no-request-id — id da requisição HTTP que gerou o evento de domínio
+   * (quando disponível), propagado apenas para correlação de log no worker
+   * (workers/webhook-delivery.worker.ts). */
+  requestId?: string;
 }
 
 // Chamado pelos serviços de domínio após o commit da transação que gerou o evento
 // (ex.: close-sale.service.ts, emit-fiscal-document.service.ts) — nunca antes do
 // commit, para não notificar o tenant sobre algo que pode ainda ser revertido.
-export async function dispatchWebhookEvent(tenantId: string, eventType: string, payload: Record<string, unknown>): Promise<void> {
+export async function dispatchWebhookEvent(
+  tenantId: string,
+  eventType: string,
+  payload: Record<string, unknown>,
+  // fa-w4-obs-no-request-id — opcional: repassa o requestId da requisição HTTP de
+  // origem (se houver) para o(s) job(s) de entrega, mecanismo reutilizável por
+  // qualquer chamador futuro sem quebrar os existentes (parâmetro opcional).
+  requestId?: string,
+): Promise<void> {
   const endpoints = await prisma.tenantWebhookEndpoint.findMany({
     where: { tenantId, active: true, eventTypes: { has: eventType } },
     select: { id: true },
@@ -36,7 +48,7 @@ export async function dispatchWebhookEvent(tenantId: string, eventType: string, 
     endpoints.map((endpoint) =>
       webhookDeliveryQueue.add(
         "deliver",
-        { endpointId: endpoint.id, eventType, payload } satisfies WebhookDeliveryJobData,
+        { endpointId: endpoint.id, eventType, payload, requestId } satisfies WebhookDeliveryJobData,
         { attempts: 6, backoff: { type: "exponential", delay: 5_000 } }, // até ~5min de retry espalhado, cobre instabilidades curtas do endpoint do tenant
       ),
     ),

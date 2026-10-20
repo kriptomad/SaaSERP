@@ -323,6 +323,26 @@ export const api = {
     const envelope = await request<Envelope<T>>(withQuery(path, params));
     return { data: envelope.data, meta: envelope.meta ?? null };
   },
+  // CORREÇÃO DE AUDITORIA (fa-w4-api-pagination-inconsistent): alguns consumidores
+  // (sync do catálogo offline do PDV, tela de cadastro de produtos) ainda dependem de
+  // receber a listagem COMPLETA de uma vez, mesmo depois do backend passar a paginar
+  // de verdade — este helper itera as páginas reais do backend e concatena o
+  // resultado, preservando o contrato "array completo" para quem já consome assim,
+  // sem reintroduzir uma busca de profundidade ilimitada num único round-trip.
+  async getAllPages<T>(path: string, params?: QueryParams & { pageSize?: number }): Promise<T[]> {
+    const pageSize = params?.pageSize ?? 200;
+    const items: T[] = [];
+    let page = 1;
+    for (;;) {
+      const envelope = await request<Envelope<T[]>>(withQuery(path, { ...params, page, pageSize }));
+      const batch = envelope.data ?? [];
+      items.push(...batch);
+      const total = envelope.meta?.total;
+      if (batch.length < pageSize || total === undefined || items.length >= total) break;
+      page += 1;
+    }
+    return items;
+  },
   async post<T>(path: string, body?: unknown): Promise<T> {
     return (await request<Envelope<T>>(path, { method: "POST", body: JSON.stringify(body ?? {}) })).data;
   },

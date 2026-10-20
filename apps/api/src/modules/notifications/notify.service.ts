@@ -39,6 +39,13 @@ export interface NotifyTenantInput {
   linkRoute?: string;
   sourceType: string;
   sourceId?: string;
+  /** fa-w4-obs-no-request-id — id da requisição HTTP que originou esta notificação
+   * (quando aplicável, ex.: webhook de billing recebido — ver
+   * modules/billing/webhooks.routes.ts/dunning.service.ts), propagado apenas para
+   * o job WhatsApp/SMS eventualmente enfileirado abaixo, para correlação de log no
+   * worker. Opcional: a maioria das chamadas a `notifyTenant` vem de workers/crons
+   * sem requisição HTTP de origem. */
+  requestId?: string;
 }
 
 // Mesmos defaults de notification-settings.routes.ts para categorias ainda sem linha
@@ -63,14 +70,14 @@ const PREFERENCE_CATEGORIES = new Set([
   "TEF_CONFIRMATION_FAILED",
 ]);
 
-async function enqueueWhatsAppJob(tenantId: string, toPhone: string, body: string): Promise<void> {
+async function enqueueWhatsAppJob(tenantId: string, toPhone: string, body: string, requestId?: string): Promise<void> {
   try {
     // Mesmo padrão de attempts/backoff usado por enqueueFiscalEmission
     // (modules/fiscal/queues/fiscal-emission.queue.ts): 5 tentativas, backoff
     // exponencial a partir de 5s.
     await whatsappNotificationsQueue.add(
       "send-whatsapp-notification",
-      { tenantId, toPhone, body },
+      { tenantId, toPhone, body, requestId },
       { attempts: 5, backoff: { type: "exponential", delay: 5_000 }, removeOnComplete: true },
     );
   } catch (error) {
@@ -80,12 +87,12 @@ async function enqueueWhatsAppJob(tenantId: string, toPhone: string, body: strin
   }
 }
 
-async function enqueueSmsJob(tenantId: string, toPhone: string, body: string): Promise<void> {
+async function enqueueSmsJob(tenantId: string, toPhone: string, body: string, requestId?: string): Promise<void> {
   try {
     // Mesmo padrão de enqueueWhatsAppJob.
     await smsNotificationsQueue.add(
       "send-sms-notification",
-      { tenantId, toPhone, body },
+      { tenantId, toPhone, body, requestId },
       { attempts: 5, backoff: { type: "exponential", delay: 5_000 }, removeOnComplete: true },
     );
   } catch (error) {
@@ -136,14 +143,14 @@ async function dispatchUserChannels(input: NotifyTenantInput): Promise<void> {
   };
 
   if (channels.whatsapp && user.whatsappPhone) {
-    await enqueueWhatsAppJob(input.tenantId, user.whatsappPhone, `${input.title}\n\n${input.body}`);
+    await enqueueWhatsAppJob(input.tenantId, user.whatsappPhone, `${input.title}\n\n${input.body}`, input.requestId);
   }
 
   // Reaproveita o mesmo `User.whatsappPhone` (E.164) como destino do SMS — não existe
   // um segundo campo de telefone redundante só para este canal (ver nota em
   // schema.prisma/NotificationPreference.sms).
   if (channels.sms && user.whatsappPhone) {
-    await enqueueSmsJob(input.tenantId, user.whatsappPhone, `${input.title}: ${input.body}`);
+    await enqueueSmsJob(input.tenantId, user.whatsappPhone, `${input.title}: ${input.body}`, input.requestId);
   }
 
   if (channels.email) {
@@ -191,7 +198,13 @@ export async function notifyTenant(input: NotifyTenantInput) {
 }
 
 // Capítulo 2.7.4 — notificação de falha de pagamento, disparada pela régua de dunning.
-export async function notifyTenantPaymentFailed(tenantId: string, info: { attempt: number; nextRetryAt: Date }) {
+export async function notifyTenantPaymentFailed(
+  tenantId: string,
+  info: { attempt: number; nextRetryAt: Date },
+  // fa-w4-obs-no-request-id: id da requisição HTTP do webhook Stripe/Asaas que
+  // disparou esta falha de pagamento (ver dunning.service.ts/webhooks.routes.ts).
+  requestId?: string,
+) {
   return notifyTenant({
     tenantId,
     category: "BILLING_DUNNING",
@@ -200,5 +213,6 @@ export async function notifyTenantPaymentFailed(tenantId: string, info: { attemp
     severity: info.attempt >= 3 ? "CRITICAL" : "WARNING",
     linkRoute: "/configuracoes/cobranca",
     sourceType: "SUBSCRIPTION",
+    requestId,
   });
 }

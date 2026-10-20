@@ -24,37 +24,57 @@ export async function syncProductCatalog(): Promise<{ syncedCount: number }> {
   if (!token) return { syncedCount: 0 };
 
   const lastSync = await offlineDb.syncState.get("lastSyncedAt");
-  const url = new URL(`${API_BASE_URL}/products`);
-  if (lastSync) url.searchParams.set("updatedSince", lastSync.value);
-
-  const response = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
-  if (!response.ok) {
-    throw new Error(`Falha ao sincronizar catálogo (HTTP ${response.status}).`);
-  }
-  const body = (await response.json()) as { data: RemoteProduct[] };
   const syncedAt = new Date().toISOString();
   const cachedAt = Date.now();
 
-  await offlineDb.transaction("rw", offlineDb.products, offlineDb.syncState, async () => {
-    for (const product of body.data) {
-      await offlineDb.products.put({
-        id: product.id,
-        sku: product.sku,
-        barcode: product.barcode,
-        name: product.name,
-        unitPrice: Number(product.unitPrice),
-        stockQuantitySnapshot: Number(product.stockQuantity),
-        isWeighted: product.isWeighted,
-        category: product.category,
-        requiresPrescriptionRetention: product.requiresPrescriptionRetention,
-        isControlledSubstance: product.isControlledSubstance,
-        cachedAt,
-      });
-    }
-    await offlineDb.syncState.put({ key: "lastSyncedAt", value: syncedAt });
-  });
+  // CORREÇÃO DE AUDITORIA (fa-w4-api-pagination-inconsistent): `GET /products` deixou
+  // de devolver o catálogo inteiro numa única chamada sem paginação (`take: 50_000`) —
+  // agora pagina de verdade. Este loop reconstrói o comportamento de sync completo
+  // (o PDV offline-first precisa do catálogo inteiro para funcionar sem internet),
+  // varrendo todas as páginas em vez de depender de uma resposta monolítica.
+  let page = 1;
+  const pageSize = 200;
+  let syncedCount = 0;
+  for (;;) {
+    const url = new URL(`${API_BASE_URL}/products`);
+    if (lastSync) url.searchParams.set("updatedSince", lastSync.value);
+    url.searchParams.set("page", String(page));
+    url.searchParams.set("pageSize", String(pageSize));
 
-  return { syncedCount: body.data.length };
+    const response = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) {
+      throw new Error(`Falha ao sincronizar catálogo (HTTP ${response.status}).`);
+    }
+    const body = (await response.json()) as { data: RemoteProduct[]; meta?: { page: number; pageSize: number; total: number } | null };
+    const batch = body.data ?? [];
+
+    await offlineDb.transaction("rw", offlineDb.products, async () => {
+      for (const product of batch) {
+        await offlineDb.products.put({
+          id: product.id,
+          sku: product.sku,
+          barcode: product.barcode,
+          name: product.name,
+          unitPrice: Number(product.unitPrice),
+          stockQuantitySnapshot: Number(product.stockQuantity),
+          isWeighted: product.isWeighted,
+          category: product.category,
+          requiresPrescriptionRetention: product.requiresPrescriptionRetention,
+          isControlledSubstance: product.isControlledSubstance,
+          cachedAt,
+        });
+      }
+    });
+    syncedCount += batch.length;
+
+    const total = body.meta?.total;
+    if (batch.length < pageSize || total === undefined || syncedCount >= total) break;
+    page += 1;
+  }
+
+  await offlineDb.syncState.put({ key: "lastSyncedAt", value: syncedAt });
+
+  return { syncedCount };
 }
 
 // CORREÇÃO DE AUDITORIA (mega-audit rodada 7): acima de 2 horas sem um

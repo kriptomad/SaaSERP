@@ -13,7 +13,7 @@
 import { randomBytes } from "node:crypto";
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { prisma, prismaUnscoped } from "@filitech/db";
+import { Prisma, prisma, prismaUnscoped } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { isTenantStorageKey } from "../../lib/storage-key";
@@ -32,6 +32,7 @@ import {
 import { enqueueFiscalEmission } from "../fiscal/queues/fiscal-emission.queue";
 import { notifyTenant } from "../notifications/notify.service";
 import { readEnumQuery } from "../../lib/query-enum";
+import { zodValidationErrorResponse } from "../../lib/validation-error";
 
 export const workOrdersRouter = Router();
 
@@ -148,9 +149,26 @@ workOrdersRouter.post("/work-orders", requireAuth, requireModule("WORK_ORDER"), 
 
   const parsed = createWorkOrderSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", details: parsed.error.flatten() } });
+    return zodValidationErrorResponse(res, parsed.error);
   }
   const input = parsed.data;
+
+  // CORREÇÃO DE AUDITORIA (fa-w4-workorder-no-idempotency-key): mesmo padrão de
+  // `Idempotency-Key` já usado em sales.routes.ts/public-online-store.routes.ts —
+  // aqui opcional (nem todo client antigo do painel envia o header), mas quando
+  // enviado garante que um retry de rede após timeout (o técnico do balcão nunca
+  // sabe se o POST anterior chegou a completar) NUNCA cria uma segunda O.S.: a
+  // tentativa repetida com a MESMA chave devolve a O.S. já criada (200) em vez de
+  // duplicar (201). Escopo tenantId + chave já restringe por tenant; não precisa de
+  // um escopo "por endpoint" adicional porque este campo só é escrito por esta rota.
+  const idempotencyKeyHeader = req.header("Idempotency-Key");
+  const idempotencyKey = typeof idempotencyKeyHeader === "string" && idempotencyKeyHeader.trim().length > 0 ? idempotencyKeyHeader.trim().slice(0, 200) : null;
+  if (idempotencyKey) {
+    const existingWorkOrder = await prisma.workOrder.findFirst({ where: { tenantId, idempotencyKey } });
+    if (existingWorkOrder) {
+      return res.status(200).json({ success: true, data: existingWorkOrder, error: null });
+    }
+  }
 
   const client = await prisma.client.findFirst({ where: { id: input.clientId, tenantId } });
   if (!client) {
@@ -165,17 +183,31 @@ workOrdersRouter.post("/work-orders", requireAuth, requireModule("WORK_ORDER"), 
     return res.status(404).json({ success: false, data: null, error: { code: "VEHICLE_NOT_FOUND", message: "Veículo não encontrado neste tenant." } });
   }
 
-  const workOrder = await prisma.workOrder.create({
-    data: {
-      tenantId,
-      clientId: input.clientId,
-      equipmentDescription: input.equipmentDescription,
-      reportedIssue: input.reportedIssue,
-      assignedTechnicianId: input.assignedTechnicianId ?? null,
-      vehicleId: input.vehicleId ?? null,
-      status: "RECEIVED",
-    },
-  });
+  const workOrder = await prisma.workOrder
+    .create({
+      data: {
+        tenantId,
+        clientId: input.clientId,
+        equipmentDescription: input.equipmentDescription,
+        reportedIssue: input.reportedIssue,
+        assignedTechnicianId: input.assignedTechnicianId ?? null,
+        vehicleId: input.vehicleId ?? null,
+        status: "RECEIVED",
+        idempotencyKey,
+      },
+    })
+    .catch(async (err) => {
+      // Corrida residual entre o `findFirst` de dedupe acima e este `create` — duas
+      // requisições simultâneas com a MESMA `Idempotency-Key` podiam ambas passar
+      // pela checagem antes de qualquer uma commitar. O índice único
+      // `@@unique([tenantId, idempotencyKey])` garante que só uma vence; a outra
+      // recebe P2002 aqui e devolve a O.S. que de fato venceu, nunca duplica.
+      if (idempotencyKey && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        const winner = await prisma.workOrder.findFirst({ where: { tenantId, idempotencyKey } });
+        if (winner) return winner;
+      }
+      throw err;
+    });
 
   return res.status(201).json({ success: true, data: workOrder, error: null });
 });

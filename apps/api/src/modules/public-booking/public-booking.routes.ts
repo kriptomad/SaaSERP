@@ -117,10 +117,57 @@ publicBookingRouter.get("/public-booking/:tenantSlug/professionals", async (req:
   return res.json({ success: true, data: professionals, error: null });
 });
 
+// GAP DE AUDITORIA FECHADO (fa-w4-publicbooking-date-tz): a regex abaixo só checava
+// o FORMATO "YYYY-MM-DD" (shape), nunca se o calendário era real — "2026-99-99"
+// passava ileso e o construtor `new Date(year, month-1, day)` do JS faz "rollover"
+// silencioso (ex.: mês 13 vira janeiro do ano seguinte), produzindo um dia
+// completamente diferente do que o cliente pediu sem nenhum erro. `isValidCalendarDate`
+// faz a checagem real: reconstrói a data em UTC e confere que ano/mês/dia voltam
+// EXATAMENTE iguais ao que foi informado (nenhum rollover passa despercebido).
+//
+// POLÍTICA DE FUSO HORÁRIO (GAP DE AUDITORIA FECHADO — fa-w4-publicbooking-date-tz):
+// nem `Tenant` nem `User` (profissional) têm campo de timezone no schema hoje — não
+// existe fuso "do tenant" para consultar. Para que a geração de slots (`/slots`) e a
+// criação do agendamento (`POST /appointments`) NUNCA divirjam entre si dependendo do
+// fuso horário configurado no processo Node do servidor (`TZ` de ambiente, que pode
+// variar entre deploys/containers), as duas rotas abaixo usam EXCLUSIVAMENTE
+// `Date.UTC(...)`/getters `getUTC*` para montar e interpretar "o dia", "o dia da
+// semana" e "a hora" — nunca o construtor local (`new Date(y,m,d,...)`) nem getters
+// locais (`getDay`/`getHours`/...), que dependiam do fuso do SO do servidor. Ou seja:
+// o campo `date` (YYYY-MM-DD) e o expediente (`ProfessionalWorkingHours.startTime`/
+// `endTime`, "HH:mm") são sempre interpretados como horário UTC. Se no futuro o
+// produto precisar de um fuso por tenant, introduzir `Tenant.timezone` e substituir
+// os `Date.UTC`/`getUTC*` abaixo por conversões explícitas para esse fuso — nunca
+// voltar a depender do fuso local do processo.
+function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function isValidDateOnlyString(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  return isValidCalendarDate(Number(match[1]), Number(match[2]), Number(match[3]));
+}
+
+// Mesmo problema de rollover silencioso existe em datas ISO completas: o z.string().datetime()
+// do zod valida o FORMATO (shape), mas "2026-02-30T10:00:00.000Z" casa com o formato e
+// o `new Date(...)` também faz rollover silencioso para 2026-03-02. Reaplica a mesma
+// checagem de calendário real sobre a porção YYYY-MM-DD do timestamp ISO.
+function isValidIsoDatetimeCalendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T/.exec(value);
+  if (!match) return false;
+  return isValidCalendarDate(Number(match[1]), Number(match[2]), Number(match[3]));
+}
+
 const slotsQuerySchema = z.object({
   professionalId: z.string().min(1).max(100),
   serviceId: z.string().min(1).max(100),
-  date: z.string().max(10).regex(/^\d{4}-\d{2}-\d{2}$/, "date deve estar no formato YYYY-MM-DD"),
+  date: z
+    .string()
+    .max(10)
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "date deve estar no formato YYYY-MM-DD")
+    .refine(isValidDateOnlyString, "date deve ser uma data de calendário válida"),
 });
 
 const SLOT_STEP_MINUTES = 15; // granularidade de geração de slots candidatos, independente da duração do serviço
@@ -155,9 +202,11 @@ publicBookingRouter.get("/public-booking/:tenantSlug/slots", async (req: Request
   if (!professional) return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Profissional não encontrado." } });
 
   const [year, month, day] = parsed.data.date.split("-").map(Number);
-  const dayStart = new Date(year, month - 1, day, 0, 0, 0, 0);
-  const dayEnd = new Date(year, month - 1, day, 23, 59, 59, 999);
-  const dayOfWeek = dayStart.getDay();
+  // Política de fuso UTC (ver comentário acima de `isValidCalendarDate`): construção
+  // e leitura sempre em UTC, nunca local, para nunca divergir da criação do agendamento.
+  const dayStart = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+  const dayEnd = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
+  const dayOfWeek = dayStart.getUTCDay();
 
   const workingHours = await prisma.professionalWorkingHours.findUnique({
     where: { tenantId_professionalId_dayOfWeek: { tenantId: tenant.id, professionalId: professional.id, dayOfWeek } },
@@ -189,7 +238,7 @@ publicBookingRouter.get("/public-booking/:tenantSlug/slots", async (req: Request
 
   const freeSlots: string[] = [];
   for (let candidateStart = startMinutes; candidateStart + durationMinutes <= endMinutes; candidateStart += SLOT_STEP_MINUTES) {
-    const slotStart = new Date(year, month - 1, day, 0, candidateStart, 0, 0);
+    const slotStart = new Date(Date.UTC(year, month - 1, day, 0, candidateStart, 0, 0));
     const slotEnd = new Date(slotStart.getTime() + durationMinutes * 60_000);
     if (slotStart <= now) continue; // nunca oferece horário já passado
 
@@ -207,7 +256,11 @@ publicBookingRouter.get("/public-booking/:tenantSlug/slots", async (req: Request
 const createPublicAppointmentSchema = z.object({
   professionalId: z.string().min(1).max(100),
   serviceId: z.string().min(1).max(100),
-  scheduledAt: z.string().max(40).datetime(),
+  scheduledAt: z
+    .string()
+    .max(40)
+    .datetime()
+    .refine(isValidIsoDatetimeCalendarDate, "scheduledAt deve ser uma data de calendário válida"),
   clientName: z.string().min(1).max(200),
   clientPhone: z.string().min(8).max(32),
 });
@@ -241,9 +294,21 @@ publicBookingRouter.post("/public-booking/:tenantSlug/appointments", async (req:
   // timestamp IDÊNTICO, nunca sobreposição de intervalos). Mesmo algoritmo de
   // sobreposição já usado em `/slots` acima, reaplicado aqui no momento da escrita.
   const scheduledAt = new Date(parsed.data.scheduledAt);
+
+  // GAP DE AUDITORIA FECHADO (fa-w4-publicbooking-past-appointment): esta rota
+  // nunca checava se `scheduledAt` já tinha passado — diferente de `/slots`, que
+  // filtra `slotStart <= now`, um cliente podia agendar diretamente (sem passar
+  // pela listagem de horários livres) para QUALQUER instante já decorrido.
+  if (scheduledAt.getTime() <= Date.now()) {
+    return res.status(422).json({ success: false, data: null, error: { code: "PAST_APPOINTMENT", message: "Não é possível agendar em um horário que já passou." } });
+  }
+
   const durationMinutes = service.estimatedDurationMinutes;
   const appointmentEnd = new Date(scheduledAt.getTime() + durationMinutes * 60_000);
-  const dayOfWeek = scheduledAt.getDay();
+  // Política de fuso UTC (ver comentário acima de `isValidCalendarDate`): mesma
+  // interpretação de "dia da semana"/"hora do dia" usada em `/slots`, nunca os
+  // getters locais (`getDay`/`getHours`/...), que dependem do fuso do processo Node.
+  const dayOfWeek = scheduledAt.getUTCDay();
 
   const workingHours = await prisma.professionalWorkingHours.findUnique({
     where: { tenantId_professionalId_dayOfWeek: { tenantId: tenant.id, professionalId: professional.id, dayOfWeek } },
@@ -253,13 +318,13 @@ publicBookingRouter.post("/public-booking/:tenantSlug/appointments", async (req:
   }
   const startMinutes = parseHHMM(workingHours.startTime);
   const endMinutes = parseHHMM(workingHours.endTime);
-  const scheduledMinutes = scheduledAt.getHours() * 60 + scheduledAt.getMinutes();
+  const scheduledMinutes = scheduledAt.getUTCHours() * 60 + scheduledAt.getUTCMinutes();
   if (scheduledMinutes < startMinutes || scheduledMinutes + durationMinutes > endMinutes) {
     return res.status(422).json({ success: false, data: null, error: { code: "OUTSIDE_WORKING_HOURS", message: "Horário fora do expediente do profissional." } });
   }
 
-  const dayStart = new Date(scheduledAt.getFullYear(), scheduledAt.getMonth(), scheduledAt.getDate(), 0, 0, 0, 0);
-  const dayEnd = new Date(scheduledAt.getFullYear(), scheduledAt.getMonth(), scheduledAt.getDate(), 23, 59, 59, 999);
+  const dayStart = new Date(Date.UTC(scheduledAt.getUTCFullYear(), scheduledAt.getUTCMonth(), scheduledAt.getUTCDate(), 0, 0, 0, 0));
+  const dayEnd = new Date(Date.UTC(scheduledAt.getUTCFullYear(), scheduledAt.getUTCMonth(), scheduledAt.getUTCDate(), 23, 59, 59, 999));
 
   try {
     const appointment = await prisma.$transaction(

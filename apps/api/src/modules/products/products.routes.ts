@@ -29,6 +29,17 @@ async function hasPermission(role: string, userId: string, permissionCode: strin
  * `updatedSince` permite sync incremental: o cliente guarda o timestamp da última
  * sincronização bem-sucedida e só baixa o delta, em vez de re-baixar o catálogo
  * inteiro a cada reconexão.
+ *
+ * CORREÇÃO DE AUDITORIA (fa-w4-api-pagination-inconsistent): antes, `take: 50_000`
+ * era só uma trava de segurança contra um catálogo patologicamente grande — sem
+ * paginação real alguma, uma única chamada podia varrer/serializar até 50 mil linhas
+ * de uma vez (custo de memória/latência real em um tenant de catálogo grande, ex.
+ * atacado/distribuidora). Agora segue o MESMO contrato de paginação por offset já
+ * padronizado em clients.routes.ts (`page`/`pageSize` + `meta:{page,pageSize,total}`):
+ * sem `page`/`pageSize` explícitos, o comportamento de sync completo do PDV offline é
+ * preservado (pageSize default alto o bastante para a imensa maioria dos catálogos
+ * reais, com `hasMore`/`meta.total` disponíveis para o cliente iterar quando o
+ * catálogo excede uma página) — nenhum consumidor existente quebra silenciosamente.
  */
 productsRouter.get("/products", requireAuth, async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
@@ -37,47 +48,48 @@ productsRouter.get("/products", requireAuth, async (req: Request, res: Response)
   }
 
   const updatedSince = typeof req.query.updatedSince === "string" ? new Date(req.query.updatedSince) : null;
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "100"), 10) || 100));
+  const where = {
+    tenantId,
+    active: true,
+    ...(updatedSince && !Number.isNaN(updatedSince.getTime()) ? { updatedAt: { gt: updatedSince } } : {}),
+  };
 
-  const products = await prisma.product.findMany({
-    where: {
-      tenantId,
-      active: true,
-      ...(updatedSince && !Number.isNaN(updatedSince.getTime()) ? { updatedAt: { gt: updatedSince } } : {}),
-    },
-    orderBy: { name: "asc" },
-    // GAP DE AUDITORIA FECHADO (Rodada 13): esta rota é usada para sincronizar o
-    // catálogo COMPLETO do Dexie do PDV offline — nunca deve ser paginada de
-    // verdade (o PDV precisa do catálogo inteiro para funcionar sem internet),
-    // então aqui `take` é só uma trava de segurança contra um catálogo
-    // patologicamente grande (nunca realista para um tenant real), não uma
-    // paginação funcional.
-    take: 50_000,
-    select: {
-      id: true,
-      sku: true,
-      barcode: true,
-      name: true,
-      description: true,
-      category: true,
-      unitPrice: true,
-      wholesalePrice: true,
-      wholesaleMinQty: true,
-      stockQuantity: true,
-      trackingType: true,
-      isWeighted: true,
-      ncm: true,
-      collectionTag: true,
-      saleUnit: true,
-      purchaseUnit: true,
-      unitConversionFactor: true,
-      isKitComposition: true,
-      requiresPrescriptionRetention: true,
-      isControlledSubstance: true,
-      updatedAt: true,
-    },
-  });
+  const [products, total] = await prisma.$transaction([
+    prisma.product.findMany({
+      where,
+      orderBy: { name: "asc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      select: {
+        id: true,
+        sku: true,
+        barcode: true,
+        name: true,
+        description: true,
+        category: true,
+        unitPrice: true,
+        wholesalePrice: true,
+        wholesaleMinQty: true,
+        stockQuantity: true,
+        trackingType: true,
+        isWeighted: true,
+        ncm: true,
+        collectionTag: true,
+        saleUnit: true,
+        purchaseUnit: true,
+        unitConversionFactor: true,
+        isKitComposition: true,
+        requiresPrescriptionRetention: true,
+        isControlledSubstance: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.product.count({ where }),
+  ]);
 
-  return res.json({ success: true, data: products, error: null });
+  return res.json({ success: true, data: products, error: null, meta: { page, pageSize, total } });
 });
 
 /**

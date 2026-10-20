@@ -69,6 +69,7 @@ function ItemsTab({ order }: { order: WorkOrderDetail }) {
   const [unitPrice, setUnitPrice] = useState("");
   const [commissionable, setCommissionable] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [itemToRemove, setItemToRemove] = useState<{ id: string; description: string; subtotal: number } | null>(null);
 
   const add = useMutation({
     mutationFn: workOrdersApi.addItem.bind(null, order.id),
@@ -82,8 +83,14 @@ function ItemsTab({ order }: { order: WorkOrderDetail }) {
   });
   const remove = useMutation({
     mutationFn: (itemId: string) => workOrdersApi.removeItem(order.id, itemId),
-    onSuccess: refresh,
-    onError: (error) => toast.error(errorMessage(error)),
+    onSuccess: () => {
+      refresh();
+      setItemToRemove(null);
+    },
+    onError: (error) => {
+      toast.error(errorMessage(error));
+      setItemToRemove(null);
+    },
   });
 
   function submit() {
@@ -123,7 +130,14 @@ function ItemsTab({ order }: { order: WorkOrderDetail }) {
                   <TableCell align="right">{money(toNumber(i.quantity) * toNumber(i.unitPrice))}</TableCell>
                   <TableCell align="right">
                     {!closed && (
-                      <IconButton size="small" aria-label={`Remover ${i.description}`} onClick={() => remove.mutate(i.id)} disabled={remove.isPending}>
+                      <IconButton
+                        size="small"
+                        aria-label={`Remover ${i.description}`}
+                        onClick={() =>
+                          setItemToRemove({ id: i.id, description: i.description, subtotal: toNumber(i.quantity) * toNumber(i.unitPrice) })
+                        }
+                        disabled={remove.isPending}
+                      >
                         <DeleteIcon fontSize="small" />
                       </IconButton>
                     )}
@@ -166,6 +180,16 @@ function ItemsTab({ order }: { order: WorkOrderDetail }) {
           </Stack>
         </Paper>
       )}
+
+      <ConfirmDialog
+        open={itemToRemove !== null}
+        title="Remover item da ordem de serviço"
+        message={`Remover "${itemToRemove?.description}" (${money(itemToRemove?.subtotal ?? 0)})? Esta ação não pode ser desfeita.`}
+        confirmLabel="Remover item"
+        busy={remove.isPending}
+        onConfirm={() => itemToRemove && remove.mutate(itemToRemove.id)}
+        onClose={() => setItemToRemove(null)}
+      />
     </Stack>
   );
 }

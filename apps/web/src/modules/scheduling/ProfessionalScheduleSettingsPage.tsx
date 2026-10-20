@@ -28,6 +28,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { schedulingApi } from "./api";
 import { Page, PageHeader, QueryState, errorMessage } from "../../shared/ui/PageLayout";
 import { useToast } from "../../shared/ui/Toast";
+import { ConfirmDialog } from "../../shared/ui/ConfirmDialog";
 import { useProfessionals } from "../../shared/lookups";
 import { money, formatDateTime } from "../../shared/ui/format";
 
@@ -42,6 +43,7 @@ function WorkingHoursSection() {
   const [startTime, setStartTime] = useState("09:00");
   const [endTime, setEndTime] = useState("18:00");
   const [formError, setFormError] = useState<string | null>(null);
+  const [entryToRemove, setEntryToRemove] = useState<{ id: string; label: string } | null>(null);
 
   const entries = useQuery({
     queryKey: ["professional-working-hours", professionalId],
@@ -64,8 +66,12 @@ function WorkingHoursSection() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["professional-working-hours"] });
       toast.success("Expediente removido.");
+      setEntryToRemove(null);
     },
-    onError: (e) => toast.error(errorMessage(e)),
+    onError: (e) => {
+      toast.error(errorMessage(e));
+      setEntryToRemove(null);
+    },
   });
 
   return (
@@ -125,24 +131,46 @@ function WorkingHoursSection() {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {rows.map((r) => (
-                  <TableRow key={r.id} hover>
-                    <TableCell>{professionals.data?.find((p) => p.id === r.professionalId)?.name ?? r.professionalId}</TableCell>
-                    <TableCell>{WEEKDAY_LABEL[r.dayOfWeek]}</TableCell>
-                    <TableCell>{r.startTime}</TableCell>
-                    <TableCell>{r.endTime}</TableCell>
-                    <TableCell align="right">
-                      <IconButton size="small" onClick={() => remove.mutate(r.id)} disabled={remove.isPending}>
-                        <DeleteIcon fontSize="small" />
-                      </IconButton>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {rows.map((r) => {
+                  const professionalName = professionals.data?.find((p) => p.id === r.professionalId)?.name ?? r.professionalId;
+                  return (
+                    <TableRow key={r.id} hover>
+                      <TableCell>{professionalName}</TableCell>
+                      <TableCell>{WEEKDAY_LABEL[r.dayOfWeek]}</TableCell>
+                      <TableCell>{r.startTime}</TableCell>
+                      <TableCell>{r.endTime}</TableCell>
+                      <TableCell align="right">
+                        <IconButton
+                          size="small"
+                          aria-label={`Remover expediente de ${professionalName}`}
+                          onClick={() =>
+                            setEntryToRemove({
+                              id: r.id,
+                              label: `${professionalName} — ${WEEKDAY_LABEL[r.dayOfWeek]} (${r.startTime}–${r.endTime})`,
+                            })
+                          }
+                          disabled={remove.isPending}
+                        >
+                          <DeleteIcon fontSize="small" />
+                        </IconButton>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </TableContainer>
         )}
       </QueryState>
+      <ConfirmDialog
+        open={entryToRemove !== null}
+        title="Remover expediente"
+        message={`Remover o expediente de ${entryToRemove?.label}? Os horários deste dia deixarão de aparecer na Agenda Online pública.`}
+        confirmLabel="Remover expediente"
+        busy={remove.isPending}
+        onConfirm={() => entryToRemove && remove.mutate(entryToRemove.id)}
+        onClose={() => setEntryToRemove(null)}
+      />
     </Paper>
   );
 }

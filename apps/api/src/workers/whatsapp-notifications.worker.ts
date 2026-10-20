@@ -19,6 +19,9 @@ interface SendWhatsAppNotificationJobData {
   tenantId: string;
   toPhone: string;
   body: string;
+  /** fa-w4-obs-no-request-id — opcional, só para correlação de log (ver
+   * modules/notifications/notify.service.ts). */
+  requestId?: string;
 }
 
 export async function whatsappNotificationsProcessor(

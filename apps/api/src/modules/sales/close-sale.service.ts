@@ -85,6 +85,12 @@ export interface CloseSaleServerInput {
   idempotencyKey: string;
   cashRegisterId: string;
   cashierId: string;
+  // fa-w4-obs-no-request-id: id da requisição HTTP original (ver sales.routes.ts),
+  // propagado apenas para o job de emissão fiscal enfileirado abaixo em
+  // `closeSaleAndEmitFiscalDocument` — permite correlacionar os logs do worker
+  // fiscal-emission.worker.ts de volta à requisição de fechamento de venda que o
+  // originou. Nunca usado dentro da transação de negócio em si.
+  requestId?: string;
   // Capítulo 4.1.1 — venda identificada pelo CPF/CNPJ na nota, usada para creditar
   // pontos de fidelidade (EARN); clientId já validado como pertencente ao tenant
   // por quem chama este serviço (sales.routes.ts), nunca confiado cru aqui.
@@ -894,7 +900,11 @@ export async function closeSaleAndEmitFiscalDocument(prisma: TenantScopedPrismaC
     // o caso residual de nenhum retry de replay jamais acontecer.
     if (!result.isReplay || result.fiscalDocument.status === "PENDING") {
       try {
-        await enqueueFiscalEmission({ fiscalDocumentId: result.fiscalDocument.id, tenantId: input.tenantId });
+        await enqueueFiscalEmission({
+          fiscalDocumentId: result.fiscalDocument.id,
+          tenantId: input.tenantId,
+          requestId: input.requestId,
+        });
       } catch (error) {
         createModuleLogger("close-sale").error(
           { saleId: result.sale.id, fiscalDocumentId: result.fiscalDocument.id, err: error },
@@ -908,12 +918,17 @@ export async function closeSaleAndEmitFiscalDocument(prisma: TenantScopedPrismaC
     // TenantWebhookEndpoint.eventTypes). Não bloqueia o fechamento da venda caso o
     // próprio enfileiramento do dispatch falhe (ex.: Redis fora do ar) — o fluxo
     // crítico (venda registrada) nunca pode depender de uma integração opcional.
-    await dispatchWebhookEvent(input.tenantId, "sale.completed", {
-      saleId: result.sale.id,
-      totalAmount: result.sale.totalAmount,
-      channel: result.sale.channel,
-      closedAt: result.sale.createdAt,
-    }).catch((error) => {
+    await dispatchWebhookEvent(
+      input.tenantId,
+      "sale.completed",
+      {
+        saleId: result.sale.id,
+        totalAmount: result.sale.totalAmount,
+        channel: result.sale.channel,
+        closedAt: result.sale.createdAt,
+      },
+      input.requestId,
+    ).catch((error) => {
       createModuleLogger("close-sale").error({ saleId: result.sale.id, err: error }, "falha ao enfileirar webhook sale.completed");
     });
   }

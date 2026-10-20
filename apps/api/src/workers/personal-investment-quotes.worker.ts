@@ -15,7 +15,7 @@
 // atualizar (dado financeiro errado é mais perigoso que dado desatualizado explícito).
 import { Worker, Job } from "bullmq";
 import { prismaUnscoped, Prisma } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, personalInvestmentQuotesQueue } from "../lib/queue";
+import { queueRedisConnection, QUEUE_NAMES, personalInvestmentQuotesQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 import { fetchStockQuotes, BrapiUnavailableError } from "../lib/brapi-client";
 import { createModuleLogger } from "../lib/logger";
 
@@ -108,6 +108,6 @@ export async function schedulePersonalInvestmentQuotesJob(): Promise<void> {
   await personalInvestmentQuotesQueue.upsertJobScheduler(
     REPEATABLE_JOB_NAME,
     { pattern: DAILY_CRON_21H_BRT },
-    { name: REPEATABLE_JOB_NAME },
+    { name: REPEATABLE_JOB_NAME, opts: DEFAULT_RECURRING_JOB_OPTS },
   );
 }

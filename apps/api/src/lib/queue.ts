@@ -35,6 +35,48 @@ queueRedisConnection.on("error", (err) => {
   log.error({ err }, "erro de conexão");
 });
 
+// fa-w4-queue-unbounded-retention: até esta rodada NENHUM dos ~22 `new Queue(...)`
+// abaixo passava `defaultJobOptions` — a maioria dos produtores também nunca definia
+// `removeOnComplete`/`removeOnFail` no `add()`/`upsertJobScheduler()` individual, então
+// o default do próprio BullMQ (manter TODO job concluído/falho para sempre) se
+// aplicava, crescendo o uso de memória do Redis sem limite conforme o volume de jobs
+// (ex.: `whatsapp-notifications`, `webhook-delivery` — alto volume, platform-wide)
+// aumentava ao longo do tempo. Aplicado a TODA fila via este objeto compartilhado em
+// vez de repetir a configuração em cada `new Queue(...)` (ou esquecer em alguma).
+//
+// `removeOnFail` é deliberadamente mais generoso que `removeOnComplete` (7 dias / 5000
+// jobs vs. 24h / 1000 jobs): o listener único em `worker.ts` já persiste um
+// `WorkerJobFailure` durável no Postgres no instante exato em que o job falha
+// terminalmente (fa-w4-queue-no-dlq), então a retenção do próprio BullMQ aqui não é a
+// ÚNICA rede de segurança para investigar falhas — mas mantê-la generosa ainda
+// permite inspecionar o job falho (payload completo, stacktrace do BullMQ, histórico
+// de tentativas) diretamente pelo Bull Board/Redis por até uma semana, sem depender
+// só do que foi resumido no Postgres.
+export const DEFAULT_QUEUE_JOB_OPTIONS = {
+  removeOnComplete: { age: 24 * 60 * 60, count: 1000 },
+  removeOnFail: { age: 7 * 24 * 60 * 60, count: 5000 },
+} as const;
+
+// fa-w4-scheduler-no-retry-policy: `upsertJobScheduler(...)` sem `opts.attempts`
+// explícito usa o default do BullMQ (1 tentativa, sem retry) — uma falha transitória
+// isolada (timeout de rede, deadlock de lock otimista, etc.) numa execução de um cron
+// recorrente (backup, varredura de NF-e, reconciliação, limpeza de billing) perdia
+// SILENCIOSAMENTE aquela execução até o próximo disparo agendado, sem nenhuma
+// segunda chance. Dois perfis: o "padrão" (jobs leves/médios, idempotentes) e o
+// "pesado" (hoje só o backup criptografado do banco — Capítulo 10.3) com menos
+// tentativas e backoff bem mais longo, pois cada tentativa já é cara (dump completo
+// do banco) e um Redis/R2 momentaneamente instável não deveria disparar 3 dumps
+// completos em sequência rápida.
+export const DEFAULT_RECURRING_JOB_OPTS = {
+  attempts: 3,
+  backoff: { type: "exponential" as const, delay: 5_000 },
+} as const;
+
+export const HEAVY_RECURRING_JOB_OPTS = {
+  attempts: 2,
+  backoff: { type: "exponential" as const, delay: 60_000 },
+} as const;
+
 export const QUEUE_NAMES = {
   WHATSAPP_NOTIFICATIONS: "whatsapp-notifications",
   // Capítulo 20.2/20.8 — canal SMS real (Zenvia), espelhando exatamente o padrão da
@@ -128,6 +170,14 @@ export const QUEUE_NAMES = {
   // provedor podia deixar a linha PENDING_CHECKOUT (e o cupom nela aplicado)
   // órfã para sempre, sem nenhuma rede de segurança.
   EXPIRE_STALE_PENDING_CHECKOUTS: "expire-stale-pending-checkouts",
+  // fa-w4-stale-intermediate-status-reaper — varredura periódica (15 em 15 min) de
+  // `DataImportJob`/`TenantDataExportJob`/`ReportExportJob` travados em status
+  // intermediário (VALIDATING/IMPORTING/GENERATING) por tempo excessivo (processo do
+  // worker morto no meio do trabalho), consumida por
+  // `workers/reconcile-stuck-processing-jobs.worker.ts`. Mesmo princípio de
+  // `RECONCILE_STUCK_FISCAL_DOCUMENTS`, generalizado para os demais jobs sob demanda
+  // de longa duração que não tinham nenhuma rede de segurança equivalente.
+  RECONCILE_STUCK_PROCESSING_JOBS: "reconcile-stuck-processing-jobs",
   // Capítulo 21.18.5/21.18.10/21.18.11 — geração sob demanda de documentos fiscais
   // oficiais (ECD/DEFIS/ECF/EFD-Reinf/DCTFWeb/Informe de Rendimentos do Sócio),
   // consumida por `workers/accounting-document-generation.worker.ts`. GAP DE
@@ -144,83 +194,85 @@ export const QUEUE_NAMES = {
   // PDF/XLSX rodava síncrona dentro do processo HTTP, arriscando bloqueio do event
   // loop/alto consumo de memória sob carga. Job sob demanda, status/arquivo
   // persistidos em `ReportExportJob`.
+  // Capítulo 18.3 — exportação sob demanda de um `ReportDefinition` para PDF/XLSX
+  // (`GET /report-definitions/:id/export`), consumida por
+  // `workers/report-export-generation.worker.ts`. GAP DE AUDITORIA FECHADO
+  // (fa-perf-report-export-inline): a query/agregação completa + geração de
+  // PDF/XLSX rodava síncrona dentro do processo HTTP, arriscando bloqueio do event
+  // loop/alto consumo de memória sob carga. Job sob demanda, status/arquivo
+  // persistidos em `ReportExportJob`.
   REPORT_EXPORT_GENERATION: "report-export-generation",
+  // fa-w4-lgpd-no-deletion-workflow — Direito à Eliminação (LGPD Art. 18, VI):
+  // processamento sob demanda (não repetível) de um `DataDeletionRequest` já
+  // APROVADO, consumido por `workers/data-deletion-processing.worker.ts`.
+  // Anonimiza (nunca apaga linhas) o PII diretamente identificável dos modelos
+  // voltados ao cliente final do tenant — ver nota de design completa em
+  // `schema.prisma`, model `DataDeletionRequest`. Enfileirado por
+  // `POST /data-portability/deletion-requests/:id/approve`.
+  DATA_DELETION_PROCESSING: "data-deletion-processing",
+  // fa-w4-lgpd-no-retention-purge — varredura diária de `DataExport`
+  // (`TenantDataExportJob`) COMPLETED há mais de 30 dias: apaga o ZIP do R2 e marca
+  // `purgedAt`, consumida por `workers/data-retention-purge.worker.ts`. Ver nota de
+  // escopo deliberadamente conservador no próprio worker.
+  DATA_RETENTION_PURGE: "data-retention-purge",
 } as const;
 
-export const whatsappNotificationsQueue = new Queue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS, {
-  connection: queueRedisConnection,
-});
+// fa-w4-queue-unbounded-retention — fábrica única usada por TODA fila abaixo: garante
+// que nenhuma fila nova esqueça `defaultJobOptions` (o bug original era justamente
+// cada `new Queue(...)` repetir `{ connection: queueRedisConnection }` manualmente, e
+// uma rodada futura adicionando mais uma fila sem copiar o `defaultJobOptions` junto).
+function createQueue(name: string): Queue {
+  return new Queue(name, { connection: queueRedisConnection, defaultJobOptions: DEFAULT_QUEUE_JOB_OPTIONS });
+}
 
-export const smsNotificationsQueue = new Queue(QUEUE_NAMES.SMS_NOTIFICATIONS, {
-  connection: queueRedisConnection,
-});
+export const whatsappNotificationsQueue = createQueue(QUEUE_NAMES.WHATSAPP_NOTIFICATIONS);
 
-export const fiscalEmissionQueue = new Queue(QUEUE_NAMES.FISCAL_EMISSION, { connection: queueRedisConnection });
+export const smsNotificationsQueue = createQueue(QUEUE_NAMES.SMS_NOTIFICATIONS);
 
-export const nfeXmlIngestionQueue = new Queue(QUEUE_NAMES.NFE_XML_INGESTION, { connection: queueRedisConnection });
+export const fiscalEmissionQueue = createQueue(QUEUE_NAMES.FISCAL_EMISSION);
 
-export const reportGenerationQueue = new Queue(QUEUE_NAMES.REPORT_GENERATION, { connection: queueRedisConnection });
+export const nfeXmlIngestionQueue = createQueue(QUEUE_NAMES.NFE_XML_INGESTION);
 
-export const suspendOverdueTenantsQueue = new Queue(QUEUE_NAMES.SUSPEND_OVERDUE_TENANTS, {
-  connection: queueRedisConnection,
-});
+export const reportGenerationQueue = createQueue(QUEUE_NAMES.REPORT_GENERATION);
 
-export const pluggySyncQueue = new Queue(QUEUE_NAMES.PLUGGY_SYNC, { connection: queueRedisConnection });
+export const suspendOverdueTenantsQueue = createQueue(QUEUE_NAMES.SUSPEND_OVERDUE_TENANTS);
 
-export const loyaltyPointsExpirationQueue = new Queue(QUEUE_NAMES.LOYALTY_POINTS_EXPIRATION, {
-  connection: queueRedisConnection,
-});
+export const pluggySyncQueue = createQueue(QUEUE_NAMES.PLUGGY_SYNC);
 
-export const scheduledSubscriptionCancellationsQueue = new Queue(QUEUE_NAMES.SCHEDULED_SUBSCRIPTION_CANCELLATIONS, {
-  connection: queueRedisConnection,
-});
+export const loyaltyPointsExpirationQueue = createQueue(QUEUE_NAMES.LOYALTY_POINTS_EXPIRATION);
 
-export const webhookDeliveryQueue = new Queue(QUEUE_NAMES.WEBHOOK_DELIVERY, { connection: queueRedisConnection });
+export const scheduledSubscriptionCancellationsQueue = createQueue(QUEUE_NAMES.SCHEDULED_SUBSCRIPTION_CANCELLATIONS);
 
-export const personalRecurrenceGenerationQueue = new Queue(QUEUE_NAMES.PERSONAL_RECURRENCE_GENERATION, {
-  connection: queueRedisConnection,
-});
+export const webhookDeliveryQueue = createQueue(QUEUE_NAMES.WEBHOOK_DELIVERY);
 
-export const personalBillRemindersQueue = new Queue(QUEUE_NAMES.PERSONAL_BILL_REMINDERS, {
-  connection: queueRedisConnection,
-});
+export const personalRecurrenceGenerationQueue = createQueue(QUEUE_NAMES.PERSONAL_RECURRENCE_GENERATION);
 
-export const dataExportGenerationQueue = new Queue(QUEUE_NAMES.DATA_EXPORT_GENERATION, {
-  connection: queueRedisConnection,
-});
+export const personalBillRemindersQueue = createQueue(QUEUE_NAMES.PERSONAL_BILL_REMINDERS);
 
-export const dataImportValidationQueue = new Queue(QUEUE_NAMES.DATA_IMPORT_VALIDATION, {
-  connection: queueRedisConnection,
-});
+export const dataExportGenerationQueue = createQueue(QUEUE_NAMES.DATA_EXPORT_GENERATION);
 
-export const dataImportExecutionQueue = new Queue(QUEUE_NAMES.DATA_IMPORT_EXECUTION, {
-  connection: queueRedisConnection,
-});
+export const dataImportValidationQueue = createQueue(QUEUE_NAMES.DATA_IMPORT_VALIDATION);
 
-export const databaseBackupQueue = new Queue(QUEUE_NAMES.DATABASE_BACKUP, { connection: queueRedisConnection });
+export const dataImportExecutionQueue = createQueue(QUEUE_NAMES.DATA_IMPORT_EXECUTION);
 
-export const personalInvestmentQuotesQueue = new Queue(QUEUE_NAMES.PERSONAL_INVESTMENT_QUOTES, {
-  connection: queueRedisConnection,
-});
+export const databaseBackupQueue = createQueue(QUEUE_NAMES.DATABASE_BACKUP);
 
-export const accountingRecurringTasksQueue = new Queue(QUEUE_NAMES.ACCOUNTING_RECURRING_TASKS, {
-  connection: queueRedisConnection,
-});
+export const personalInvestmentQuotesQueue = createQueue(QUEUE_NAMES.PERSONAL_INVESTMENT_QUOTES);
 
-export const fetchIncomingNfeQueue = new Queue(QUEUE_NAMES.FETCH_INCOMING_NFE, { connection: queueRedisConnection });
+export const accountingRecurringTasksQueue = createQueue(QUEUE_NAMES.ACCOUNTING_RECURRING_TASKS);
 
-export const reconcileStuckFiscalDocumentsQueue = new Queue(QUEUE_NAMES.RECONCILE_STUCK_FISCAL_DOCUMENTS, {
-  connection: queueRedisConnection,
-});
+export const fetchIncomingNfeQueue = createQueue(QUEUE_NAMES.FETCH_INCOMING_NFE);
 
-export const expireStalePendingCheckoutsQueue = new Queue(QUEUE_NAMES.EXPIRE_STALE_PENDING_CHECKOUTS, {
-  connection: queueRedisConnection,
-});
+export const reconcileStuckFiscalDocumentsQueue = createQueue(QUEUE_NAMES.RECONCILE_STUCK_FISCAL_DOCUMENTS);
 
-export const accountingDocumentGenerationQueue = new Queue(QUEUE_NAMES.ACCOUNTING_DOCUMENT_GENERATION, {
-  connection: queueRedisConnection,
-});
+export const expireStalePendingCheckoutsQueue = createQueue(QUEUE_NAMES.EXPIRE_STALE_PENDING_CHECKOUTS);
 
-export const reportExportGenerationQueue = new Queue(QUEUE_NAMES.REPORT_EXPORT_GENERATION, {
-  connection: queueRedisConnection,
-});
+export const reconcileStuckProcessingJobsQueue = createQueue(QUEUE_NAMES.RECONCILE_STUCK_PROCESSING_JOBS);
+
+export const accountingDocumentGenerationQueue = createQueue(QUEUE_NAMES.ACCOUNTING_DOCUMENT_GENERATION);
+
+export const reportExportGenerationQueue = createQueue(QUEUE_NAMES.REPORT_EXPORT_GENERATION);
+
+export const dataDeletionProcessingQueue = createQueue(QUEUE_NAMES.DATA_DELETION_PROCESSING);
+
+export const dataRetentionPurgeQueue = createQueue(QUEUE_NAMES.DATA_RETENTION_PURGE);

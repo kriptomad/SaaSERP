@@ -19,7 +19,7 @@
 // ajustar/excluir manualmente via `PATCH /accounting-tasks/:id` depois de geradas.
 import { Worker, Job } from "bullmq";
 import { prismaUnscoped } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, accountingRecurringTasksQueue } from "../lib/queue";
+import { queueRedisConnection, QUEUE_NAMES, accountingRecurringTasksQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 import { createModuleLogger } from "../lib/logger";
 
 const log = createModuleLogger("accounting-recurring-tasks.worker");
@@ -148,6 +148,27 @@ export async function accountingRecurringTasksProcessor(_job: Job): Promise<{ cr
       }
     } catch (err) {
       log.error({ err, engagementId: engagement.id }, "falha ao gerar tarefas recorrentes do vínculo");
+      // fa-w4-accounting-recurring-no-isolation: além do log acima, persiste um
+      // registro durável por engajamento falho (mesma tabela de fa-w4-queue-no-dlq)
+      // — sem isso, uma varredura mensal com N engajamentos e uma falha isolada no
+      // meio (ex.: `clientTenant.taxRegime` nulo/inesperado) nunca deixava nenhum
+      // rastro consultável além do log volátil, e ninguém saberia quais
+      // engajamentos específicos precisam de atenção manual naquele mês.
+      await prismaUnscoped.workerJobFailure
+        .create({
+          data: {
+            tenantId: engagement.accountingFirmTenantId,
+            queueName: QUEUE_NAMES.ACCOUNTING_RECURRING_TASKS,
+            jobId: null,
+            jobName: "generate-engagement-monthly-tasks",
+            payload: { engagementId: engagement.id, clientTenantId: engagement.clientTenantId },
+            errorMessage: err instanceof Error ? err.message : String(err),
+            attemptsMade: 0,
+          },
+        })
+        .catch((dbError) => {
+          log.error({ err: dbError, engagementId: engagement.id }, "falha ao persistir WorkerJobFailure do engajamento");
+        });
     }
   }
 
@@ -164,6 +185,6 @@ export async function scheduleAccountingRecurringTasksJob(): Promise<void> {
   await accountingRecurringTasksQueue.upsertJobScheduler(
     REPEATABLE_JOB_NAME,
     { pattern: MONTHLY_CRON_DAY1_6AM },
-    { name: REPEATABLE_JOB_NAME },
+    { name: REPEATABLE_JOB_NAME, opts: DEFAULT_RECURRING_JOB_OPTS },
   );
 }

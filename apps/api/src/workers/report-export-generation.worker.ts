@@ -30,6 +30,9 @@ export interface ReportExportGenerationJobData {
   tenantId: string;
   reportDefinitionId: string;
   format: "PDF" | "XLSX";
+  /** fa-w4-obs-no-request-id — opcional, só para correlação de log (ver
+   * modules/reports/reports.routes.ts). */
+  requestId?: string;
 }
 
 export class ReportExportTooLargeError extends Error {}
@@ -39,7 +42,7 @@ export async function reportExportGenerationProcessor(job: Job<ReportExportGener
 
   await prismaUnscoped.reportExportJob.update({
     where: { id: jobId },
-    data: { status: "GENERATING" },
+    data: { status: "GENERATING", processingStartedAt: new Date() },
   });
 
   try {

@@ -4,8 +4,14 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./App";
 import { ToastProvider } from "./shared/ui/Toast";
+import { ErrorBoundary } from "./shared/ui/ErrorBoundary";
 import { ThemeModeProvider } from "./theme/ThemeModeProvider";
 import { registerServiceWorker } from "./shared/offline/register-service-worker";
+import { initSentry } from "./lib/sentry";
+
+// fa-w4-obs-no-error-tracking-apm — no-op sem VITE_SENTRY_DSN (ver lib/sentry.ts).
+initSentry();
+
 
 // Blindagem contra inspeção via F12 em produção (Capítulo 3/9 — nunca vazar árvore de
 // componentes/props/state pela extensão React DevTools, que funciona independente de
@@ -29,12 +35,14 @@ const queryClient = new QueryClient({
 // Temas claro/escuro vêm de @filitech/design-tokens (Bible 8.4.1) via ThemeModeProvider.
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <ThemeModeProvider>
-      <QueryClientProvider client={queryClient}>
-        <ToastProvider>
-          <App />
-        </ToastProvider>
-      </QueryClientProvider>
-    </ThemeModeProvider>
+    <ErrorBoundary>
+      <ThemeModeProvider>
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <App />
+          </ToastProvider>
+        </QueryClientProvider>
+      </ThemeModeProvider>
+    </ErrorBoundary>
   </StrictMode>,
 );

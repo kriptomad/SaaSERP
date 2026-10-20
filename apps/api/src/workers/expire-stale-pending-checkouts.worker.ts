@@ -15,7 +15,7 @@
 // checkout definitivamente abandonado.
 import { Worker, Job } from "bullmq";
 import { prismaUnscoped } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, expireStalePendingCheckoutsQueue } from "../lib/queue";
+import { queueRedisConnection, QUEUE_NAMES, expireStalePendingCheckoutsQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 import { createModuleLogger } from "../lib/logger";
 
 const log = createModuleLogger("expire-stale-pending-checkouts");
@@ -64,6 +64,6 @@ export async function scheduleExpireStalePendingCheckoutsJob(): Promise<void> {
   await expireStalePendingCheckoutsQueue.upsertJobScheduler(
     REPEATABLE_JOB_NAME,
     { pattern: DAILY_CRON_5AM },
-    { name: REPEATABLE_JOB_NAME },
+    { name: REPEATABLE_JOB_NAME, opts: DEFAULT_RECURRING_JOB_OPTS },
   );
 }

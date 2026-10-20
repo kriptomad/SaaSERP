@@ -16,7 +16,7 @@
 // `expiresAt` no passado é expirado nesta varredura.
 import { Worker, Job } from "bullmq";
 import { prismaUnscoped } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, loyaltyPointsExpirationQueue } from "../lib/queue";
+import { queueRedisConnection, QUEUE_NAMES, loyaltyPointsExpirationQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 
 const REPEATABLE_JOB_NAME = "daily-sweep";
 // 04:00 — depois da varredura de inadimplência (03:00, suspend-overdue-tenants.worker.ts),
@@ -111,5 +111,5 @@ export function startExpireLoyaltyPointsWorker(): Worker {
 
 // Agendamento idempotente — mesmo padrão de scheduleSuspendOverdueTenantsJob.
 export async function scheduleExpireLoyaltyPointsJob(): Promise<void> {
-  await loyaltyPointsExpirationQueue.upsertJobScheduler(REPEATABLE_JOB_NAME, { pattern: DAILY_CRON_4AM }, { name: REPEATABLE_JOB_NAME });
+  await loyaltyPointsExpirationQueue.upsertJobScheduler(REPEATABLE_JOB_NAME, { pattern: DAILY_CRON_4AM }, { name: REPEATABLE_JOB_NAME, opts: DEFAULT_RECURRING_JOB_OPTS });
 }

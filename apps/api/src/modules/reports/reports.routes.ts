@@ -30,7 +30,7 @@ import { executeReportDefinition, InvalidReportFieldError, ReportFilterCondition
 import { DATASET_REGISTRY } from "./dataset-registry";
 import { buildAbcCurveReport, buildVariantAbcCurveReport } from "./abc-curve-report.service";
 import { buildCollectionTurnoverReport } from "./collection-turnover-report.service";
-import { reportGenerationQueue, reportExportGenerationQueue } from "../../lib/queue";
+import { reportGenerationQueue, reportExportGenerationQueue, DEFAULT_RECURRING_JOB_OPTS } from "../../lib/queue";
 import type { ScheduledReportJobData } from "../../workers/scheduled-report-generation.worker";
 import type { ReportExportGenerationJobData } from "../../workers/report-export-generation.worker";
 import { presignObjectDownload } from "../../lib/object-storage";
@@ -250,7 +250,13 @@ reportsRouter.get("/report-definitions/:id/export", requireAuth, async (req: Req
     data: { tenantId, reportDefinitionId: definition.id, requestedByUserId: userId, format, status: "QUEUED" },
   });
 
-  const jobData: ReportExportGenerationJobData = { jobId: exportJob.id, tenantId, reportDefinitionId: definition.id, format };
+  const jobData: ReportExportGenerationJobData = {
+    jobId: exportJob.id,
+    tenantId,
+    reportDefinitionId: definition.id,
+    format,
+    requestId: req.requestId,
+  };
   await reportExportGenerationQueue.add("generate-report-export", jobData, {
     attempts: 1, // geração não é idempotente de forma segura para retry automático — falha vira status FAILED
     removeOnComplete: true,
@@ -321,7 +327,7 @@ reportsRouter.post("/scheduled-reports", requireAuth, async (req: Request, res: 
       await reportGenerationQueue.upsertJobScheduler(
         schedule.id,
         { pattern: schedule.cronExpression },
-        { name: "run-scheduled-report", data: { scheduledReportId: schedule.id } satisfies ScheduledReportJobData },
+        { name: "run-scheduled-report", data: { scheduledReportId: schedule.id } satisfies ScheduledReportJobData, opts: DEFAULT_RECURRING_JOB_OPTS },
       );
     } catch (error) {
       await prisma.scheduledReport.delete({ where: { id: schedule.id } });
@@ -359,7 +365,7 @@ reportsRouter.patch("/scheduled-reports/:id", requireAuth, async (req: Request, 
       await reportGenerationQueue.upsertJobScheduler(
         updated.id,
         { pattern: updated.cronExpression },
-        { name: "run-scheduled-report", data: { scheduledReportId: updated.id } satisfies ScheduledReportJobData },
+        { name: "run-scheduled-report", data: { scheduledReportId: updated.id } satisfies ScheduledReportJobData, opts: DEFAULT_RECURRING_JOB_OPTS },
       );
     }
   } catch (error) {

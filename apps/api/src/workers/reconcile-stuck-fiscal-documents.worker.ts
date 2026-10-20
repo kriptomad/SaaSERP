@@ -14,7 +14,7 @@
 // leem o mesmo PENDING e um deles vence a corrida, o outro fica noop.
 import { Worker, Job } from "bullmq";
 import { prismaUnscoped } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, reconcileStuckFiscalDocumentsQueue } from "../lib/queue";
+import { queueRedisConnection, QUEUE_NAMES, reconcileStuckFiscalDocumentsQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 import { enqueueFiscalEmission } from "../modules/fiscal/queues/fiscal-emission.queue";
 import { createModuleLogger } from "../lib/logger";
 
@@ -63,6 +63,6 @@ export async function scheduleReconcileStuckFiscalDocumentsJob(): Promise<void> 
   await reconcileStuckFiscalDocumentsQueue.upsertJobScheduler(
     REPEATABLE_JOB_NAME,
     { pattern: EVERY_10_MINUTES_CRON },
-    { name: REPEATABLE_JOB_NAME },
+    { name: REPEATABLE_JOB_NAME, opts: DEFAULT_RECURRING_JOB_OPTS },
   );
 }

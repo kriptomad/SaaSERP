@@ -17,6 +17,7 @@ import { z } from "zod";
 import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { readEnumQuery } from "../../lib/query-enum";
+import { zodValidationErrorResponse } from "../../lib/validation-error";
 
 export const supportTicketsRouter = Router();
 
@@ -33,7 +34,7 @@ const createTicketSchema = z.object({
 supportTicketsRouter.post("/support-tickets", requireAuth, async (req: Request, res: Response) => {
   const parsed = createTicketSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+    return zodValidationErrorResponse(res, parsed.error);
   }
   const { tenantId, userId } = req.session!;
   const { subject, category, priority, body, attachmentUrls } = parsed.data;
@@ -110,7 +111,7 @@ const addMessageSchema = z.object({
 supportTicketsRouter.post("/support-tickets/:id/messages", requireAuth, async (req: Request, res: Response) => {
   const parsed = addMessageSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: parsed.error.message } });
+    return zodValidationErrorResponse(res, parsed.error);
   }
   const ticket = await findOwnTicketOrRespond(req, res);
   if (!ticket) return;

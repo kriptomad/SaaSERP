@@ -18,7 +18,7 @@
 //   histórico inteiro a cada execução.
 import { Worker, Job } from "bullmq";
 import { prisma, prismaUnscoped, runWithTenantContext } from "@filitech/db";
-import { queueRedisConnection, QUEUE_NAMES, fetchIncomingNfeQueue } from "../lib/queue";
+import { queueRedisConnection, QUEUE_NAMES, fetchIncomingNfeQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 import { decryptFocusNfeCredential, resolveFocusNfeCredential } from "../modules/fiscal/focus-nfe-credential";
 import { manifestRecipientOperation } from "../modules/fiscal/manifest-recipient.service";
 import { withCircuitBreaker } from "../lib/circuit-breaker";
@@ -153,5 +153,5 @@ export function startFetchIncomingNfeWorker(): Worker {
 }
 
 export async function scheduleFetchIncomingNfeJob(): Promise<void> {
-  await fetchIncomingNfeQueue.upsertJobScheduler(REPEATABLE_JOB_NAME, { pattern: DAILY_CRON_5AM }, { name: REPEATABLE_JOB_NAME });
+  await fetchIncomingNfeQueue.upsertJobScheduler(REPEATABLE_JOB_NAME, { pattern: DAILY_CRON_5AM }, { name: REPEATABLE_JOB_NAME, opts: DEFAULT_RECURRING_JOB_OPTS });
 }

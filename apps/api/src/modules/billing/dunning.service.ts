@@ -40,6 +40,10 @@ export async function handlePaymentFailure(
   subscriptionId: string,
   externalPaymentId?: string,
   eventAt: Date = new Date(),
+  // fa-w4-obs-no-request-id: id da requisição HTTP do webhook (Stripe/Asaas) que
+  // disparou este evento (ver webhooks.routes.ts) — propagado só até o job
+  // WhatsApp/SMS de notificação, nunca usado na lógica financeira em si.
+  requestId?: string,
 ) {
   // CORREÇÃO DE AUDITORIA (fa-dunning-notification-inside-transaction): a notificação
   // (e-mail/push/WhatsApp, I/O externo real) era disparada DE DENTRO do callback do
@@ -104,7 +108,7 @@ export async function handlePaymentFailure(
   // Entrega da notificação FORA da transação já commitada — nunca bloqueia nem
   // reverte o estado financeiro já persistido acima.
   try {
-    await notifyTenantPaymentFailed(tenantId, { attempt: result.attempt!, nextRetryAt: result.nextRetryAt! });
+    await notifyTenantPaymentFailed(tenantId, { attempt: result.attempt!, nextRetryAt: result.nextRetryAt! }, requestId);
   } catch (err) {
     log.error({ tenantId, subscriptionId, err }, "falha ao entregar notificação de falha de pagamento (estado financeiro já commitado)");
   }

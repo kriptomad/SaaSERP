@@ -157,7 +157,11 @@ export const suppliersApi = {
 };
 
 export const productsApi = {
-  list: () => api.get<ProductListItem[]>("/products"),
+  // CORREÇÃO DE AUDITORIA (fa-w4-api-pagination-inconsistent): o backend passou a
+  // paginar de verdade `GET /products` (antes `take: 50_000` sem paginação alguma) —
+  // `getAllPages` preserva o contrato "array completo" já consumido por esta tela
+  // (filtro/paginação client-side sobre `query.data`), iterando as páginas reais.
+  list: () => api.getAllPages<ProductListItem>("/products"),
   get: (id: string) => api.get<ProductDetail>(`/products/${id}`),
   create: (input: ProductInput) => api.post<ProductDetail>("/products", input),
   update: (id: string, input: Partial<ProductInput>) => api.patch<ProductDetail>(`/products/${id}`, input),

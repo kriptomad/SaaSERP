@@ -209,6 +209,7 @@ salesRouter.post("/sales", requireAuth, async (req: Request, res: Response) => {
       paymentMethod: input.paymentMethod,
       amountTendered: input.amountTendered,
       payments: input.payments,
+      requestId: req.requestId,
     });
 
     return res.status(result.isReplay ? 200 : 201).json({
@@ -510,6 +511,11 @@ salesRouter.get("/sales", requireAuth, async (req: Request, res: Response) => {
   const limit = Number.isFinite(limitParam) && limitParam > 0 && limitParam <= 100 ? limitParam : 25;
   const before = typeof req.query.before === "string" ? new Date(req.query.before) : null;
 
+  // CORREÇÃO DE AUDITORIA (fa-w4-api-pagination-inconsistent): busca `limit + 1`
+  // linhas — técnica padrão de paginação por cursor para saber se existe uma
+  // próxima página sem precisar de um `COUNT(*)` extra (caro e, numa loja de
+  // giro rápido, inconsistente no instante entre a contagem e a busca).
+  // `hasMore=true` quando a linha extra veio; ela nunca é devolvida ao cliente.
   const sales = await prisma.sale.findMany({
     where: {
       tenantId,
@@ -517,7 +523,7 @@ salesRouter.get("/sales", requireAuth, async (req: Request, res: Response) => {
       ...(before && !Number.isNaN(before.getTime()) ? { createdAt: { lt: before } } : {}),
     },
     orderBy: { createdAt: "desc" },
-    take: limit,
+    take: limit + 1,
     select: {
       id: true,
       status: true,
@@ -532,5 +538,11 @@ salesRouter.get("/sales", requireAuth, async (req: Request, res: Response) => {
       },
     },
   });
-  return res.json({ success: true, data: sales, error: null });
+  const hasMore = sales.length > limit;
+  const page = hasMore ? sales.slice(0, limit) : sales;
+  // `nextCursor` é o valor a enviar de volta em `?before=` para continuar a
+  // paginação — este endpoint usa cursor por `createdAt` (nunca por id), então o
+  // cursor precisa ser o timestamp do último item da página, não seu id.
+  const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
+  return res.json({ success: true, data: page, meta: { nextCursor, hasMore }, error: null });
 });

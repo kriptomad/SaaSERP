@@ -253,6 +253,8 @@ model Tenant {
   inventoryCounts              InventoryCount[] // Capítulo 17.9
   dataImportJobs               DataImportJob[] // Capítulo 18.5
   tenantDataExportJobs         TenantDataExportJob[] // Capítulo 18.4
+  tenantAuditLogs              TenantAuditLog[] // fa-w4-lgpd-portability-no-audit-log / fa-w4-pharmacy-prescription-no-audit
+  dataDeletionRequests         DataDeletionRequest[] // fa-w4-lgpd-no-deletion-workflow
   referralCode                 ReferralCode? // Capítulo 2.8 — código próprio deste tenant como indicador
   referredAs                   Referral?                    @relation("ReferredTenant") // Capítulo 2.8 — registro de que este tenant foi indicado por outro
   loyaltyProgram               LoyaltyProgram? // Capítulo 4.1.1
@@ -713,6 +715,9 @@ model User {
   dataImportJobsCreated         DataImportJob[] // Capítulo 18.5
   tenantDataExportJobsRequested TenantDataExportJob[] // Capítulo 18.4
   cashRegisterMovements         CashRegisterMovement[] // Capítulo 6.7 — sangrias/suprimentos realizados por este usuário
+  tenantAuditLogs               TenantAuditLog[] // fa-w4-lgpd-portability-no-audit-log / fa-w4-pharmacy-prescription-no-audit
+  dataDeletionRequestsRequested DataDeletionRequest[] @relation("DataDeletionRequestedBy") // fa-w4-lgpd-no-deletion-workflow
+  dataDeletionRequestsApproved  DataDeletionRequest[] @relation("DataDeletionApprovedBy") // fa-w4-lgpd-no-deletion-workflow
 
   @@unique([tenantId, email])
   @@index([tenantId, role])
@@ -1474,6 +1479,12 @@ model WorkOrder {
   // (bill-and-deliver-work-order.service.ts) — nunca a mesma Sale nos dois campos.
   billingSaleId         String?              @unique
 
+  // CORREÇÃO DE AUDITORIA (fa-w4-workorder-no-idempotency-key): mesmo padrão já
+  // usado em Sale/Payment/OnlineOrder — coluna opcional (nem todo client antigo
+  // envia o header) e única por tenant quando informada, para que um retry de rede
+  // após timeout em POST /work-orders nunca crie uma O.S. duplicada.
+  idempotencyKey        String?
+
   tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
   assignedTechnician  User?                @relation("AssignedTechnician", fields: [assignedTechnicianId], references: [id])
@@ -1492,6 +1503,7 @@ model WorkOrder {
   @@index([tenantId, status])
   @@index([tenantId, assignedTechnicianId])
   @@index([tenantId, workOrderType, status])
+  @@unique([tenantId, idempotencyKey])
   @@map("work_orders")
 }
 
@@ -2219,7 +2231,15 @@ model PersonalTransaction {
   transactionDate       DateTime
   isPrivate             Boolean                 @default(false) // Capítulo 22.3 — visível apenas para createdByUserId dentro da residência
   attachmentStorageKey  String? // foto do recibo, R2 (Capítulo 20.5)
-  openFinanceExternalId String?                 @unique // idempotência: evita duplicar a mesma transação em cada sincronização do Open Finance (Capítulo 22.5)
+  // GAP DE AUDITORIA CORRIGIDO (fa-w4-pluggy-tx-dedup-not-tenant-scoped): este campo
+  // era `@unique` GLOBALMENTE (sem tenantId/accountId), então um id de transação
+  // reaproveitado/duplicado pelo agregador (Pluggy) entre dois TENANTS DIFERENTES
+  // faria o `upsert` do worker (`pluggy-sync.worker.ts`) tratar a transação de um
+  // tenant como "já existente" e aplicar o `update` sobre a linha do OUTRO tenant —
+  // corrupção cross-tenant. Idempotência agora é `@@unique([tenantId, accountId,
+  // openFinanceExternalId])` abaixo: nunca global, sempre escopada ao dono real da
+  // transação.
+  openFinanceExternalId String? // idempotência: evita duplicar a mesma transação em cada sincronização do Open Finance (Capítulo 22.5)
   createdAt             DateTime                @default(now())
   updatedAt             DateTime                @updatedAt
 
@@ -2230,6 +2250,7 @@ model PersonalTransaction {
   recurrenceRule PersonalRecurrenceRule?    @relation(fields: [recurrenceRuleId], references: [id])
   splits         PersonalTransactionSplit[]
 
+  @@unique([tenantId, accountId, openFinanceExternalId])
   @@index([tenantId, accountId, transactionDate])
   @@index([tenantId, categoryId, transactionDate])
   @@map("personal_transactions")
@@ -3268,6 +3289,35 @@ model DatabaseBackupLog {
   @@map("database_backup_logs")
 }
 
+/// fa-w4-queue-no-dlq — registro durável de falhas TERMINAIS de job (todas as
+/// `attempts` do BullMQ esgotadas, nunca uma falha pontual que ainda vai ser
+/// retentada), gravado pelo listener único em `worker.ts` no evento `failed` de
+/// TODOS os workers (ver array `allWorkers`). Fecha o gap em que um job que esgota
+/// o retry só deixava rastro em log — sem isto, um `FiscalDocument` (ou qualquer
+/// outro registro de domínio) podia ficar travado para sempre sem NENHUM jeito de
+/// um humano/painel admin descobrir que aquele job específico falhou de vez.
+/// `tenantId` nulo cobre jobs platform-wide (ex.: `database-backup`,
+/// `accounting-recurring-tasks` falha POR ENGAGEMENT — ver
+/// `accounting-recurring-tasks.worker.ts` — grava `tenantId` do escritório contábil
+/// mesmo nesse caso) e também o reaper de status travado (`reconcile-stuck-processing-jobs.worker.ts`),
+/// que reaproveita esta mesma tabela para registrar POR REGISTRO reconciliado, não só por job BullMQ.
+model WorkerJobFailure {
+  id           String   @id @default(uuid())
+  tenantId     String?
+  queueName    String
+  jobId        String?
+  jobName      String?
+  payload      Json
+  errorMessage String
+  attemptsMade Int      @default(0)
+  failedAt     DateTime @default(now())
+  resolved     Boolean  @default(false)
+
+  @@index([queueName, failedAt])
+  @@index([tenantId, resolved])
+  @@map("worker_job_failures")
+}
+
 model DiscountCoupon {
   id               String   @id @default(uuid())
   code             String   @unique
@@ -3777,6 +3827,8 @@ model ReportExportJob {
   failureReason      String?
   createdAt          DateTime          @default(now())
   completedAt        DateTime?
+  // fa-w4-stale-intermediate-status-reaper — ver nota equivalente em `DataImportJob`.
+  processingStartedAt DateTime?
 
   tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   reportDefinition ReportDefinition @relation(fields: [reportDefinitionId], references: [id], onDelete: Cascade)
@@ -3819,18 +3871,23 @@ enum DataImportStatus {
 }
 
 model DataImportJob {
-  id              String           @id @default(uuid())
-  tenantId        String
-  targetEntity    String // "PRODUCT" | "CLIENT" | "SUPPLIER" — extensível para outras entidades sem alterar o schema
-  status          DataImportStatus @default(UPLOADED)
-  sourceFileKey   String // chave do arquivo original no Cloudflare R2
-  columnMapping   Json // { "Preço Venda": "unitPrice", "Cod Barras": "barcodeEan13", ... }
-  totalRows       Int              @default(0)
-  processedRows   Int              @default(0)
-  errorReportKey  String? // CSV de erros gerado pela etapa de validação, também em R2
-  createdByUserId String
-  createdAt       DateTime         @default(now())
-  completedAt     DateTime?
+  id                  String           @id @default(uuid())
+  tenantId            String
+  targetEntity        String // "PRODUCT" | "CLIENT" | "SUPPLIER" — extensível para outras entidades sem alterar o schema
+  status              DataImportStatus @default(UPLOADED)
+  sourceFileKey       String // chave do arquivo original no Cloudflare R2
+  columnMapping       Json // { "Preço Venda": "unitPrice", "Cod Barras": "barcodeEan13", ... }
+  totalRows           Int              @default(0)
+  processedRows       Int              @default(0) // também serve de CHECKPOINT de retomada (fa-w4-import-not-idempotent): um job reenfileirado pelo BullMQ após crash/stall retoma a partir desta linha em vez de recomeçar do zero.
+  errorReportKey      String? // CSV de erros gerado pela etapa de validação, também em R2
+  createdByUserId     String
+  createdAt           DateTime         @default(now())
+  completedAt         DateTime?
+  // fa-w4-stale-intermediate-status-reaper — carimbo de início da última transição para
+  // VALIDATING/IMPORTING; `workers/reconcile-stuck-processing-jobs.worker.ts` usa este
+  // campo (não `createdAt`) para detectar um job travado nesse status por tempo
+  // excessivo (processo morto no meio do trabalho) e marcá-lo FAILED.
+  processingStartedAt DateTime?
 
   tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   createdBy User   @relation(fields: [createdByUserId], references: [id])
@@ -3850,20 +3907,105 @@ enum DataExportStatus {
 // dados" disponível em QUALQUER plano (inclusive Tier Free), gera um ZIP com todas
 // as tabelas tenant-scoped em CSV + documentos fiscais/fotos do R2 + schema-reference.json.
 model TenantDataExportJob {
-  id                String           @id @default(uuid())
-  tenantId          String
-  requestedByUserId String
-  status            DataExportStatus @default(QUEUED)
-  resultStorageKey  String? // ZIP final no R2, preenchido quando COMPLETED
-  failureReason     String?
-  createdAt         DateTime         @default(now())
-  completedAt       DateTime?
+  id                  String           @id @default(uuid())
+  tenantId            String
+  requestedByUserId   String
+  status              DataExportStatus @default(QUEUED)
+  resultStorageKey    String? // ZIP final no R2, preenchido quando COMPLETED
+  failureReason       String?
+  createdAt           DateTime         @default(now())
+  completedAt         DateTime?
+  // fa-w4-stale-intermediate-status-reaper — ver nota equivalente em `DataImportJob`.
+  processingStartedAt DateTime?
+  // fa-w4-lgpd-no-retention-purge — preenchido por `data-retention-purge.worker.ts`
+  // quando o artefato ZIP é apagado do R2 após o prazo de retenção conservador (30
+  // dias desde `completedAt`). `resultStorageKey` é zerado no mesmo instante, para
+  // que `GET /data-export/:id/download` nunca tente presignar uma chave que já foi
+  // removida do bucket.
+  purgedAt            DateTime?
 
   tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   requestedBy User   @relation(fields: [requestedByUserId], references: [id])
 
   @@index([tenantId, status])
   @@map("tenant_data_export_jobs")
+}
+
+enum TenantAuditOutcome {
+  SUCCESS
+  DENIED
+  FAILED
+}
+
+/// fa-w4-pharmacy-prescription-no-audit / fa-w4-lgpd-portability-no-audit-log —
+/// trilha de auditoria append-only para ações tenant-facing sobre dado pessoal
+/// sensível (LGPD Art. 11/37): leitura e escrita de `PrescriptionRecord`, e todo o
+/// ciclo de portabilidade de dados (solicitação/geração/download/falha de
+/// exportação) e do fluxo de exclusão/anonimização (`DataDeletionRequest`).
+///
+/// Deliberadamente um model PRÓPRIO, distinto de `AuditLog` (acima, Capítulo 13):
+/// `AuditLog.platformAdminUserId` é uma FK obrigatória para `PlatformAdminUser` —
+/// serve só a ações do painel de plataforma. Aqui o ator é sempre um `User` do
+/// próprio tenant, ou `null` quando a transição é automática (ex.: worker de
+/// expurgo de retenção agindo sozinho, sem nenhum usuário disparando a ação).
+model TenantAuditLog {
+  id         String             @id @default(uuid())
+  tenantId   String
+  userId     String? // null = ação automática de sistema/worker (ex.: expurgo agendado)
+  action     String // ex.: "PRESCRIPTION_RECORD_READ", "DATA_EXPORT_DOWNLOADED"
+  targetType String // ex.: "PrescriptionRecord", "TenantDataExportJob", "DataDeletionRequest"
+  targetId   String?
+  outcome    TenantAuditOutcome @default(SUCCESS)
+  metadata   Json
+  createdAt  DateTime           @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, targetType, targetId])
+  @@map("tenant_audit_logs")
+}
+
+enum DataDeletionRequestStatus {
+  PENDING
+  APPROVED
+  PROCESSING
+  COMPLETED
+  REJECTED
+}
+
+/// fa-w4-lgpd-no-deletion-workflow — Direito à Eliminação (LGPD Art. 18, VI).
+///
+/// DECISÃO DE ESCOPO DELIBERADA (documentada aqui por ser defensável e não óbvia):
+/// o worker que processa uma solicitação já APROVADA NUNCA executa um hard-delete
+/// das linhas do tenant — apagar as linhas quebraria a integridade referencial e a
+/// guarda legal de registros fiscais/contábeis (NF-e, livro SNGPC, livro caixa),
+/// que a própria LGPD permite reter mesmo após um pedido de eliminação (Art. 16,
+/// II — cumprimento de obrigação legal/regulatória pelo controlador). Em vez
+/// disso, o worker ANONIMIZA os campos de PII diretamente identificável dos
+/// modelos voltados ao cliente final (hoje: `Client.name/email/phone/document`,
+/// substituídos por um placeholder estável e irreversível), preservando 100% do
+/// histórico financeiro/transacional agregado (vendas, pagamentos, fiscal) —
+/// exatamente a abordagem usada por ERPs reais para resolver o conflito entre o
+/// direito de eliminação e a obrigação de guarda contábil, nunca um apagamento
+/// "best-effort" que arriscaria derrubar relatórios fiscais já emitidos.
+model DataDeletionRequest {
+  id                String                    @id @default(uuid())
+  tenantId          String
+  requestedByUserId String
+  status            DataDeletionRequestStatus @default(PENDING)
+  reason            String
+  approvedByUserId  String?
+  requestedAt       DateTime                  @default(now())
+  processedAt       DateTime?
+
+  tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  requestedBy User   @relation("DataDeletionRequestedBy", fields: [requestedByUserId], references: [id])
+  approvedBy  User?  @relation("DataDeletionApprovedBy", fields: [approvedByUserId], references: [id])
+
+  @@index([tenantId, status])
+  @@map("data_deletion_requests")
 }
 
 enum IntegrationProvider {

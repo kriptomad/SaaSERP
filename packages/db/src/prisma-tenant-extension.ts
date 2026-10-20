@@ -155,6 +155,10 @@ export const TENANT_SCOPED_MODELS = new Set([
   // Exportação total de dados (Capítulo 18.4) — tenantId único e simples, mesmo
   // padrão de DataImportJob acima:
   "TenantDataExportJob",
+  // fa-w4-lgpd-no-deletion-workflow / fa-w4-lgpd-portability-no-audit-log /
+  // fa-w4-pharmacy-prescription-no-audit — tenantId único e simples, mesmo padrão
+  // de TenantDataExportJob acima:
+  "TenantAuditLog", "DataDeletionRequest",
 ]);
 
 // NOTA CRÍTICA: Tenant em si NUNCA deve constar nesta lista. O modelo Tenant não

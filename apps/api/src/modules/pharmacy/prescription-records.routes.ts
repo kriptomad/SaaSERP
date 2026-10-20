@@ -25,6 +25,7 @@ import { prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { isTenantStorageKey } from "../../lib/storage-key";
+import { writeTenantAuditLog } from "../../lib/tenant-audit-log";
 
 export const prescriptionRecordsRouter = Router();
 
@@ -61,6 +62,18 @@ const createSchema = z.object({
 prescriptionRecordsRouter.post("/prescription-records", requireAuth, requireModule("PHARMACY_SNGPC"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "pharmacy:prescription-record:write"))) {
+    // fa-w4-pharmacy-prescription-no-audit — `patientDocument` (CPF) e o
+    // próprio registro de receituário são "dado pessoal sensível" (LGPD Art.
+    // 11); toda tentativa de escrita, negada ou não, vira linha em
+    // `TenantAuditLog`.
+    await writeTenantAuditLog({
+      tenantId,
+      userId,
+      action: "PRESCRIPTION_RECORD_CREATE",
+      targetType: "PrescriptionRecord",
+      outcome: "DENIED",
+      metadata: { reason: "FORBIDDEN" },
+    });
     return forbidden(res, "Seu nível de acesso não permite registrar retenção de receita.");
   }
   const parsed = createSchema.safeParse(req.body);
@@ -117,6 +130,15 @@ prescriptionRecordsRouter.post("/prescription-records", requireAuth, requireModu
       validatedByUserId: userId,
     },
   });
+  // fa-w4-pharmacy-prescription-no-audit
+  await writeTenantAuditLog({
+    tenantId,
+    userId,
+    action: "PRESCRIPTION_RECORD_CREATE",
+    targetType: "PrescriptionRecord",
+    targetId: record.id,
+    outcome: "SUCCESS",
+  });
   return res.status(201).json({ success: true, data: record, error: null });
 });
 
@@ -131,6 +153,15 @@ const listQuerySchema = z.object({
 prescriptionRecordsRouter.get("/prescription-records", requireAuth, requireModule("PHARMACY_SNGPC"), async (req: Request, res: Response) => {
   const { tenantId, userId, role } = req.session!;
   if (!(await hasPermission(role, userId, "pharmacy:prescription-record:read"))) {
+    // fa-w4-pharmacy-prescription-no-audit
+    await writeTenantAuditLog({
+      tenantId,
+      userId,
+      action: "PRESCRIPTION_RECORD_LIST",
+      targetType: "PrescriptionRecord",
+      outcome: "DENIED",
+      metadata: { reason: "FORBIDDEN" },
+    });
     return forbidden(res, "Seu nível de acesso não permite consultar o histórico de receitas retidas.");
   }
   const parsed = listQuerySchema.safeParse(req.query);
@@ -177,6 +208,30 @@ prescriptionRecordsRouter.get("/prescription-records", requireAuth, requireModul
     : [];
   const validatorNameById = new Map(validators.map((u) => [u.id, u.name]));
   const data = records.map((r) => ({ ...r, validatedByUserName: validatorNameById.get(r.validatedByUserId) ?? null }));
+  // fa-w4-pharmacy-prescription-no-audit — toda LEITURA de uma lista de receituários
+  // retidos (CPF do paciente + referência ao documento retido, dado pessoal
+  // sensível — LGPD Art. 11) também vira trilha de auditoria, não só a escrita.
+  await writeTenantAuditLog({
+    tenantId,
+    userId,
+    action: "PRESCRIPTION_RECORD_LIST",
+    targetType: "PrescriptionRecord",
+    outcome: "SUCCESS",
+    metadata: { resultCount: data.length, clientId: clientId ?? null, productId: productId ?? null },
+  });
+  // DECISÃO DE AUDITORIA (fa-w4-pharmacy-prescription-no-audit): avaliado mascarar
+  // `patientDocument` (CPF) aqui na listagem, retornando-o completo só em um
+  // futuro GET de registro único. Não existe hoje nenhum endpoint GET de registro
+  // único — apenas esta listagem e o POST de criação — e
+  // `apps/web/src/modules/pharmacy/PrescriptionRecordsPage.tsx` já renderiza
+  // `patientDocument` sem máscara na própria tabela de listagem (é o CPF que o
+  // atendente confere fisicamente contra a receita no balcão, não um dado
+  // decorativo). Mascarar aqui quebraria essa tela sem nenhum endpoint
+  // alternativo para o frontend buscar o valor completo — por isso o campo
+  // permanece sem máscara nesta listagem; a mitigação de LGPD aplicada é a
+  // trilha de auditoria acima (toda leitura fica registrada) em vez de
+  // ofuscação de campo, que exigiria também uma mudança de UX fora do escopo
+  // desta correção.
   return res.json({ success: true, data, error: null });
 });
 

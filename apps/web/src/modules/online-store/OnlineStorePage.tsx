@@ -35,6 +35,7 @@ import {
 } from "./api";
 import { Page, PageHeader, QueryState, errorMessage } from "../../shared/ui/PageLayout";
 import { useToast } from "../../shared/ui/Toast";
+import { ConfirmDialog } from "../../shared/ui/ConfirmDialog";
 import { money, formatDateTime } from "../../shared/ui/format";
 
 const EMPTY_SETTINGS: OnlineStoreSettingsInput = {
@@ -153,6 +154,7 @@ function OrdersTab() {
   const toast = useToast();
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["online-store-orders"], queryFn: () => onlineStoreApi.orders() });
+  const [orderToCancel, setOrderToCancel] = useState<OnlineOrder | null>(null);
 
   const advance = useMutation({
     mutationFn: ({ order, status }: { order: OnlineOrder; status: OnlineOrderStatus }) => onlineStoreApi.updateOrderStatus(order.id, status),
@@ -168,74 +170,81 @@ function OrdersTab() {
     onSuccess: () => {
       toast.success("Pedido cancelado.");
       queryClient.invalidateQueries({ queryKey: ["online-store-orders"] });
+      setOrderToCancel(null);
     },
     onError: (err) => toast.error(errorMessage(err)),
   });
 
   return (
-    <QueryState query={query} isEmpty={(data) => data.length === 0} emptyMessage="Nenhum pedido recebido pela loja online ainda.">
-      {(orders) => (
-        <TableContainer component={Paper}>
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell>Data</TableCell>
-                <TableCell>Cliente</TableCell>
-                <TableCell>Itens</TableCell>
-                <TableCell>Total</TableCell>
-                <TableCell>Entrega</TableCell>
-                <TableCell>Status</TableCell>
-                <TableCell align="right">Ações</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {orders.map((order) => {
-                const next = NEXT_STATUS[order.status];
-                return (
-                  <TableRow key={order.id}>
-                    <TableCell>{formatDateTime(order.createdAt)}</TableCell>
-                    <TableCell>
-                      {order.customerName}
-                      <br />
-                      <Typography variant="caption" color="text.secondary">
-                        {order.customerPhone}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>{order.items.map((i) => `${i.quantity}x ${i.productName}`).join(", ")}</TableCell>
-                    <TableCell>{money(order.totalAmount)}</TableCell>
-                    <TableCell>{order.isDelivery ? order.deliveryAddress ?? "Entrega" : "Retirada no local"}</TableCell>
-                    <TableCell>
-                      <Chip size="small" label={ONLINE_ORDER_STATUS_LABEL[order.status]} color={STATUS_COLOR[order.status]} />
-                    </TableCell>
-                    <TableCell align="right">
-                      <Stack direction="row" spacing={1} justifyContent="flex-end">
-                        {next && (
-                          <Button size="small" variant="outlined" onClick={() => advance.mutate({ order, status: next })}>
-                            {ONLINE_ORDER_STATUS_LABEL[next]}
-                          </Button>
-                        )}
-                        {order.status !== "DELIVERED" && order.status !== "CANCELLED" && (
-                          <Button
-                            size="small"
-                            color="error"
-                            onClick={() => {
-                              const reason = window.prompt("Motivo do cancelamento:");
-                              if (reason) cancel.mutate({ order, reason });
-                            }}
-                          >
-                            Cancelar
-                          </Button>
-                        )}
-                      </Stack>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </TableContainer>
-      )}
-    </QueryState>
+    <>
+      <QueryState query={query} isEmpty={(data) => data.length === 0} emptyMessage="Nenhum pedido recebido pela loja online ainda.">
+        {(orders) => (
+          <TableContainer component={Paper}>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Data</TableCell>
+                  <TableCell>Cliente</TableCell>
+                  <TableCell>Itens</TableCell>
+                  <TableCell>Total</TableCell>
+                  <TableCell>Entrega</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell align="right">Ações</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {orders.map((order) => {
+                  const next = NEXT_STATUS[order.status];
+                  return (
+                    <TableRow key={order.id}>
+                      <TableCell>{formatDateTime(order.createdAt)}</TableCell>
+                      <TableCell>
+                        {order.customerName}
+                        <br />
+                        <Typography variant="caption" color="text.secondary">
+                          {order.customerPhone}
+                        </Typography>
+                      </TableCell>
+                      <TableCell>{order.items.map((i) => `${i.quantity}x ${i.productName}`).join(", ")}</TableCell>
+                      <TableCell>{money(order.totalAmount)}</TableCell>
+                      <TableCell>{order.isDelivery ? order.deliveryAddress ?? "Entrega" : "Retirada no local"}</TableCell>
+                      <TableCell>
+                        <Chip size="small" label={ONLINE_ORDER_STATUS_LABEL[order.status]} color={STATUS_COLOR[order.status]} />
+                      </TableCell>
+                      <TableCell align="right">
+                        <Stack direction="row" spacing={1} justifyContent="flex-end">
+                          {next && (
+                            <Button size="small" variant="outlined" onClick={() => advance.mutate({ order, status: next })}>
+                              {ONLINE_ORDER_STATUS_LABEL[next]}
+                            </Button>
+                          )}
+                          {order.status !== "DELIVERED" && order.status !== "CANCELLED" && (
+                            <Button size="small" color="error" onClick={() => setOrderToCancel(order)}>
+                              Cancelar
+                            </Button>
+                          )}
+                        </Stack>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        )}
+      </QueryState>
+      <ConfirmDialog
+        open={orderToCancel !== null}
+        title="Cancelar pedido"
+        message={`Cancelar o pedido de ${orderToCancel?.customerName} (${orderToCancel ? money(orderToCancel.totalAmount) : ""})? Informe o motivo do cancelamento; o cliente poderá ser notificado.`}
+        confirmLabel="Confirmar cancelamento"
+        requireReason
+        reasonLabel="Motivo do cancelamento (obrigatório)"
+        busy={cancel.isPending}
+        onConfirm={(reason) => orderToCancel && reason && cancel.mutate({ order: orderToCancel, reason })}
+        onClose={() => setOrderToCancel(null)}
+      />
+    </>
   );
 }
 
