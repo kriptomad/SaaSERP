@@ -12,6 +12,23 @@
 // Execução: npm run seed --workspace=packages/db  (ver script abaixo)
 import { PrismaClient, PlanAudience, UserRole } from "@prisma/client";
 
+// fa-w6-di-seed-not-production-gated — este script faz UPSERT de catálogos globais
+// (Plan/Module/RoleDefaultPermission), nunca um DELETE destrutivo, mas mesmo assim
+// rodar `npm run seed` por engano contra o banco de PRODUÇÃO poderia sobrescrever
+// preços/labels/permissões reais com os valores de exemplo deste arquivo (ex.:
+// `monthlyPrice` de um módulo pago). Roda por padrão apenas fora de produção;
+// exige confirmação explícita (`ALLOW_SEED_IN_PRODUCTION=true`) para rodar contra
+// `NODE_ENV=production` — nunca um default silencioso.
+if (process.env.NODE_ENV === "production" && process.env.ALLOW_SEED_IN_PRODUCTION !== "true") {
+  console.error(
+    "[seed] BLOQUEADO: NODE_ENV=production e ALLOW_SEED_IN_PRODUCTION não está definida como \"true\". " +
+      "Rodar o seed de catálogos globais contra produção sobrescreve Plan/Module/RoleDefaultPermission reais. " +
+      "Se isto é intencional (ex.: popular catálogo inicial de um ambiente de produção novo, ainda sem dados), " +
+      "rode novamente com ALLOW_SEED_IN_PRODUCTION=true.",
+  );
+  process.exit(1);
+}
+
 const prisma = new PrismaClient();
 
 // Capítulo 2.6 — MODULE_CATALOG exato do middleware de upsell.

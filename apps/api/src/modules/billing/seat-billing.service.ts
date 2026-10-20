@@ -102,6 +102,7 @@ export async function reconcileSeatBillingWithProvider(prisma: TenantScopedPrism
 
     try {
       const itemId = await syncSeatQuantityWithStripe(
+        tenantId,
         subscription.externalSubscriptionId,
         subscription.stripeSeatSubscriptionItemId,
         seatPriceParam.value,

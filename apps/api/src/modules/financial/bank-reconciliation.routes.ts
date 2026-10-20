@@ -55,8 +55,18 @@ async function requireWrite(req: Request, res: Response): Promise<boolean> {
 bankReconciliationRouter.get("/bank-accounts", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const accounts = await prisma.bankAccount.findMany({ where: { tenantId }, orderBy: { bankName: "asc" } });
-  return res.json({ success: true, data: accounts, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): `findMany` sem
+  // skip/take/count devolvia TODAS as contas bancárias do tenant de uma vez. Mesmo
+  // padrão page/pageSize+meta já usado em `suppliers.routes.ts`/
+  // `official-tax-documents` (accounting-office.routes.ts).
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { tenantId };
+  const [accounts, total] = await Promise.all([
+    prisma.bankAccount.findMany({ where, orderBy: { bankName: "asc" }, skip: (page - 1) * pageSize, take: pageSize }),
+    prisma.bankAccount.count({ where }),
+  ]);
+  return res.json({ success: true, data: accounts, error: null, meta: { page, pageSize, total } });
 });
 
 const createBankAccountSchema = z.object({
@@ -157,10 +167,16 @@ bankReconciliationRouter.post("/bank-accounts/:id/sync-now", requireAuth, async 
 // TRANSAÇÕES E CONCILIAÇÃO
 // ─────────────────────────────────────────────────────────────────────────
 
+const bankTransactionsQuerySchema = z.object({ bankAccountId: z.string().uuid().optional() });
+
 bankReconciliationRouter.get("/bank-transactions", requireAuth, async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
   const { tenantId } = req.session!;
-  const { bankAccountId } = req.query as { bankAccountId?: string };
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-bank-reconciliation-query-unvalidated):
+  // `bankAccountId` era lido via cast direto (`as { bankAccountId?: string }`).
+  const parsedQuery = bankTransactionsQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsedQuery.error.flatten() } });
+  const { bankAccountId } = parsedQuery.data;
   const statusParsed = readEnumQuery(res, req.query.status, ["UNMATCHED", "SUGGESTED", "MATCHED", "IGNORED"] as const, "status");
   if (!statusParsed.ok) return;
   const transactions = await prisma.bankTransaction.findMany({

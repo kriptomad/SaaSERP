@@ -107,8 +107,13 @@ workOrderReportsRouter.get("/work-order-reports/commissions", requireAuth, requi
   // warning registra o evento no servidor) sempre que o limite é atingido.
   const truncated = delivered.length === 2000;
   if (truncated) {
-    // eslint-disable-next-line no-console
-    console.warn(`[work-order-reports] /commissions truncado em 2000 O.S. entregues (tenantId=${tenantId}); comissão pode estar subestimada para o período solicitado.`);
+    // fa-w6-obs-console-warn-bypasses-logger: `console.warn` não tem nível/estrutura
+    // nem passa pelo redact do pino — troca por `req.log.warn` (já amarrado ao
+    // `requestId` desta requisição) para ficar correlacionável no agregador de log.
+    req.log.warn(
+      { tenantId, deliveredCount: delivered.length },
+      "/work-order-reports/commissions truncado em 2000 O.S. entregues; comissão pode estar subestimada para o período solicitado",
+    );
   }
 
   const byTechnician = new Map<
@@ -306,8 +311,11 @@ workOrderReportsRouter.get("/work-order-reports/kpis", requireAuth, requireModul
   // avisar o consumidor.
   const truncated = delivered.length === 2000;
   if (truncated) {
-    // eslint-disable-next-line no-console
-    console.warn(`[work-order-reports] /kpis truncado em 2000 O.S. entregues (tenantId=${tenantId}); indicadores podem não refletir o período completo solicitado.`);
+    // fa-w6-obs-console-warn-bypasses-logger: idem /commissions acima.
+    req.log.warn(
+      { tenantId, deliveredCount: delivered.length },
+      "/work-order-reports/kpis truncado em 2000 O.S. entregues; indicadores podem não refletir o período completo solicitado",
+    );
   }
 
   let totalCycleHours = 0;

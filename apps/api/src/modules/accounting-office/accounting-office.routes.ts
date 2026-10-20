@@ -165,12 +165,17 @@ accountingOfficeRouter.put("/accounting-firm-profile", requireAuth, async (req: 
 accountingOfficeRouter.get("/accounting-engagements", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireManage(req, res))) return;
   const { tenantId } = req.session!;
-  const engagements = await prisma.accountingEngagement.findMany({
-    where: { OR: [{ clientTenantId: tenantId }, { accountingFirmTenantId: tenantId }] },
-    orderBy: { grantedAt: "desc" },
-    take: 200, // CORREÇÃO DE AUDITORIA: listagem antes era unbounded
-  });
-  return res.json({ success: true, data: engagements, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): upgrade do teto
+  // simples `take:200` (correção de rodada anterior) para paginação completa
+  // page/pageSize+meta, mesmo padrão de `suppliers.routes.ts`.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { OR: [{ clientTenantId: tenantId }, { accountingFirmTenantId: tenantId }] };
+  const [engagements, total] = await Promise.all([
+    prisma.accountingEngagement.findMany({ where, orderBy: { grantedAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
+    prisma.accountingEngagement.count({ where }),
+  ]);
+  return res.json({ success: true, data: engagements, error: null, meta: { page, pageSize, total } });
 });
 
 const grantEngagementSchema = z.object({
@@ -283,12 +288,24 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, requireMod
   if (!(await requireTaskRead(req, res))) return;
   const { tenantId } = req.session!;
 
-  const engagements = await prisma.accountingEngagement.findMany({
-    where: { accountingFirmTenantId: tenantId, status: "ACTIVE" },
-    include: { clientTenant: { select: { id: true, tradeName: true, slug: true, cnpj: true } } },
-    orderBy: { grantedAt: "desc" },
-    take: 200, // CORREÇÃO DE AUDITORIA: listagem antes era unbounded
-  });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): upgrade do teto
+  // simples `take:200` para paginação completa page/pageSize+meta (lado
+  // clientes da carteira). A fila de tarefas abaixo (`pendingTasksQueue`) usa
+  // parâmetros próprios `taskPage`/`taskPageSize` + `meta.tasks`, já que são
+  // duas listagens independentes na mesma resposta.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const engagementsWhere = { accountingFirmTenantId: tenantId, status: "ACTIVE" as const };
+  const [engagements, engagementsTotal] = await Promise.all([
+    prisma.accountingEngagement.findMany({
+      where: engagementsWhere,
+      include: { clientTenant: { select: { id: true, tradeName: true, slug: true, cnpj: true } } },
+      orderBy: { grantedAt: "desc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.accountingEngagement.count({ where: engagementsWhere }),
+  ]);
 
   // CORREÇÃO DE AUDITORIA: o filtro `status: "ACTIVE"` acima já restringe a query,
   // mas nenhum acesso cross-tenant real passava por `assertAccountingAccess()` —
@@ -333,12 +350,19 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, requireMod
     tasks: countsByClient.get(e.clientTenantId) ?? { pending: 0, late: 0, done: 0 },
   }));
 
-  const pendingTasksQueue = await prisma.accountingTask.findMany({
-    where: { accountingFirmTenantId: tenantId, clientTenantId: { in: clientTenantIds }, status: { in: ["PENDING", "IN_PROGRESS", "LATE", "BLOCKED"] } },
-    include: { clientTenant: { select: { tradeName: true, slug: true } } },
-    orderBy: { dueDate: "asc" },
-    take: 100,
-  });
+  const taskPage = Math.max(1, Number.parseInt(String(req.query.taskPage ?? "1"), 10) || 1);
+  const taskPageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.taskPageSize ?? "50"), 10) || 50));
+  const pendingTasksWhere: Prisma.AccountingTaskWhereInput = { accountingFirmTenantId: tenantId, clientTenantId: { in: clientTenantIds }, status: { in: ["PENDING", "IN_PROGRESS", "LATE", "BLOCKED"] } };
+  const [pendingTasksQueue, pendingTasksTotal] = await Promise.all([
+    prisma.accountingTask.findMany({
+      where: pendingTasksWhere,
+      include: { clientTenant: { select: { tradeName: true, slug: true } } },
+      orderBy: { dueDate: "asc" },
+      skip: (taskPage - 1) * taskPageSize,
+      take: taskPageSize,
+    }),
+    prisma.accountingTask.count({ where: pendingTasksWhere }),
+  ]);
 
   return res.json({
     success: true,
@@ -355,6 +379,7 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, requireMod
       })),
     },
     error: null,
+    meta: { page, pageSize, total: engagementsTotal, tasks: { page: taskPage, pageSize: taskPageSize, total: pendingTasksTotal } },
   });
 });
 
@@ -364,10 +389,24 @@ accountingOfficeRouter.get("/accounting-firm-portfolio", requireAuth, requireMod
 // e o ajuste manual de status pelo contador)
 // ─────────────────────────────────────────────────────────────────────────
 
+const accountingTasksQuerySchema = z.object({
+  // Formato real de `AccountingTask.competencia` (ver geração em
+  // accounting-recurring-tasks.worker.ts `competenciaOf()`/`yearCompetencia`):
+  // "AAAA-MM" para tarefas mensais, ou "AAAA-ANUAL" para tarefas anuais
+  // (ECD/ECF/DEFIS/IRPF) — aceita ambos.
+  competencia: z.string().regex(/^\d{4}-(0[1-9]|1[0-2]|ANUAL)$/, "competencia deve estar no formato AAAA-MM ou AAAA-ANUAL.").optional(),
+});
+
 accountingOfficeRouter.get("/accounting-tasks", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireTaskRead(req, res))) return;
   const { tenantId } = req.session!;
-  const { competencia } = req.query as { competencia?: string };
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-accounting-office-query-unvalidated):
+  // `competencia` era lido via cast direto (`as string|undefined`).
+  const parsedQuery = accountingTasksQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsedQuery.error.flatten() } });
+  }
+  const { competencia } = parsedQuery.data;
   const statusParsed = readEnumQuery(res, req.query.status, ["PENDING", "IN_PROGRESS", "DONE", "LATE", "BLOCKED"] as const, "status");
   if (!statusParsed.ok) return;
   const status = statusParsed.value;
@@ -393,19 +432,23 @@ accountingOfficeRouter.get("/accounting-tasks", requireAuth, requireModule("ACCO
     }
   }
 
-  const tasks = await prisma.accountingTask.findMany({
-    where: {
-      OR: [
-        { accountingFirmTenantId: tenantId, clientTenantId: { in: activeClientIds } },
-        { clientTenantId: tenantId },
-      ],
-      ...(competencia ? { competencia } : {}),
-      ...(status ? { status } : {}),
-    },
-    orderBy: { dueDate: "asc" },
-    take: 200, // CORREÇÃO DE AUDITORIA: listagem antes era unbounded
-  });
-  return res.json({ success: true, data: tasks, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): upgrade do teto
+  // simples `take:200` para paginação completa page/pageSize+meta.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const tasksWhere = {
+    OR: [
+      { accountingFirmTenantId: tenantId, clientTenantId: { in: activeClientIds } },
+      { clientTenantId: tenantId },
+    ],
+    ...(competencia ? { competencia } : {}),
+    ...(status ? { status } : {}),
+  };
+  const [tasks, total] = await Promise.all([
+    prisma.accountingTask.findMany({ where: tasksWhere, orderBy: { dueDate: "asc" }, skip: (page - 1) * pageSize, take: pageSize }),
+    prisma.accountingTask.count({ where: tasksWhere }),
+  ]);
+  return res.json({ success: true, data: tasks, error: null, meta: { page, pageSize, total } });
 });
 
 const updateTaskSchema = z.object({
@@ -460,14 +503,29 @@ accountingOfficeRouter.patch("/accounting-tasks/:id", requireAuth, requireModule
 // honesta e completa do que fica fora de escopo e por quê).
 // ─────────────────────────────────────────────────────────────────────────
 
+const officialTaxDocumentsQuerySchema = z.object({
+  documentType: z.enum(["ECD", "DEFIS", "ECF", "EFD_REINF", "DCTFWEB", "INFORME_RENDIMENTOS_SOCIO"]).optional(),
+  clientTenantId: z.string().uuid().optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(200).optional(),
+});
+
 accountingOfficeRouter.get("/official-tax-documents", requireAuth, requireModule("ACCOUNTING_OFFICE"), async (req: Request, res: Response) => {
   if (!(await requireDocumentRead(req, res))) return;
   const { tenantId } = req.session!;
-  const { documentType } = req.query as { documentType?: string };
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-accounting-office-query-unvalidated):
+  // `documentType`/`clientTenantId` eram lidos via cast direto (`as string|undefined`),
+  // sem validar contra o enum real do Prisma nem o formato de UUID — mesmo padrão
+  // de validação de enum via Zod já usado para `status` em `/accounting-tasks` abaixo.
+  const parsedQuery = officialTaxDocumentsQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsedQuery.error.flatten() } });
+  }
+  const { documentType } = parsedQuery.data;
 
   // Caminho A (com escritório contratado): o contador acessa documentos de um
   // tenant-cliente via vínculo ATIVO, nunca por acesso direto.
-  const clientTenantId = req.query.clientTenantId as string | undefined;
+  const { clientTenantId } = parsedQuery.data;
   let ownerTenantId = tenantId;
   if (clientTenantId && clientTenantId !== tenantId) {
     try {
@@ -485,9 +543,9 @@ accountingOfficeRouter.get("/official-tax-documents", requireAuth, requireModule
   // skip/take/select retornava TODOS os documentos do tenant (incluindo o campo
   // `fileUrl` bruto, nunca necessário na listagem). Mesmo padrão page/pageSize já
   // usado em users.routes.ts/stock.routes.ts.
-  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
-  const pageSize = Math.min(200, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
-  const where = { tenantId: ownerTenantId, ...(documentType ? { documentType: documentType as any } : {}) };
+  const page = parsedQuery.data.page ?? 1;
+  const pageSize = parsedQuery.data.pageSize ?? 50;
+  const where = { tenantId: ownerTenantId, ...(documentType ? { documentType } : {}) };
 
   const [documents, total] = await Promise.all([
     prisma.officialTaxDocument.findMany({
@@ -740,6 +798,13 @@ accountingOfficeRouter.delete("/company-partners/:id", requireAuth, requireModul
   if (payoutCount > 0) {
     return res.status(409).json({ success: false, data: null, error: { code: "PARTNER_HAS_PAYOUT_HISTORY", message: "Este sócio já possui pró-labore/distribuição lançados — não pode ser excluído (histórico fiscal). Edite o cadastro em vez de excluir." } });
   }
+  // fa-w6-di-hard-deletes-critical-entities — revisado: este hard-delete é
+  // ACEITÁVEL sem conversão para soft-delete, porque o guard logo acima
+  // (`payoutCount > 0`) já bloqueia a exclusão sempre que existir QUALQUER
+  // histórico financeiro real (`PartnerPayout`) vinculado a este sócio. Um
+  // `CompanyPartner` sem nenhum pró-labore/distribuição lançado é só um cadastro de
+  // sócio (nome/CPF/percentual) sem rastro contábil — equivalente a excluir um
+  // cadastro de fornecedor nunca usado em nenhuma compra.
   await prisma.companyPartner.delete({ where: { id: existing.id } });
   return res.json({ success: true, data: { deleted: true }, error: null });
 });

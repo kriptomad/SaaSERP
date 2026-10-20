@@ -27,24 +27,40 @@ const CLASS_B_CUTOFF = 0.95;
 export async function buildAbcCurveReport(prisma: TenantScopedPrismaClient, tenantId: string, days: number): Promise<AbcCurveRow[]> {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  const grouped = await prisma.saleItem.groupBy({
-    by: ["productId"],
-    where: {
-      tenantId,
-      productId: { not: null },
-      sale: { status: "PAID", createdAt: { gte: since } },
+  // fa-w6-di-reports-no-snapshot-isolation — o `groupBy` de vendas e o `findMany` de
+  // produtos eram duas leituras INDEPENDENTES: uma venda concluída ou um produto
+  // renomeado/excluído entre as duas chamadas produzia um relatório inconsistente
+  // (ex.: faturamento somado de um produto que o segundo SELECT já não encontra mais,
+  // virando "Produto removido" para uma linha que na verdade só mudou de nome no meio
+  // do cálculo). `REPEATABLE READ` garante que as duas leituras enxerguem o mesmo
+  // snapshot do banco, do início ao fim da geração do relatório.
+  const { grouped, productById } = await prisma.$transaction(
+    async (tx) => {
+      const groupedRows = await tx.saleItem.groupBy({
+        by: ["productId"],
+        where: {
+          tenantId,
+          productId: { not: null },
+          sale: { status: "PAID", createdAt: { gte: since } },
+        },
+        _sum: { totalPrice: true, quantity: true },
+      });
+
+      if (groupedRows.length === 0) {
+        return { grouped: groupedRows, productById: new Map<string, { id: string; name: string; category: string | null }>() };
+      }
+
+      const productIds = groupedRows.map((g) => g.productId!).filter(Boolean);
+      const products = await tx.product.findMany({
+        where: { id: { in: productIds }, tenantId },
+        select: { id: true, name: true, category: true },
+      });
+      return { grouped: groupedRows, productById: new Map(products.map((p) => [p.id, p])) };
     },
-    _sum: { totalPrice: true, quantity: true },
-  });
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
 
   if (grouped.length === 0) return [];
-
-  const productIds = grouped.map((g) => g.productId!).filter(Boolean);
-  const products = await prisma.product.findMany({
-    where: { id: { in: productIds }, tenantId },
-    select: { id: true, name: true, category: true },
-  });
-  const productById = new Map(products.map((p) => [p.id, p]));
 
   const totalRevenue = grouped.reduce((sum, g) => sum.plus(g._sum.totalPrice ?? new Prisma.Decimal(0)), new Prisma.Decimal(0));
 
@@ -100,24 +116,35 @@ export interface AbcCurveVariantRow {
 export async function buildVariantAbcCurveReport(prisma: TenantScopedPrismaClient, tenantId: string, days: number): Promise<AbcCurveVariantRow[]> {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  const grouped = await prisma.saleItem.groupBy({
-    by: ["productVariantId"],
-    where: {
-      tenantId,
-      productVariantId: { not: null },
-      sale: { status: "PAID", createdAt: { gte: since } },
+  // fa-w6-di-reports-no-snapshot-isolation — mesma garantia de snapshot único
+  // descrita em `buildAbcCurveReport` acima, agora para a agregação por variante.
+  const { grouped, variantById } = await prisma.$transaction(
+    async (tx) => {
+      const groupedRows = await tx.saleItem.groupBy({
+        by: ["productVariantId"],
+        where: {
+          tenantId,
+          productVariantId: { not: null },
+          sale: { status: "PAID", createdAt: { gte: since } },
+        },
+        _sum: { totalPrice: true, quantity: true },
+      });
+
+      if (groupedRows.length === 0) {
+        return { grouped: groupedRows, variantById: new Map<string, { id: string; axisValue: string; productId: string; axis: { name: string } | null; product: { name: string } | null }>() };
+      }
+
+      const variantIds = groupedRows.map((g) => g.productVariantId!).filter(Boolean);
+      const variants = await tx.productVariant.findMany({
+        where: { id: { in: variantIds }, tenantId },
+        select: { id: true, axisValue: true, productId: true, axis: { select: { name: true } }, product: { select: { name: true } } },
+      });
+      return { grouped: groupedRows, variantById: new Map(variants.map((v) => [v.id, v])) };
     },
-    _sum: { totalPrice: true, quantity: true },
-  });
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
 
   if (grouped.length === 0) return [];
-
-  const variantIds = grouped.map((g) => g.productVariantId!).filter(Boolean);
-  const variants = await prisma.productVariant.findMany({
-    where: { id: { in: variantIds }, tenantId },
-    select: { id: true, axisValue: true, productId: true, axis: { select: { name: true } }, product: { select: { name: true } } },
-  });
-  const variantById = new Map(variants.map((v) => [v.id, v]));
 
   const totalRevenue = grouped.reduce((sum, g) => sum.plus(g._sum.totalPrice ?? new Prisma.Decimal(0)), new Prisma.Decimal(0));
 

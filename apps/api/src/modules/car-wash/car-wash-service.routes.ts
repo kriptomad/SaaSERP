@@ -90,6 +90,14 @@ async function ensureCarWashWorkOrder(tenantId: string, appointmentId: string) {
   // diferente a este Appointment entre o findFirst acima e este updateMany — descarta
   // a WorkOrder recém-criada (nunca referenciada por ninguém, livre para apagar) e
   // reaproveita a que já está de fato vinculada.
+  //
+  // fa-w6-di-hard-deletes-critical-entities — revisado: este É um hard-delete
+  // legítimo (não convertido para soft-delete). `candidateWorkOrder` foi criada
+  // NESTA MESMA requisição, há microssegundos, e o `updateMany` condicional acima
+  // prova que nenhum `Appointment` chegou a referenciá-la (`claim.count === 0`) —
+  // ela nunca teve `WorkOrderItem`, nunca apareceu em nenhum relatório/fatura, e
+  // nenhuma FK de `Sale`/`PaymentCharge` pode existir para um registro que não
+  // existia um instante atrás. Não há histórico financeiro/auditável a reter.
   await prisma.workOrder.delete({ where: { id: candidateWorkOrder.id } });
   const winningAppointment = await prisma.appointment.findUniqueOrThrow({ where: { id: appointment.id } });
   return prisma.workOrder.findUnique({ where: { id: winningAppointment.workOrderId! } });

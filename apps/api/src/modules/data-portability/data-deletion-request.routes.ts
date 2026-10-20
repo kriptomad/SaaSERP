@@ -93,8 +93,16 @@ dataDeletionRequestRouter.post("/data-portability/deletion-requests", requireAut
 // GET /data-portability/deletion-requests — lista os pedidos do tenant.
 dataDeletionRequestRouter.get("/data-portability/deletion-requests", requireAuth, async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
-  const requests = await prisma.dataDeletionRequest.findMany({ where: { tenantId }, orderBy: { requestedAt: "desc" } });
-  return res.json({ success: true, data: requests, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): `findMany` sem
+  // skip/take/count devolvia TODOS os pedidos de exclusão do tenant de uma vez.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { tenantId };
+  const [requests, total] = await Promise.all([
+    prisma.dataDeletionRequest.findMany({ where, orderBy: { requestedAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
+    prisma.dataDeletionRequest.count({ where }),
+  ]);
+  return res.json({ success: true, data: requests, error: null, meta: { page, pageSize, total } });
 });
 
 async function transitionRequest(

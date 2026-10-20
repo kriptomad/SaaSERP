@@ -18,6 +18,33 @@ async function asaasHeaders() {
   };
 }
 
+// fa-w6-obs-asaas-error-body-leak: o corpo de erro da Asaas pode ecoar parte do
+// payload enviado (ex.: validação de CPF/CNPJ, dados de cartão) de volta na resposta
+// — jamais pode virar texto livre dentro de `Error.message` (que é logado/enviado ao
+// Sentry sem passar pelo redact do pino, que só mascara campos de objeto estruturado,
+// nunca substrings dentro de uma mensagem). `message` carrega só status + código
+// seguro; o corpo bruto fica numa propriedade estruturada separada (`responseBody`),
+// coberta pelo path dedicado `err.responseBody` no redact de `lib/logger.ts`.
+export class AsaasApiError extends Error {
+  readonly status: number;
+  readonly asaasErrorCode?: string;
+  readonly responseBody: unknown;
+
+  constructor(status: number, asaasErrorCode: string | undefined, responseBody: unknown) {
+    super(`Asaas API error (status ${status})${asaasErrorCode ? ` [${asaasErrorCode}]` : ""}`);
+    this.name = "AsaasApiError";
+    this.status = status;
+    this.asaasErrorCode = asaasErrorCode;
+    this.responseBody = responseBody;
+  }
+}
+
+function extractAsaasErrorCode(body: unknown): string | undefined {
+  const errors = (body as { errors?: Array<{ code?: unknown }> } | null)?.errors;
+  const firstCode = Array.isArray(errors) ? errors[0]?.code : undefined;
+  return typeof firstCode === "string" ? firstCode : undefined;
+}
+
 async function asaasRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const baseUrl = await resolveAsaasBaseUrl();
   const response = await fetch(`${baseUrl}${path}`, {
@@ -26,7 +53,7 @@ async function asaasRequest<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const body = await response.json();
   if (!response.ok) {
-    throw new Error(`Asaas API error (${response.status}): ${JSON.stringify(body)}`);
+    throw new AsaasApiError(response.status, extractAsaasErrorCode(body), body);
   }
   return body as T;
 }

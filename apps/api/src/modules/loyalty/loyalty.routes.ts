@@ -86,16 +86,25 @@ loyaltyRouter.get("/loyalty/accounts", requireAuth, async (req: Request, res: Re
     return forbidden(res, "Seu nível de acesso não permite consultar saldos de pontos.");
   }
   const search = typeof req.query.search === "string" && req.query.search ? req.query.search : null;
-  const accounts = await prisma.loyaltyAccount.findMany({
-    where: {
-      tenantId,
-      ...(search ? { client: { name: { contains: search, mode: "insensitive" } } } : {}),
-    },
-    include: { client: { select: { id: true, name: true, document: true, phone: true } } },
-    orderBy: { pointsBalance: "desc" },
-    take: 100,
-  });
-  return res.json({ success: true, data: accounts, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): upgrade do teto
+  // simples `take:100` para paginação completa page/pageSize+meta.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = {
+    tenantId,
+    ...(search ? { client: { name: { contains: search, mode: "insensitive" as const } } } : {}),
+  };
+  const [accounts, total] = await Promise.all([
+    prisma.loyaltyAccount.findMany({
+      where,
+      include: { client: { select: { id: true, name: true, document: true, phone: true } } },
+      orderBy: { pointsBalance: "desc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.loyaltyAccount.count({ where }),
+  ]);
+  return res.json({ success: true, data: accounts, error: null, meta: { page, pageSize, total } });
 });
 
 // Cliente sem conta ainda tem saldo 0 — a conta só é criada no primeiro lançamento.
@@ -134,12 +143,16 @@ loyaltyRouter.get("/loyalty/accounts/:clientId/transactions", requireAuth, async
   const validTypes = ["EARN", "REDEEM", "EXPIRE", "MANUAL_ADJUST"];
   if (type && !validTypes.includes(type)) return validationError(res, { type: ["Tipo inválido."] });
 
-  const transactions = await prisma.loyaltyTransaction.findMany({
-    where: { loyaltyAccountId: account.id, ...(type ? { type: type as any } : {}) },
-    orderBy: { createdAt: "desc" },
-    take: 200,
-  });
-  return res.json({ success: true, data: transactions, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): upgrade do teto
+  // simples `take:200` para paginação completa page/pageSize+meta.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { loyaltyAccountId: account.id, ...(type ? { type: type as any } : {}) };
+  const [transactions, total] = await Promise.all([
+    prisma.loyaltyTransaction.findMany({ where, orderBy: { createdAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
+    prisma.loyaltyTransaction.count({ where }),
+  ]);
+  return res.json({ success: true, data: transactions, error: null, meta: { page, pageSize, total } });
 });
 
 const adjustSchema = z.object({
@@ -320,15 +333,18 @@ loyaltyRouter.get("/referrals", requireAuth, async (req: Request, res: Response)
     return forbidden(res, "Seu nível de acesso não permite consultar indicações.");
   }
   const code = await prisma.referralCode.findUnique({ where: { tenantId } });
-  if (!code) return res.json({ success: true, data: [], error: null });
+  if (!code) return res.json({ success: true, data: [], error: null, meta: { page: 1, pageSize: 50, total: 0 } });
 
-  const referrals = await prisma.referral.findMany({
-    where: { referralCodeId: code.id },
-    include: { referredTenant: { select: { tradeName: true } } },
-    orderBy: { createdAt: "desc" },
-    take: 500,
-  });
-  return res.json({ success: true, data: referrals, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): upgrade do teto
+  // simples `take:500` para paginação completa page/pageSize+meta.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { referralCodeId: code.id };
+  const [referrals, total] = await Promise.all([
+    prisma.referral.findMany({ where, include: { referredTenant: { select: { tradeName: true } } }, orderBy: { createdAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
+    prisma.referral.count({ where }),
+  ]);
+  return res.json({ success: true, data: referrals, error: null, meta: { page, pageSize, total } });
 });
 
 const registerReferralSchema = z.object({ code: z.string().trim().min(3).transform((s) => s.toUpperCase()) });

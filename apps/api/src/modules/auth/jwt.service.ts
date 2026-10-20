@@ -20,6 +20,19 @@ export interface SessionClaims {
   // (incrementado a cada troca/reset de senha), permitindo revogar de uma vez
   // todos os tokens emitidos antes da troca, sem precisar de uma denylist por jti.
   tokenVersion: number;
+  // CORREÇÃO DE AUDITORIA (fa-w6-sess-no-tenant-session-management): identificador
+  // opaco (UUID aleatório) da `ActiveSession` (ver schema.prisma) criada no
+  // login/signup — espelha, para o lado tenant, o mesmo `sid` já usado pelo painel
+  // de plataforma (Capítulo 14.4). `auth.middleware.ts` guarda apenas o HASH SHA-256
+  // deste valor em `ActiveSession.refreshTokenHash`, nunca o valor em claro —
+  // permite listar/revogar sessões individuais (GET/DELETE /auth/sessions) e
+  // encerrar a sessão atual de fato no servidor (POST /auth/logout), em vez do
+  // antigo "logout" puramente client-side (apenas descartar o token local).
+  // Opcional (`?`) para continuar aceitando, durante a janela de rollout, tokens
+  // de 8h emitidos pela versão anterior deste serviço (sem `sid`) — nesse caso
+  // `auth.middleware.ts` simplesmente não executa a checagem de sessão revogável
+  // para esse token específico (mesmo tratamento dado a `impersonation` ausente).
+  sid?: string;
 }
 
 // CORREÇÃO DE AUDITORIA (fa-w5-sec-jwt-claims-not-required): token de sessão
@@ -86,6 +99,13 @@ export function verifySessionToken(token: string): SessionClaims {
     ) {
       throw new InvalidSessionTokenError();
     }
+  }
+
+  // `sid` é opcional (ver comentário em SessionClaims) mas, quando presente, tem
+  // que ser uma string não vazia — nunca um valor malformado que passaria
+  // silenciosamente como "sem sid" (o que pularia a checagem de revogação).
+  if (decoded.sid != null && (typeof decoded.sid !== "string" || decoded.sid.length === 0)) {
+    throw new InvalidSessionTokenError();
   }
 
   return decoded as unknown as SessionClaims;

@@ -130,7 +130,14 @@ personalPlanningRouter.get("/personal/budgets", requireAuth, async (req: Request
       const monthEnd = new Date(monthStart); monthEnd.setMonth(monthEnd.getMonth() + 1);
       const spent = await prisma.personalTransaction.aggregate({
         // Capítulo 22.3 — despesas privadas de outro morador não entram no progresso visto por este usuário.
-        where: { tenantId, categoryId: budget.categoryId, type: "EXPENSE", transactionDate: { gte: monthStart, lt: monthEnd }, OR: [{ isPrivate: false }, { createdByUserId: userId }] },
+        where: {
+          tenantId,
+          categoryId: budget.categoryId,
+          type: "EXPENSE",
+          transactionDate: { gte: monthStart, lt: monthEnd },
+          deletedAt: null, // fa-w6-di-hard-deletes-critical-entities — nunca soma uma transação soft-deletada
+          OR: [{ isPrivate: false }, { createdByUserId: userId }],
+        },
         _sum: { amount: true },
       });
       const spentAmount = spent._sum.amount ?? new Prisma.Decimal(0);

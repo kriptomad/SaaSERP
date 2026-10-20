@@ -47,6 +47,11 @@ export async function dataRetentionPurgeProcessor(_job: Job): Promise<{ purgedEx
       purgedAt: null,
       completedAt: { lte: threshold },
       resultStorageKey: { not: null },
+      // fa-w6-di-export-purge-no-legal-hold — nunca expurga um export marcado com
+      // retenção legal (ordem judicial/investigação/disputa em aberto), mesmo que
+      // já tenha passado dos 30 dias padrão. `legalHold=true` é setado manualmente
+      // por rota administrativa, nunca por este worker.
+      legalHold: false,
     },
     select: { id: true, tenantId: true, resultStorageKey: true },
   });
@@ -72,6 +77,16 @@ export async function dataRetentionPurgeProcessor(_job: Job): Promise<{ purgedEx
 
   if (purgedExports > 0) {
     log.info({ purgedExports }, "artefatos de exportação LGPD expirados (>30 dias) foram expurgados do R2");
+  }
+
+  // Visibilidade operacional: quantos exports expirados existiam mas foram
+  // PRESERVADOS por legal hold nesta varredura — nunca contam como "purgados", mas
+  // sem este log o acúmulo de exports retidos indefinidamente passaria despercebido.
+  const heldCount = await prismaUnscoped.tenantDataExportJob.count({
+    where: { status: "COMPLETED", purgedAt: null, completedAt: { lte: threshold }, resultStorageKey: { not: null }, legalHold: true },
+  });
+  if (heldCount > 0) {
+    log.info({ heldCount }, "artefatos de exportação LGPD expirados preservados por legal hold (não expurgados)");
   }
 
   return { purgedExports };

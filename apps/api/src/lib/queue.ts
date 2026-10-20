@@ -215,6 +215,25 @@ export const QUEUE_NAMES = {
   // `purgedAt`, consumida por `workers/data-retention-purge.worker.ts`. Ver nota de
   // escopo deliberadamente conservador no próprio worker.
   DATA_RETENTION_PURGE: "data-retention-purge",
+  // fa-w6-bl-no-trial-expiry-enforcement — varredura diária de `Tenant.status =
+  // TRIAL` cujo `trialEndsAt` já passou sem nenhuma assinatura paga confirmada:
+  // transiciona para SUSPENDED (`suspensionReason = "TRIAL_EXPIRED"`), consumida
+  // por `workers/trial-expiry-enforcement.worker.ts`.
+  TRIAL_EXPIRY_ENFORCEMENT: "trial-expiry-enforcement",
+  // fa-w6-bl-no-offboarding-retention — varredura diária de tenants SUSPENDED cujo
+  // `purgeAt` já passou: anonimiza o PII diretamente identificável dos clientes do
+  // tenant (nunca hard-delete), pulando/flagando para revisão manual tenants com
+  // documentos fiscais sujeitos a guarda legal. Consumida por
+  // `workers/tenant-offboarding-purge.worker.ts`.
+  TENANT_OFFBOARDING_PURGE: "tenant-offboarding-purge",
+  // fa-w6-bl-dunning-not-durable — fan-out do ENVIO de cada milestone da régua de
+  // dunning (Capítulo 2.7.4), consumida por
+  // `workers/dunning-milestone-dispatch.worker.ts`. A "decisão de notificar" já
+  // foi persistida durável e atomicamente em `DunningMilestone` (mesma transação
+  // da mudança de estado financeiro, dunning.service.ts); este job só entrega de
+  // fato, com o retry/backoff automático do BullMQ — nunca mais um envio inline
+  // com falha tratada só por log.
+  DUNNING_MILESTONE_DISPATCH: "dunning-milestone-dispatch",
 } as const;
 
 // fa-w4-queue-unbounded-retention — fábrica única usada por TODA fila abaixo: garante
@@ -276,3 +295,9 @@ export const reportExportGenerationQueue = createQueue(QUEUE_NAMES.REPORT_EXPORT
 export const dataDeletionProcessingQueue = createQueue(QUEUE_NAMES.DATA_DELETION_PROCESSING);
 
 export const dataRetentionPurgeQueue = createQueue(QUEUE_NAMES.DATA_RETENTION_PURGE);
+
+export const trialExpiryEnforcementQueue = createQueue(QUEUE_NAMES.TRIAL_EXPIRY_ENFORCEMENT);
+
+export const tenantOffboardingPurgeQueue = createQueue(QUEUE_NAMES.TENANT_OFFBOARDING_PURGE);
+
+export const dunningMilestoneDispatchQueue = createQueue(QUEUE_NAMES.DUNNING_MILESTONE_DISPATCH);

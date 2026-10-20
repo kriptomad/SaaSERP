@@ -27,7 +27,7 @@ export const publicOnlineStoreRouter = Router();
 async function resolveActiveStoreBySlug(customSlug: string) {
   const settings = await prisma.onlineStoreSettings.findUnique({
     where: { customSlug },
-    include: { tenant: { select: { id: true, tradeName: true, status: true, gracePeriodEndsAt: true } } },
+    include: { tenant: { select: { id: true, tradeName: true, status: true, gracePeriodEndsAt: true, trialEndsAt: true } } },
   });
   // Loja desativada pelo lojista ou tenant bloqueado por inadimplência (SUSPENDED/
   // CANCELLED/PAST_DUE fora do grace period — GAP DE AUDITORIA FECHADO na Rodada 6:

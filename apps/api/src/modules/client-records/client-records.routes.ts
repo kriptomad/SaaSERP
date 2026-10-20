@@ -59,10 +59,17 @@ const petSchema = z.object({
   weightKg: z.number().positive().optional(),
 });
 
+const petsQuerySchema = z.object({ ownerId: z.string().uuid().optional() });
+
 clientRecordsRouter.get("/pets", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-client-records-filters-unvalidated): `ownerId`
+  // era lido via cast direto (`as string | undefined`), sem checar formato — um
+  // valor malformado batia direto no Prisma (500 genérico em vez de 400 claro).
+  const parsedQuery = petsQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsedQuery.error.flatten() } });
+  const { ownerId } = parsedQuery.data;
   const { tenantId } = req.session!;
-  const ownerId = req.query.ownerId as string | undefined;
   const pets = await prisma.pet.findMany({ where: { tenantId, ...(ownerId ? { ownerId } : {}) }, orderBy: { name: "asc" }, take: 500 });
   return res.json({ success: true, data: pets, error: null });
 });
@@ -168,6 +175,8 @@ clientRecordsRouter.post("/pets/:petId/vaccine-records", requireAuth, requireMod
   return res.status(201).json({ success: true, data: record, error: null });
 });
 
+const withinDaysQuerySchema = z.object({ withinDays: z.coerce.number().int().min(0).max(3650).default(7) });
+
 // Agenda de reforço de vacina — alimenta o mesmo motor central de notificações
 // (Capítulo 8.4.5) usado pela sugestão de reposição de estoque (17.8.3): aqui
 // apenas consulta sob demanda; o job diário que dispara `emitNotification()`
@@ -175,9 +184,14 @@ clientRecordsRouter.post("/pets/:petId/vaccine-records", requireAuth, requireMod
 // para o BullMQ de reposição de estoque).
 clientRecordsRouter.get("/vaccine-records/due-soon", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-numeric-input-not-validated): `withinDays` era
+  // lido via `Number()` cru, sem bounds — um valor não numérico virava `NaN`
+  // (threshold `Invalid Date`, filtro Prisma quebrado) e um valor absurdamente alto
+  // negativo/positivo nunca era rejeitado.
+  const parsedQuery = withinDaysQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsedQuery.error.flatten() } });
   const { tenantId } = req.session!;
-  const withinDays = Number(req.query.withinDays ?? 7);
-  const threshold = new Date(Date.now() + withinDays * 24 * 60 * 60 * 1000);
+  const threshold = new Date(Date.now() + parsedQuery.data.withinDays * 24 * 60 * 60 * 1000);
   const records = await prisma.vaccineRecord.findMany({
     where: { tenantId, nextDoseDueAt: { not: null, lte: threshold } },
     include: { pet: { select: { id: true, name: true, ownerId: true } } },
@@ -196,11 +210,16 @@ clientRecordsRouter.get("/vaccine-records/due-soon", requireAuth, requireModule(
 // endpoint só garante que a notificação INTERNA é criada de fato, sem fabricar um
 // envio externo que ainda não existe). Idempotente via `reminderSentAt`: uma dose
 // só é lembrada uma vez, até a data mudar (nova aplicação zera o campo).
+const withinDaysBodySchema = z.object({ withinDays: z.coerce.number().int().min(0).max(3650).default(7) });
+
 clientRecordsRouter.post("/vaccine-records/notify-due-soon", requireAuth, requireModule("PETSHOP_VET"), async (req: Request, res: Response) => {
   if (!(await requireWrite(req, res))) return;
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-numeric-input-not-validated): mesma falta de
+  // validação do GET /vaccine-records/due-soon acima, só que no body.
+  const parsedBody = withinDaysBodySchema.safeParse(req.body ?? {});
+  if (!parsedBody.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsedBody.error.flatten() } });
   const { tenantId } = req.session!;
-  const withinDays = Number(req.body?.withinDays ?? 7);
-  const threshold = new Date(Date.now() + withinDays * 24 * 60 * 60 * 1000);
+  const threshold = new Date(Date.now() + parsedBody.data.withinDays * 24 * 60 * 60 * 1000);
   const records = await prisma.vaccineRecord.findMany({
     where: { tenantId, nextDoseDueAt: { not: null, lte: threshold }, reminderSentAt: null },
     include: { pet: { select: { id: true, name: true, ownerId: true, owner: { select: { name: true, phone: true } } } } },
@@ -242,10 +261,19 @@ const vehicleSchema = z.object({
   mileageKm: z.number().int().optional(),
 });
 
+const vehiclesQuerySchema = z.object({
+  ownerId: z.string().uuid().optional(),
+  licensePlate: z.string().trim().min(1).max(10).optional(),
+});
+
 clientRecordsRouter.get("/vehicles", requireAuth, requireModule("AUTO_REPAIR_SHOP"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-client-records-filters-unvalidated): `ownerId`/
+  // `licensePlate` eram lidos via cast direto (`as Record<string, string|undefined>`).
+  const parsedQuery = vehiclesQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsedQuery.error.flatten() } });
+  const { ownerId, licensePlate } = parsedQuery.data;
   const { tenantId } = req.session!;
-  const { ownerId, licensePlate } = req.query as Record<string, string | undefined>;
   const vehicles = await prisma.vehicle.findMany({ where: { tenantId, ...(ownerId ? { ownerId } : {}), ...(licensePlate ? { licensePlate } : {}) }, orderBy: { createdAt: "desc" }, take: 500 });
   return res.json({ success: true, data: vehicles, error: null });
 });
@@ -493,10 +521,16 @@ const opticalPrescriptionSchema = z.object({
   pupillaryDistance: z.number().optional(),
 });
 
+const opticalPrescriptionsQuerySchema = z.object({ clientId: z.string().uuid().optional() });
+
 clientRecordsRouter.get("/optical-prescriptions", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {
   if (!(await requireRead(req, res))) return;
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-client-records-filters-unvalidated): `clientId`
+  // era lido via cast direto (`as string | undefined`).
+  const parsedQuery = opticalPrescriptionsQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsedQuery.error.flatten() } });
+  const { clientId } = parsedQuery.data;
   const { tenantId } = req.session!;
-  const clientId = req.query.clientId as string | undefined;
   const prescriptions = await prisma.opticalPrescription.findMany({ where: { tenantId, ...(clientId ? { clientId } : {}) }, orderBy: { registeredAt: "desc" }, take: 500 });
   return res.json({ success: true, data: prescriptions, error: null });
 });

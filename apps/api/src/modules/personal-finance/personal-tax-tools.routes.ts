@@ -134,6 +134,7 @@ export async function calculateCarneLeaoSuggestion(input: { tenantId: string; cr
       type: "INCOME",
       transactionDate: { gte: start, lte: end },
       category: { isCarneLeaoIncome: true },
+      deletedAt: null, // fa-w6-di-hard-deletes-critical-entities — nunca soma uma transação soft-deletada
     },
     _sum: { amount: true },
   });

@@ -59,12 +59,23 @@ purchaseOrdersRouter.get("/purchase-orders", requireAuth, async (req: Request, r
   const { tenantId } = req.session!;
   const statusParsed = readEnumQuery(res, req.query.status, ["DRAFT", "SENT", "PARTIALLY_RECEIVED", "RECEIVED", "CANCELLED"] as const, "status");
   if (!statusParsed.ok) return;
-  const orders = await prisma.purchaseOrder.findMany({
-    where: { tenantId, ...(statusParsed.value ? { status: statusParsed.value } : {}) },
-    include: { items: true, supplier: { select: { id: true, name: true } } },
-    orderBy: { createdAt: "desc" },
-  });
-  return res.json({ success: true, data: orders, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): `findMany` sem
+  // skip/take/count devolvia TODOS os pedidos de compra do tenant de uma vez.
+  // Mesmo padrão page/pageSize+meta já usado em `suppliers.routes.ts`.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { tenantId, ...(statusParsed.value ? { status: statusParsed.value } : {}) };
+  const [orders, total] = await Promise.all([
+    prisma.purchaseOrder.findMany({
+      where,
+      include: { items: true, supplier: { select: { id: true, name: true } } },
+      orderBy: { createdAt: "desc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.purchaseOrder.count({ where }),
+  ]);
+  return res.json({ success: true, data: orders, error: null, meta: { page, pageSize, total } });
 });
 
 // Rota estática registrada ANTES de "/purchase-orders/:id" — Express resolve

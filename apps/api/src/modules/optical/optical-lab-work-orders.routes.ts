@@ -51,12 +51,22 @@ opticalLabWorkOrdersRouter.get("/optical-lab-work-orders", requireAuth, requireM
   const { tenantId } = req.session!;
   const statusParsed = readEnumQuery(res, req.query.status, ["RECEIVED", "DIAGNOSING", "AWAITING_APPROVAL", "IN_REPAIR", "READY", "DELIVERED", "CANCELLED"] as const, "status");
   if (!statusParsed.ok) return;
-  const orders = await prisma.workOrder.findMany({
-    where: { tenantId, workOrderType: "OPTICAL_LAB", ...(statusParsed.value ? { status: statusParsed.value } : {}) },
-    include: { client: { select: { id: true, name: true, phone: true } }, opticalPrescription: { select: { id: true, prescriptionNumber: true } } },
-    orderBy: { createdAt: "desc" },
-  });
-  return res.json({ success: true, data: orders, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): `findMany` sem
+  // skip/take/count devolvia TODOS os pedidos de laboratório óptico do tenant.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { tenantId, workOrderType: "OPTICAL_LAB" as const, ...(statusParsed.value ? { status: statusParsed.value } : {}) };
+  const [orders, total] = await Promise.all([
+    prisma.workOrder.findMany({
+      where,
+      include: { client: { select: { id: true, name: true, phone: true } }, opticalPrescription: { select: { id: true, prescriptionNumber: true } } },
+      orderBy: { createdAt: "desc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.workOrder.count({ where }),
+  ]);
+  return res.json({ success: true, data: orders, error: null, meta: { page, pageSize, total } });
 });
 
 opticalLabWorkOrdersRouter.get("/optical-lab-work-orders/:id", requireAuth, requireModule("OPTICAL_LAB"), async (req: Request, res: Response) => {

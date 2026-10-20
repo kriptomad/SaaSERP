@@ -52,9 +52,18 @@ integrationCredentialsRouter.get("/integration-credentials", requireAuth, async 
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite gerenciar integrações." } });
   }
 
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): lista é inerentemente
+  // pequena e limitada por design — no máximo uma linha por combinação
+  // provider×environment do enum `IntegrationProvider` (dezenas, não milhares),
+  // nunca cresce com volume de dados do tenant. `take` aqui é só um teto
+  // defensivo, mesmo critério usado em `notification-settings.routes.ts`
+  // (Wave 6) e `health-insurance-plans.routes.ts` (Wave 5) para listas de
+  // referência/configuração pequenas — não precisa do page/pageSize/meta
+  // completo usado em listas de volume real (ex.: suppliers, purchase-orders).
   const credentials = await prisma.integrationCredential.findMany({
     where: { tenantId },
     orderBy: { createdAt: "desc" },
+    take: 200,
   });
 
   const data = credentials.map((credential) => {

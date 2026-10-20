@@ -32,17 +32,26 @@ notificationsRouter.get("/notifications/stream", requireAuth, (req: Request, res
 notificationsRouter.get("/notifications", requireAuth, async (req: Request, res: Response) => {
   const { tenantId, userId } = req.session!;
   const onlyUnread = req.query.unreadOnly === "true";
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): upgrade do teto
+  // simples `take:50` para paginação completa page/pageSize+meta (adiciona
+  // `meta.total`, não quebra o shape `data:{notifications,unreadCount}` já
+  // consumido pelo sininho em NotificationBell.tsx/notifications/api.ts).
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const feedWhere = {
+    tenantId,
+    OR: [{ userId }, { userId: null }],
+    ...(onlyUnread ? { readAt: null } : {}),
+  };
 
-  const [notifications, ownUnreadCount, broadcastUnreadCount] = await Promise.all([
+  const [notifications, feedTotal, ownUnreadCount, broadcastUnreadCount] = await Promise.all([
     prisma.notification.findMany({
-      where: {
-        tenantId,
-        OR: [{ userId }, { userId: null }],
-        ...(onlyUnread ? { readAt: null } : {}),
-      },
+      where: feedWhere,
       orderBy: { createdAt: "desc" },
-      take: 50,
+      skip: (page - 1) * pageSize,
+      take: pageSize,
     }),
+    prisma.notification.count({ where: feedWhere }),
     // CORREÇÃO DE AUDITORIA (fa-w5-perf-notification-count-scan): o antigo
     // `count({ OR: [{userId}, {userId: null}] })` não alinha bem com o índice
     // existente `@@index([tenantId, userId, readAt])` para o ramo `userId: null`
@@ -57,7 +66,7 @@ notificationsRouter.get("/notifications", requireAuth, async (req: Request, res:
   ]);
   const unreadCount = ownUnreadCount + broadcastUnreadCount;
 
-  return res.json({ success: true, data: { notifications, unreadCount }, error: null });
+  return res.json({ success: true, data: { notifications, unreadCount }, error: null, meta: { page, pageSize, total: feedTotal } });
 });
 
 notificationsRouter.patch("/notifications/:id/read", requireAuth, async (req: Request, res: Response) => {

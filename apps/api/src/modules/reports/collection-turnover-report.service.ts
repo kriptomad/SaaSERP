@@ -49,25 +49,38 @@ export async function buildCollectionTurnoverReport(
 ): Promise<CollectionTurnoverReport> {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  const products = await prisma.product.findMany({
-    where: { tenantId, active: true, collectionTag: { not: null } },
-    select: { id: true, name: true, sku: true, collectionTag: true, stockQuantity: true },
-  });
+  // fa-w6-di-reports-no-snapshot-isolation — o catálogo (`Product.findMany`) e as
+  // vendas agregadas (`SaleItem.groupBy`) eram lidos em duas transações implícitas
+  // separadas: um produto cujo estoque mudasse (ou que fosse desativado) entre as
+  // duas leituras podia aparecer com `currentStock`/presença inconsistente com o que
+  // `grouped` já capturou. `REPEATABLE READ` fixa um único snapshot para as duas
+  // leituras deste relatório.
+  const { products, soldById } = await prisma.$transaction(
+    async (tx) => {
+      const productRows = await tx.product.findMany({
+        where: { tenantId, active: true, collectionTag: { not: null } },
+        select: { id: true, name: true, sku: true, collectionTag: true, stockQuantity: true },
+      });
+      if (productRows.length === 0) {
+        return { products: productRows, soldById: new Map<string, { productId: string | null; _sum: { totalPrice: Prisma.Decimal | null; quantity: Prisma.Decimal | null } }>() };
+      }
+      const productIds = productRows.map((p) => p.id);
+      const groupedRows = await tx.saleItem.groupBy({
+        by: ["productId"],
+        where: {
+          tenantId,
+          productId: { in: productIds },
+          sale: { status: "PAID", createdAt: { gte: since } },
+        },
+        _sum: { totalPrice: true, quantity: true },
+      });
+      return { products: productRows, soldById: new Map(groupedRows.map((g) => [g.productId!, g])) };
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
   if (products.length === 0) {
     return { periodDays: days, since: since.toISOString(), collections: [], products: [] };
   }
-  const productIds = products.map((p) => p.id);
-
-  const grouped = await prisma.saleItem.groupBy({
-    by: ["productId"],
-    where: {
-      tenantId,
-      productId: { in: productIds },
-      sale: { status: "PAID", createdAt: { gte: since } },
-    },
-    _sum: { totalPrice: true, quantity: true },
-  });
-  const soldById = new Map(grouped.map((g) => [g.productId!, g]));
 
   // Primeira passada: acumula total vendido/faturado por coleção (necessário para
   // calcular a média ANTES de classificar cada produto individualmente na segunda).

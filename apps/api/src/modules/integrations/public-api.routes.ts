@@ -77,10 +77,26 @@ class InvalidDateRangeError extends Error {}
 
 const salesReadChain = [requireApiKey("sales:read"), rateLimitByApiKey, tenantContextMiddleware, tenantLockoutMiddleware];
 
+const salesQuerySchema = z.object({
+  cashRegisterId: z.string().uuid().optional(),
+  from: z.string().trim().min(1).optional(),
+  to: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(PAGE_SIZE_MAX).optional(),
+});
+
 publicApiRouter.get("/api/public/v1/sales", ...salesReadChain, async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
-  const take = parsePageSize(req.query.limit);
-  const { from, to, cashRegisterId } = req.query as Record<string, string | undefined>;
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-public-api-query-unvalidated): endpoint
+  // externamente alcançável (autenticado por API key, não por sessão de usuário)
+  // sem um schema Zod explícito — só validação manual pontual (`parsePageSize`/
+  // `parseValidDate`). Formaliza com Zod, mantendo o `limit` sempre limitado a
+  // `PAGE_SIZE_MAX` e as datas validadas abaixo.
+  const parsedQuery = salesQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsedQuery.error.flatten() } });
+  }
+  const take = parsePageSize(parsedQuery.data.limit);
+  const { from, to, cashRegisterId } = parsedQuery.data;
   let fromDate: Date | undefined;
   let toDate: Date | undefined;
   try {
@@ -138,10 +154,22 @@ publicApiRouter.get("/api/public/v1/sales/:id", ...salesReadChain, async (req: R
 const stockReadChain = [requireApiKey("stock:read"), rateLimitByApiKey, tenantContextMiddleware, tenantLockoutMiddleware];
 const stockWriteChain = [requireApiKey("stock:write"), rateLimitByApiKey, tenantContextMiddleware, tenantLockoutMiddleware];
 
+const productsQuerySchema = z.object({
+  sku: z.string().trim().min(1).max(100).optional(),
+  barcode: z.string().trim().min(1).max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(PAGE_SIZE_MAX).optional(),
+});
+
 publicApiRouter.get("/api/public/v1/products", ...stockReadChain, async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
-  const take = parsePageSize(req.query.limit);
-  const { sku, barcode } = req.query as Record<string, string | undefined>;
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-public-api-query-unvalidated): mesma falta
+  // de schema Zod explícito do /sales acima, endpoint externamente alcançável.
+  const parsedQuery = productsQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsedQuery.error.flatten() } });
+  }
+  const take = parsePageSize(parsedQuery.data.limit);
+  const { sku, barcode } = parsedQuery.data;
   const products = await prisma.product.findMany({
     where: { tenantId, ...(sku ? { sku } : {}), ...(barcode ? { barcode } : {}) },
     select: { id: true, sku: true, barcode: true, name: true, trackingType: true, unitPrice: true, stockQuantity: true, updatedAt: true },

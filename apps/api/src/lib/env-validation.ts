@@ -260,11 +260,34 @@ export function collectBootEnvIssues(): string[] {
   });
 }
 
+// fa-w6-di-r2-no-redundancy-retention: versionamento/lifecycle/Object Lock do bucket R2
+// só podem ser configurados no console/API da Cloudflare (ver
+// `deploy/R2_RETENTION_POLICY.md`) — não há como a aplicação ler essa configuração de
+// volta via S3 API padrão para validar automaticamente. Esta checagem é só um LEMBRETE
+// (warning, nunca bloqueia o boot) para o operador confirmar manualmente o checklist e
+// então setar `R2_RETENTION_POLICY_CONFIRMED=true`.
+function warnIfR2RetentionPolicyUnconfirmed(): void {
+  const r2Configured =
+    isNonEmpty(process.env.R2_ACCOUNT_ID) ||
+    isNonEmpty(process.env.R2_ACCESS_KEY_ID) ||
+    isNonEmpty(process.env.R2_BUCKET_NAME);
+  if (!r2Configured) return; // R2 pode estar configurado só via PlatformSecret (painel) — nada a validar aqui.
+  if (process.env.R2_RETENTION_POLICY_CONFIRMED === "true") return;
+  log.warn(
+    {},
+    "R2_RETENTION_POLICY_CONFIRMED não está definida como 'true' — confirme manualmente o checklist de " +
+      "versionamento/lifecycle/Object Lock do bucket R2 em deploy/R2_RETENTION_POLICY.md (fa-w6-di-r2-no-redundancy-retention) " +
+      "e então defina essa variável. Isto NÃO bloqueia o boot (configuração externa ao deploy).",
+  );
+}
+
 export function validateBootEnv(processName: string): void {
   if (process.env.NODE_ENV !== "production") {
     // NO-OP fora de produção — não bloqueia dev local com `.env` incompleto.
     return;
   }
+
+  warnIfR2RetentionPolicyUnconfirmed();
 
   const issues = collectBootEnvIssues();
   if (issues.length === 0) {

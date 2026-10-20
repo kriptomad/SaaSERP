@@ -202,12 +202,18 @@ export interface AuthResponse {
   impersonation?: { sessionId: string; expiresAt: string };
 }
 
+// CORREÇÃO DE AUDITORIA (fa-w6-api-auth-response-envelope-inconsistent): antes, o
+// backend duplicava token/tenant/user tanto dentro de `data` quanto soltos na raiz
+// da resposta (`{success,data,error,...data}`) só para esta função ler os campos
+// soltos via `request()` cru. Agora usa `api.post()` — o mesmo helper de todo o
+// resto do app, que já desembrulha `data` do envelope padrão {success,data,error} —
+// e o backend não precisa mais duplicar o payload.
 export function signup(input: SignupInput): Promise<AuthResponse> {
-  return request("/auth/signup", { method: "POST", body: JSON.stringify(input) });
+  return api.post("/auth/signup", input);
 }
 
 export function login(input: LoginInput): Promise<AuthResponse> {
-  return request("/auth/login", { method: "POST", body: JSON.stringify(input) });
+  return api.post("/auth/login", input);
 }
 
 export function requestPasswordReset(input: { tenantSlug: string; email: string }): Promise<{ message: string }> {

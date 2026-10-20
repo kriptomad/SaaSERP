@@ -126,7 +126,7 @@ licensingRouter.post("/licensing/activate", requireAuth, async (req: Request, re
   }
   const input = parsed.data;
 
-  const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { status: true, gracePeriodEndsAt: true } });
+  const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { status: true, gracePeriodEndsAt: true, trialEndsAt: true } });
   if (isTenantLocked(tenant)) {
     return res.status(402).json({
       success: false,
@@ -313,7 +313,7 @@ licensingRouter.get("/licensing/status", requireAuth, async (req: Request, res: 
   }
 
   const [tenant, license] = await Promise.all([
-    prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { status: true, gracePeriodEndsAt: true } }),
+    prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { status: true, gracePeriodEndsAt: true, trialEndsAt: true } }),
     prisma.tenantLicense.findUnique({
       where: { tenantId },
       include: { activations: { orderBy: { lastSeenAt: "desc" } } },

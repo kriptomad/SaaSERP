@@ -43,7 +43,7 @@ export const publicBookingRouter = Router();
 async function resolveTenantBySlug(slug: string) {
   const tenant = await prisma.tenant.findUnique({
     where: { slug },
-    select: { id: true, tradeName: true, status: true, gracePeriodEndsAt: true },
+    select: { id: true, tradeName: true, status: true, gracePeriodEndsAt: true, trialEndsAt: true },
   });
   if (!tenant || isTenantLocked(tenant)) return null;
   return tenant;

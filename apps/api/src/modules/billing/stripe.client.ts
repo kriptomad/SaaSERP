@@ -2,7 +2,34 @@
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 2.7.3/20.1 — Stripe real via SDK oficial,
 // nunca reimplementação manual de assinatura/HMAC.
 import Stripe from "stripe";
+import crypto from "node:crypto";
 import { getPlatformSecret } from "../../lib/platform-secrets";
+
+// fa-w6-bl-no-explicit-proration-policy — antes, toda chamada que mudava
+// quantity/items de um subscription item (assento extra, módulo à la carte,
+// troca de plano base) dependia do comportamento PADRÃO do Stripe para
+// proration (que É `create_prorations`, mas implícito — uma mudança futura do
+// SDK/API ou de configuração da conta Stripe poderia alterar silenciosamente o
+// comportamento de cobrança sem qualquer sinal no código). Explicitamos
+// `create_prorations` (cobra/credita a diferença proporcional na PRÓXIMA
+// fatura, nunca gera uma fatura avulsa imediata) porque é o que já documentamos
+// em todo o resto do billing (Capítulo 2.7/2.9): mudanças de assento/módulo
+// nunca geram cobrança instantânea fora do ciclo, sempre refletem no próximo
+// fechamento — compatível com `always_invoice` seria uma mudança de UX maior
+// (cobrança imediata) não indicada em nenhum outro ponto da Bible.
+const SUBSCRIPTION_ITEM_PRORATION_BEHAVIOR = "create_prorations" as const;
+
+// Chave de idempotência determinística para mutações de subscription item:
+// mesmo princípio de `createStripeCheckoutSession` (chave explícita evita
+// duplicação em retry), mas aqui derivada do tenant + tipo de mudança + um
+// bucket de tempo de 1 minuto — curto o bastante para nunca colidir entre duas
+// mudanças legítimas e distintas (ex.: duas reconciliações de assento minutos
+// depois uma da outra), longo o bastante para absorver o retry automático do
+// BullMQ/cliente HTTP da própria chamada que falhou.
+function subscriptionItemIdempotencyKey(tenantId: string, changeType: string, extra: string): string {
+  const timeBucket = Math.floor(Date.now() / 60_000);
+  return crypto.createHash("sha256").update(`${tenantId}:${changeType}:${extra}:${timeBucket}`).digest("hex");
+}
 
 // A chave é resolvida via painel admin → Infraestrutura (banco, cifrado) com
 // fallback para `process.env.STRIPE_SECRET_KEY` (Capítulo 20.9) — nunca mais lida
@@ -44,6 +71,7 @@ export async function createSetupIntent(stripeCustomerId: string) {
 // Quando ainda não há item criado para o tenant, cria sob demanda (apenas na
 // primeira vez que extraSeatCount > 0) e persiste o id retornado.
 export async function syncSeatQuantityWithStripe(
+  tenantId: string,
   stripeSubscriptionId: string,
   existingSeatItemId: string | null,
   extraSeatPriceId: string,
@@ -57,7 +85,11 @@ export async function syncSeatQuantityWithStripe(
   const stripe = await getStripeClient();
 
   if (existingSeatItemId) {
-    await stripe.subscriptionItems.update(existingSeatItemId, { quantity: extraSeatCount });
+    await stripe.subscriptionItems.update(
+      existingSeatItemId,
+      { quantity: extraSeatCount, proration_behavior: SUBSCRIPTION_ITEM_PRORATION_BEHAVIOR },
+      { idempotencyKey: subscriptionItemIdempotencyKey(tenantId, "seat-update", `${existingSeatItemId}:${extraSeatCount}`) },
+    );
     return existingSeatItemId;
   }
 
@@ -76,15 +108,23 @@ export async function syncSeatQuantityWithStripe(
   const existingItems = await stripe.subscriptionItems.list({ subscription: stripeSubscriptionId, limit: 100 });
   const orphanedSeatItem = existingItems.data.find((item) => item.price.id === extraSeatPriceId);
   if (orphanedSeatItem) {
-    await stripe.subscriptionItems.update(orphanedSeatItem.id, { quantity: extraSeatCount });
+    await stripe.subscriptionItems.update(
+      orphanedSeatItem.id,
+      { quantity: extraSeatCount, proration_behavior: SUBSCRIPTION_ITEM_PRORATION_BEHAVIOR },
+      { idempotencyKey: subscriptionItemIdempotencyKey(tenantId, "seat-update", `${orphanedSeatItem.id}:${extraSeatCount}`) },
+    );
     return orphanedSeatItem.id;
   }
 
-  const item = await stripe.subscriptionItems.create({
-    subscription: stripeSubscriptionId,
-    price: extraSeatPriceId,
-    quantity: extraSeatCount,
-  });
+  const item = await stripe.subscriptionItems.create(
+    {
+      subscription: stripeSubscriptionId,
+      price: extraSeatPriceId,
+      quantity: extraSeatCount,
+      proration_behavior: SUBSCRIPTION_ITEM_PRORATION_BEHAVIOR,
+    },
+    { idempotencyKey: subscriptionItemIdempotencyKey(tenantId, "seat-create", stripeSubscriptionId) },
+  );
   return item.id;
 }
 
@@ -94,6 +134,7 @@ export async function syncSeatQuantityWithStripe(
 // por ambiente/promoção — mesma filosofia de "nunca hardcoded" do restante do
 // cliente Stripe deste arquivo.
 export async function addModuleToStripeSubscription(
+  tenantId: string,
   stripeSubscriptionId: string,
   moduleCode: string,
   moduleLabel: string,
@@ -107,17 +148,71 @@ export async function addModuleToStripeSubscription(
   const existingProducts = await stripe.products.search({ query: `metadata['moduleCode']:'${moduleCode}'`, limit: 1 });
   const product = existingProducts.data[0] ?? (await stripe.products.create({ name: `Módulo Filitech — ${moduleLabel}`, metadata: { moduleCode } }));
 
-  const item = await stripe.subscriptionItems.create({
-    subscription: stripeSubscriptionId,
-    price_data: {
-      currency: "brl",
-      product: product.id,
-      unit_amount: Math.round(monthlyPriceBrl * 100),
-      recurring: { interval: "month" },
+  const item = await stripe.subscriptionItems.create(
+    {
+      subscription: stripeSubscriptionId,
+      price_data: {
+        currency: "brl",
+        product: product.id,
+        unit_amount: Math.round(monthlyPriceBrl * 100),
+        recurring: { interval: "month" },
+      },
+      proration_behavior: SUBSCRIPTION_ITEM_PRORATION_BEHAVIOR,
+      metadata: { moduleCode },
     },
-    metadata: { moduleCode },
-  });
+    { idempotencyKey: subscriptionItemIdempotencyKey(tenantId, "module-add", `${stripeSubscriptionId}:${moduleCode}`) },
+  );
   return item.id;
+}
+
+// Capítulo 2.7/fa-w6-bl-no-plan-downgrade-workflow — troca do PLANO BASE de uma
+// assinatura (upgrade/downgrade entre `Plan.code`s), distinto do item de assento
+// extra e dos itens de módulo à la carte (cada um já rastreado por um id próprio:
+// `Subscription.stripeSeatSubscriptionItemId`/`TenantModule.stripeSubscriptionItemId`).
+// Não existe uma coluna dedicada para o id do item do plano base nem um Price ID
+// fixo (o checkout original também usa `price_data` inline via o mesmo Product
+// genérico "PLAN_BASE" — `createStripeCheckoutSession` — nunca um Price
+// pré-cadastrado, pois `Plan.basePrice` pode mudar), então aqui resolvemos:
+// (1) o item certo listando TODOS os subscription items da assinatura e
+// excluindo os ids já conhecidos (assento + todos os módulos ativos do tenant,
+// informados pelo chamador) — o item restante é, por eliminação, o do plano base;
+// (2) o novo valor via `price_data` inline, mesmo Product "PLAN_BASE" do checkout.
+// Se a assinatura tiver mais de um item restante (nunca deveria acontecer no fluxo
+// normal, mas um item órfão de uma falha anterior não pode travar a troca de
+// plano), usa o primeiro e sinaliza `ambiguous: true` para o chamador decidir se loga.
+export async function updateBasePlanSubscriptionItem(input: {
+  tenantId: string;
+  stripeSubscriptionId: string;
+  excludeItemIds: string[];
+  newPlanLabel: string;
+  newPlanMonthlyPriceBrl: number;
+}): Promise<{ itemId: string; ambiguous: boolean }> {
+  const stripe = await getStripeClient();
+  const items = await stripe.subscriptionItems.list({ subscription: input.stripeSubscriptionId, limit: 100 });
+  const candidates = items.data.filter((item) => !input.excludeItemIds.includes(item.id));
+  if (candidates.length === 0) {
+    throw new Error(`Nenhum subscription item de plano base encontrado na assinatura Stripe ${input.stripeSubscriptionId} (todos os itens correspondem a assento/módulos conhecidos).`);
+  }
+  const basePlanItem = candidates[0];
+
+  const existingProducts = await stripe.products.search({ query: `metadata['moduleCode']:'PLAN_BASE'`, limit: 1 });
+  const product = existingProducts.data[0] ?? (await stripe.products.create({ name: `Filitech ERP — ${input.newPlanLabel}`, metadata: { moduleCode: "PLAN_BASE" } }));
+
+  await stripe.subscriptionItems.update(
+    basePlanItem.id,
+    {
+      price_data: {
+        currency: "brl",
+        product: product.id,
+        unit_amount: Math.round(input.newPlanMonthlyPriceBrl * 100),
+        recurring: { interval: "month" },
+      },
+      proration_behavior: SUBSCRIPTION_ITEM_PRORATION_BEHAVIOR,
+    },
+    { idempotencyKey: subscriptionItemIdempotencyKey(input.tenantId, "plan-change", `${basePlanItem.id}:${input.newPlanMonthlyPriceBrl}`) },
+  );
+
+  return { itemId: basePlanItem.id, ambiguous: candidates.length > 1 };
 }
 
 export async function removeModuleFromStripeSubscription(subscriptionItemId: string): Promise<void> {

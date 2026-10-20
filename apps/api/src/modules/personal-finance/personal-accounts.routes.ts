@@ -47,8 +47,13 @@ async function requireFinancialWrite(req: Request, res: Response): Promise<boole
 // Capítulo 22.3 — reforçado na camada de dados (nunca apenas escondido na UI):
 // uma transação marcada `isPrivate` só é visível para quem a criou, mesmo que
 // outro usuário pertença ao mesmo tenant/residência.
+// fa-w6-di-hard-deletes-critical-entities — `deletedAt: null` incluído aqui (em vez
+// de em cada chamador individualmente) garante que TODA leitura de
+// `PersonalTransaction` que passa por este helper nunca mais devolve uma transação
+// soft-deletada (ver `DELETE /personal/transactions/:id` abaixo), mesmo padrão de
+// `Product.active` já usado no restante do sistema.
 export function applyPrivacyFilter(baseWhere: Prisma.PersonalTransactionWhereInput, requestingUserId: string): Prisma.PersonalTransactionWhereInput {
-  return { AND: [baseWhere, { OR: [{ isPrivate: false }, { isPrivate: true, createdByUserId: requestingUserId }] }] };
+  return { AND: [baseWhere, { deletedAt: null }, { OR: [{ isPrivate: false }, { isPrivate: true, createdByUserId: requestingUserId }] }] };
 }
 
 // Valida que todos os ids referenciados pelo body pertencem ao tenant da sessão (anti FK-injection).
@@ -367,8 +372,17 @@ personalAccountsRouter.delete("/personal/transactions/:id", requireAuth, async (
   if (!transaction) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Transação não encontrada." } });
   }
+  // fa-w6-di-hard-deletes-critical-entities — soft-delete (`deletedAt`) em vez de
+  // `DELETE` físico: uma `PersonalTransaction` é um lançamento financeiro real,
+  // usado por `personal-tax-tools.routes.ts` (fatura de cartão/Carnê-Leão) e
+  // `personal-planning.routes.ts` (progresso de orçamento) — apagar a linha
+  // destruiria o histórico que esses relatórios/orçamentos dependem para auditoria
+  // retroativa (ex.: "por que meu orçamento de Março fechou diferente do que vi na
+  // época?"). O ajuste de saldo (`currentBalance`) continua acontecendo normalmente:
+  // "excluir" aqui significa reverter o efeito no saldo e sair das listagens/
+  // relatórios (via `applyPrivacyFilter`/`deletedAt: null`), nunca perder o registro.
   await prisma.$transaction(async (tx) => {
-    await tx.personalTransaction.delete({ where: { id: transaction.id } });
+    await tx.personalTransaction.update({ where: { id: transaction.id }, data: { deletedAt: new Date() } });
     if (transaction.type === "INCOME") {
       await tx.personalAccount.update({ where: { id: transaction.accountId }, data: { currentBalance: { decrement: transaction.amount } } });
     } else if (transaction.type === "EXPENSE") {

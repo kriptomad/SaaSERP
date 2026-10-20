@@ -5,11 +5,13 @@
 // janela, cancelamento é sempre agendado para o fim do ciclo vigente, nunca imediato,
 // para não cortar acesso de um período já pago).
 import { Router, Request, Response } from "express";
+import { z } from "zod";
 import { prisma, prismaUnscoped } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { hasManageSubscriptionPermission } from "./modules.routes";
 import { cancelStripeSubscription, refundLatestStripeInvoice, undoStripeScheduledCancellation } from "./stripe.client";
 import { cancelAsaasSubscription, refundAsaasPayment } from "./asaas.client";
+import { validatePlanChange, applyPlanChange } from "./plan-change.service";
 
 export const subscriptionRouter = Router();
 
@@ -164,4 +166,68 @@ subscriptionRouter.post("/billing/subscription/cancel/undo", requireAuth, async 
   });
 
   return res.json({ success: true, data: updated, error: null });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// fa-w6-bl-no-plan-downgrade-workflow — troca de plano base (upgrade/downgrade)
+// de uma assinatura já ativa. POST /billing/subscription/plan-change/validate
+// só diagnostica (nunca aplica) — usado pela UI para exibir o impacto/bloqueio
+// ANTES do lojista confirmar; POST /billing/subscription/plan-change de fato
+// aplica, sempre revalidando no servidor (nunca confia no diagnóstico
+// previamente exibido ao cliente, que pode estar desatualizado).
+// ───────────────────────────────────────────────────────────────────────────
+const planChangeSchema = z.object({ newPlanId: z.string().uuid() });
+
+subscriptionRouter.post("/billing/subscription/plan-change/validate", requireAuth, async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasManageSubscriptionPermission(role, userId))) {
+    return err(res, 403, "FORBIDDEN", "Seu nível de acesso não permite gerenciar a assinatura.");
+  }
+  const parsed = planChangeSchema.safeParse(req.body);
+  if (!parsed.success) return err(res, 400, "VALIDATION_ERROR", "newPlanId é obrigatório e deve ser um UUID válido.");
+
+  try {
+    const diagnosis = await validatePlanChange(tenantId, parsed.data.newPlanId);
+    return res.json({ success: true, data: diagnosis, error: null });
+  } catch (error) {
+    return err(res, 404, "NOT_FOUND", error instanceof Error ? error.message : "Não foi possível validar a troca de plano.");
+  }
+});
+
+subscriptionRouter.post("/billing/subscription/plan-change", requireAuth, async (req: Request, res: Response) => {
+  const { tenantId, userId, role } = req.session!;
+  if (!(await hasManageSubscriptionPermission(role, userId))) {
+    return err(res, 403, "FORBIDDEN", "Seu nível de acesso não permite gerenciar a assinatura.");
+  }
+  const parsed = planChangeSchema.safeParse(req.body);
+  if (!parsed.success) return err(res, 400, "VALIDATION_ERROR", "newPlanId é obrigatório e deve ser um UUID válido.");
+
+  let diagnosis;
+  try {
+    diagnosis = await validatePlanChange(tenantId, parsed.data.newPlanId);
+  } catch (error) {
+    return err(res, 404, "NOT_FOUND", error instanceof Error ? error.message : "Não foi possível validar a troca de plano.");
+  }
+
+  if (!diagnosis.allowed) {
+    return res.status(409).json({
+      success: false,
+      data: null,
+      error: {
+        code: "PLAN_CHANGE_BLOCKED",
+        message:
+          "Não é possível concluir a troca de plano sem ação prévia: " +
+          [
+            diagnosis.blockingUsersOverLimit ? `desative ${diagnosis.blockingUsersOverLimit} usuário(s) ativo(s) além do permitido no novo plano` : null,
+            diagnosis.blockingModuleCodes?.length ? `desative o(s) módulo(s) [${diagnosis.blockingModuleCodes.join(", ")}], incompatível(is) com o novo plano` : null,
+          ]
+            .filter(Boolean)
+            .join("; ") + ".",
+        details: diagnosis,
+      },
+    });
+  }
+
+  const applied = await applyPlanChange(tenantId, parsed.data.newPlanId);
+  return res.json({ success: true, data: { ...applied, diagnosis }, error: null });
 });

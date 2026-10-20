@@ -5,6 +5,18 @@
 // Idempotência garantida por uma máquina de estados explícita (PROCESSING/
 // SUCCEEDED/FAILED com lease) sobre o @@unique([provider, externalEventKey]) de
 // BillingEvent — ver `claimBillingEvent` abaixo (fa-billing-webhook-idempotency-race).
+//
+// EXCEÇÃO INTENCIONAL AO ENVELOPE PADRÃO (fa-w6-api-webhook-envelope-inconsistent):
+// toda rota deste arquivo responde `{received: true}` (ou um corpo vazio/200 simples
+// para Stripe) em vez do envelope padrão `{success, data, error}` (Capítulo 9) usado
+// em TODO o resto da API. Isso é DELIBERADO, não um esquecimento: Stripe, Asaas,
+// Pluggy e iFood são consumidores externos que esperam um formato de ack específico
+// (ou simplesmente qualquer 2xx) documentado pelo PRÓPRIO provedor — mudar para o
+// envelope interno não quebraria nada tecnicamente (os provedores só checam o status
+// HTTP), mas divergiria sem necessidade do contrato que cada SDK/dashboard de
+// provedor já documenta e exibe nos logs de entrega deles, sem nenhum ganho real.
+// Nunca "corrija" isto para `{success,data,error}` — webhooks de provedor externo
+// são a única exceção legítima e permanente a essa convenção neste código.
 import { Router, Request, Response } from "express";
 import crypto from "node:crypto";
 import { prismaUnscoped } from "@filitech/db";

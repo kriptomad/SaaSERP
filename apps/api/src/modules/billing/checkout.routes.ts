@@ -19,7 +19,7 @@ import { Prisma, prisma } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { hasManageSubscriptionPermission } from "./modules.routes";
 import { findOrCreateStripeCustomer, createStripeCheckoutSession, StripeCheckoutLineItem } from "./stripe.client";
-import { createAsaasCustomer, createAsaasCheckout } from "./asaas.client";
+import { createAsaasCustomer, createAsaasCheckout, AsaasApiError } from "./asaas.client";
 import { getPlatformSecret } from "../../lib/platform-secrets";
 import { createModuleLogger } from "../../lib/logger";
 
@@ -44,10 +44,10 @@ function isDefiniteProviderRejection(gateway: "STRIPE" | "ASAAS", error: unknown
     // significa que o Stripe respondeu de fato — rejeição definitiva.
     return typeof stripeError?.type === "string" && stripeError.type !== "StripeConnectionError" && typeof stripeError.statusCode === "number";
   }
-  // Asaas: `asaasRequest()` só lança `Asaas API error (status): ...` quando a
-  // resposta HTTP chegou com `!response.ok` — qualquer outro erro (fetch falhou,
-  // timeout, DNS, etc.) nunca teve resposta e é tratado como ambíguo.
-  return error instanceof Error && error.message.startsWith("Asaas API error (");
+  // Asaas: `asaasRequest()` só lança `AsaasApiError` (fa-w6-obs-asaas-error-body-leak)
+  // quando a resposta HTTP chegou com `!response.ok` — qualquer outro erro (fetch
+  // falhou, timeout, DNS, etc.) nunca teve resposta e é tratado como ambíguo.
+  return error instanceof AsaasApiError;
 }
 
 export const checkoutRouter = Router();

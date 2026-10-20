@@ -9,7 +9,7 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { Prisma, prisma } from "@filitech/db";
-import { requireAuth } from "../../middlewares/auth.middleware";
+import { requireAuth, invalidateUserTokenVersionCache, invalidateUserSessionCache } from "../../middlewares/auth.middleware";
 import { hashPassword } from "../auth/password.service";
 import { setManagerPin, InvalidManagerPinFormatError } from "../auth/manager-pin.service";
 import { calculateSeatBilling, reconcileSeatBillingWithProvider } from "../billing/seat-billing.service";
@@ -171,6 +171,24 @@ usersRouter.patch("/users/:id/deactivate", requireAuth, async (req: Request, res
 
   await prisma.user.updateMany({ where: { id, tenantId }, data: { active: false } });
 
+  // CORREÇÃO DE AUDITORIA (fa-w6-sess-deactivated-user-token-still-valid): antes,
+  // `active=false` não tinha NENHUM efeito prático sobre um JWT já emitido para
+  // este usuário — `auth.middleware.ts` nunca checava `User.active`, só
+  // `tokenVersion` (que não era bumped aqui), então o token continuava válido
+  // por até 8h depois da desativação. Agora bump de `tokenVersion` (mesmo campo
+  // já usado para invalidar tokens após troca de senha) E revogação de toda
+  // `ActiveSession` ativa, ambos na MESMA operação lógica da desativação — além
+  // disso, `auth.middleware.ts` passou a checar `User.active` explicitamente
+  // (cacheado junto com `tokenVersion`, ver comentário lá), então mesmo sem o
+  // bump de versão o token pararia de funcionar assim que o cache expirasse.
+  const activeSessions = await prisma.activeSession.findMany({ where: { userId: id, revokedAt: null }, select: { refreshTokenHash: true } });
+  await prisma.$transaction([
+    prisma.user.update({ where: { id }, data: { tokenVersion: { increment: 1 } } }),
+    prisma.activeSession.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } }),
+  ]);
+  await invalidateUserTokenVersionCache(id);
+  await Promise.all(activeSessions.map((s) => invalidateUserSessionCache(s.refreshTokenHash)));
+
   // Desativar libera imediatamente um assento pago, se aplicável — refletido
   // já na próxima chamada de calculateSeatBilling (não há cache nesta métrica).
   const seatBillingAfter = await calculateSeatBilling(prisma, tenantId);
@@ -205,6 +223,24 @@ const setManagerPinSchema = z.object({ pin: z.string().min(4).max(6) });
 // (userId sempre de req.session, nunca do body/URL) — mesmo raciocínio de autorização
 // já usado pelas rotas de notification-settings.routes.ts: sem RBAC novo, pois um
 // usuário nunca edita o contato de outro, nem mesmo um OWNER.
+//
+// AVISO PARA IMPLEMENTAÇÕES FUTURAS (fa-w6-sess-no-email-change-workflow,
+// verificado nesta rodada: NENHUMA rota deste arquivo, ou de qualquer outro
+// módulo, altera `User.email` hoje — só `whatsappPhone`, abaixo, tem um fluxo de
+// self-service). `User.email` é também a credencial de LOGIN (`auth.routes.ts`,
+// POST /login busca por `tenantId+email`) — se algum dia for adicionado um PATCH
+// que aceite trocar `email` diretamente (aqui ou em qualquer rota nova), ELE NUNCA
+// PODE simplesmente sobrescrever o campo numa única requisição. Isso abriria uma
+// janela de account takeover: um atacante com uma sessão sequestrada (ex.: XSS,
+// token roubado) trocaria o e-mail de login para um endereço que controla, e o
+// dono legítimo perderia a conta sem nenhuma confirmação. Qualquer futura feature
+// de troca de e-mail DEVE seguir o mesmo padrão já usado para reset de senha
+// (`PasswordResetToken`/fluxo de e-mail): gravar o novo endereço num campo
+// "pendente" (nunca sobrescrever `email` direto), enviar um token de confirmação
+// de uso único para o endereço NOVO (nunca para o antigo, que pode já estar
+// comprometido), e só promover `pendingEmail -> email` depois do clique de
+// confirmação — idealmente também notificando o e-mail ANTIGO da mudança, para
+// que o dono legítimo possa reagir caso não tenha sido ele quem solicitou.
 const setContactSchema = z.object({
   whatsappPhone: z
     .string()

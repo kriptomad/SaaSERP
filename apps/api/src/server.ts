@@ -401,6 +401,120 @@ app.use(dataDeletionRequestRouter);
 app.use(dataImportRouter);
 app.use(onlineStoreRouter);
 
+// ─────────────────────────────────────────────────────────────────────────
+// ALIAS /api/v1 (fa-w6-api-no-versioning-strategy): nenhum prefixo de versão era
+// exigido em lugar nenhum — qualquer mudança breaking futura não teria como
+// conviver com clientes antigos. CORREÇÃO MÍNIMA E SEM RISCO desta rodada: monta
+// as MESMAS instâncias de router já registradas acima (nunca uma cópia/segunda
+// implementação) sob o prefixo "/api/v1", lado a lado com o path sem prefixo —
+// os dois caminhos resolvem para o EXATO MESMO handler, então nenhum cliente
+// existente quebra. Re-montar TODAS as ~60 rotas sob um novo prefixo único
+// (descontinuando o path antigo) é alto risco/esforço para esta passada — fica
+// para uma migração dedicada, com janela de depreciação formal. A partir de
+// agora, toda integração NOVA (parceiros externos, o próprio apps/web em
+// atualizações futuras) deve preferir "/api/v1/..." — o path sem prefixo
+// permanece suportado indefinidamente por compatibilidade, sem data de remoção
+// anunciada ainda.
+//
+// Os middlewares globais (helmet/requestId/metrics/express.json/authMiddleware/
+// tenantContextMiddleware/tenantLockoutMiddleware/impersonationAuditMiddleware)
+// já rodaram UMA ÚNICA VEZ por requisição antes de chegar aqui (são `app.use()`
+// incondicionais, não escopados por path) — mantém o alias um `app.use(router)`
+// simples, nunca remonta o app inteiro dentro de si mesmo (o que reexecutaria
+// toda a cadeia global uma segunda vez, incluindo `express.json()` sobre um body
+// já consumido). Os webhooks de provedor (`/webhooks/*`, body parser `raw`
+// dedicado) e o painel de plataforma (`/platform-admin/*`, sessão própria) ficam
+// deliberadamente fora deste alias: o primeiro por exigência de formato do
+// provedor (ver cabeçalho de `webhooks.routes.ts`), o segundo por já operar sob
+// seu próprio sistema de sessão/autenticação, sem relação com versionamento de
+// API de tenant. `publicApiRouter` também fica fora: já é auto-versionado em
+// "/api/public/v1/...", um prefixo próprio e estável para integrações externas.
+// `authRouter` é o único mount com prefixo explícito (`app.use("/auth", authRouter)`
+// acima) — o alias precisa reproduzir o MESMO prefixo "/auth" por cima de "/api/v1"
+// para resolver para os mesmos handlers (ex.: POST /signup dentro do router vira
+// "/auth/signup" sem alias e precisa virar "/api/v1/auth/signup" com alias; incluir
+// `authRouter` solto no array abaixo, com só "/api/v1" de prefixo, resolveria
+// "/api/v1/signup" — uma rota DIFERENTE da pretendida).
+app.use("/api/v1/auth", authRouter);
+
+const apiV1AliasRouters = [
+  lookupRouter,
+  publicBookingRouter,
+  publicOnlineStoreRouter,
+  multiFilialRouter,
+  supportTicketsRouter,
+  modulesRouter,
+  subscriptionRouter,
+  checkoutRouter,
+  salesRouter,
+  usersRouter,
+  productsRouter,
+  integrationCredentialsRouter,
+  tenantIntegrationsRouter,
+  personalAccountsRouter,
+  personalPlanningRouter,
+  personalInvestmentsRouter,
+  personalTaxToolsRouter,
+  purchaseOrdersRouter,
+  nfeXmlImportRouter,
+  labelPrintersRouter,
+  globalSearchRouter,
+  inventoryCountRouter,
+  schedulingRouter,
+  comandaRouter,
+  clientRecordsRouter,
+  fiscalCodeCatalogRouter,
+  ibsCbsRegimeElectionRouter,
+  fiscalDocumentsRouter,
+  cashRegisterRouter,
+  notificationsRouter,
+  clientsRouter,
+  suppliersRouter,
+  workOrdersRouter,
+  storageRouter,
+  recipesRouter,
+  stockRouter,
+  financialRouter,
+  bankReconciliationRouter,
+  reportsRouter,
+  accountingOfficeRouter,
+  loyaltyRouter,
+  productVariantsRouter,
+  productExchangesRouter,
+  notificationSettingsRouter,
+  marketingAdminRouter,
+  tefRouter,
+  licensingRouter,
+  workOrderReportsRouter,
+  liquorLedgerRouter,
+  productPricingRouter,
+  variantTurnoverRouter,
+  prescriptionRecordsRouter,
+  clientCreditPaymentsRouter,
+  opticalLabWorkOrdersRouter,
+  healthInsurancePlansRouter,
+  healthInsuranceBillingRouter,
+  seasonalityRouter,
+  personalizationRouter,
+  businessAccountsRouter,
+  constructionQuotesRouter,
+  materialDeliveriesRouter,
+  tireWarrantyRouter,
+  tireServiceOrdersRouter,
+  carWashQueueRouter,
+  carWashServiceRouter,
+  dataExportRouter,
+  dataDeletionRequestRouter,
+  dataImportRouter,
+  onlineStoreRouter,
+];
+for (const router of apiV1AliasRouters) {
+  app.use("/api/v1", router);
+}
+app.get("/api/v1/me", requireAuth, (req, res) => {
+  res.json({ session: req.session });
+});
+
 app.use((_req, res) => {
   res.status(404).json({ error: { code: "NOT_FOUND", message: "Rota não encontrada." } });
 });

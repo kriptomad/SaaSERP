@@ -51,7 +51,14 @@ async function hasActivePushDevice(userId: string): Promise<boolean> {
 
 notificationSettingsRouter.get("/notification-preferences", requireAuth, async (req: Request, res: Response) => {
   const { userId } = req.session!;
-  const rows = await prisma.notificationPreference.findMany({ where: { userId } });
+  // NOTA DE AUDITORIA (fa-w6-api-unbounded-lists-batch): lista é inerentemente
+  // pequena e limitada por design — no máximo uma linha por usuário por categoria
+  // (`@@unique([userId, category])`), e `CATEGORIES.length` é uma constante fixa do
+  // código (não cresce com dados do usuário). `take` aqui é só um teto defensivo,
+  // seguindo o mesmo critério usado em `health-insurance-plans.routes.ts` (Wave 5)
+  // para listas de referência pequenas — não precisa do page/pageSize/meta completo
+  // usado em listas de volume real (ex.: suppliers, accounting-office).
+  const rows = await prisma.notificationPreference.findMany({ where: { userId }, take: CATEGORIES.length });
   const byCategory = new Map(rows.map((r) => [r.category as string, r]));
   const data = CATEGORIES.map((category) => {
     const r = byCategory.get(category);
@@ -84,10 +91,18 @@ async function upsertPreference(tenantId: string, userId: string, category: Cate
   });
 }
 
+const categoryParamSchema = z.object({ category: z.enum(CATEGORIES) });
+
 notificationSettingsRouter.put("/notification-preferences/:category", requireAuth, async (req: Request, res: Response) => {
   const { tenantId, userId } = req.session!;
-  const category = req.params.category as Category;
-  if (!CATEGORIES.includes(category)) return fail(res, 400, "INVALID_CATEGORY", "Categoria de notificação inválida.");
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-notification-category-param-unvalidated):
+  // `category` era lido via cast direto (`as Category`) — o check de runtime
+  // `CATEGORIES.includes(...)` cobria o valor, mas sem gerar `details` estruturados
+  // de validação nem seguir o padrão Zod usado no resto do módulo. Formalizado com
+  // `z.enum(CATEGORIES)` para consistência.
+  const parsedParams = categoryParamSchema.safeParse(req.params);
+  if (!parsedParams.success) return fail(res, 400, "INVALID_CATEGORY", "Categoria de notificação inválida.", parsedParams.error.flatten());
+  const { category } = parsedParams.data;
   const parsed = channelsSchema.safeParse(req.body);
   if (!parsed.success) return fail(res, 400, "VALIDATION_ERROR", "Dados inválidos.", parsed.error.flatten());
   if (Object.keys(parsed.data).length === 0) return fail(res, 400, "VALIDATION_ERROR", "Informe ao menos um canal.");
@@ -131,10 +146,14 @@ notificationSettingsRouter.put("/notification-preferences", requireAuth, async (
 
 notificationSettingsRouter.get("/push-devices", requireAuth, async (req: Request, res: Response) => {
   const { userId } = req.session!;
+  // NOTA DE AUDITORIA (fa-w6-api-unbounded-lists-batch): dispositivos push por
+  // usuário são, na prática, poucas unidades (um celular/tablet/navegador por
+  // vez) — `take` é um teto defensivo, mesmo critério do GET acima.
   const devices = await prisma.pushDeviceToken.findMany({
     where: { userId, revokedAt: null },
     select: { id: true, platform: true, createdAt: true },
     orderBy: { createdAt: "desc" },
+    take: 100,
   });
   return res.json({ success: true, data: devices, error: null });
 });

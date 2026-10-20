@@ -511,11 +511,18 @@ async function logoutCurrentSession(): Promise<void> {
 // reaproveitado tanto para as chamadas de licenciamento quanto para abrir a janela do
 // apps/web (window:open-erp) sem pedir login uma segunda vez.
 
+// CORREÇÃO DE AUDITORIA (fa-w6-api-auth-response-envelope-inconsistent): o backend
+// duplicava token/tenant/user tanto dentro de `data` quanto soltos na raiz da
+// resposta só para este consumidor (e para apps/web, já migrado para `api.post()`
+// no mesmo commit) poder ler os campos planos. Agora lê exclusivamente de `data`,
+// como o resto do app — nunca mais depende dos campos soltos na raiz.
 interface AuthLoginApiResponse {
   success: boolean;
-  token?: string;
-  tenant?: { id: string; slug: string; tradeName: string; status: string; tenantType: string };
-  user?: { id: string; name: string; email: string; role: string };
+  data?: {
+    token?: string;
+    tenant?: { id: string; slug: string; tradeName: string; status: string; tenantType: string };
+    user?: { id: string; name: string; email: string; role: string };
+  };
   error?: { code: string; message: string };
 }
 
@@ -530,10 +537,11 @@ async function loginTenantUser(
       body: JSON.stringify(payload),
     });
     const body = (await response.json().catch(() => null)) as AuthLoginApiResponse | null;
-    if (!response.ok || !body?.token || !body.tenant || !body.user) {
+    const data = body?.data;
+    if (!response.ok || !data?.token || !data.tenant || !data.user) {
       return { error: body?.error?.message ?? `HTTP ${response.status} — credenciais inválidas ou backend indisponível.` };
     }
-    const session: TenantSessionCache = { token: body.token, tenant: body.tenant, user: body.user };
+    const session: TenantSessionCache = { token: data.token, tenant: data.tenant, user: data.user };
     patchConfig({ session });
     return session;
   } catch (error) {

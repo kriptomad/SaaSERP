@@ -34,6 +34,9 @@ import { startReportExportGenerationWorker } from "./workers/report-export-gener
 import { startDataDeletionProcessingWorker } from "./workers/data-deletion-processing.worker";
 import { startDataRetentionPurgeWorker, scheduleDataRetentionPurgeJob } from "./workers/data-retention-purge.worker";
 import { startReconcileStuckProcessingJobsWorker, scheduleReconcileStuckProcessingJobsJob } from "./workers/reconcile-stuck-processing-jobs.worker";
+import { startTrialExpiryEnforcementWorker, scheduleTrialExpiryEnforcementJob } from "./workers/trial-expiry-enforcement.worker";
+import { startTenantOffboardingPurgeWorker, scheduleTenantOffboardingPurgeJob } from "./workers/tenant-offboarding-purge.worker";
+import { startDunningMilestoneDispatchWorker, scheduleDunningMilestoneReconciliationJob } from "./workers/dunning-milestone-dispatch.worker";
 import { prismaUnscoped } from "@filitech/db";
 import { QUEUE_NAMES } from "./lib/queue";
 import { redis } from "./lib/redis";
@@ -107,6 +110,9 @@ async function registerAllJobSchedulers(): Promise<void> {
     scheduleExpireStalePendingCheckoutsJob(),
     scheduleDataRetentionPurgeJob(),
     scheduleReconcileStuckProcessingJobsJob(),
+    scheduleTrialExpiryEnforcementJob(),
+    scheduleTenantOffboardingPurgeJob(),
+    scheduleDunningMilestoneReconciliationJob(),
   ]);
 }
 
@@ -166,6 +172,50 @@ function sanitizeDeliveryError(error: unknown): string {
   // de erro (ex.: um 401 da Resend/Zenvia ecoando o header enviado) chegue à UI.
   const redacted = raw.replace(/bearer\s+\S+/gi, "[redacted]").replace(/x-api-token\s*[:=]\s*\S+/gi, "[redacted]");
   return redacted.length > MAX_DELIVERY_ERROR_LENGTH ? `${redacted.slice(0, MAX_DELIVERY_ERROR_LENGTH - 1)}…` : redacted;
+}
+
+// fa-w6-obs-job-returnvalue-logged-raw — resume `job.returnvalue` (retorno LIVRE de
+// qualquer processor, ver `workers/*.worker.ts`) num objeto pequeno e seguro para log:
+// booleano de sucesso, só os campos de contagem numéricos JÁ CONHECIDOS (convenção
+// deste código-base — ver `count`/`created`/`updated` etc. retornados pelos
+// processors de import/export/reconciliação) e a duração do processamento, nunca o
+// objeto de retorno inteiro (que pode conter qualquer payload de negócio, inclusive
+// PII, sem path previsível para o redact de `lib/logger.ts` cobrir).
+const JOB_RESULT_COUNT_KEYS = [
+  "count",
+  "total",
+  "processed",
+  "created",
+  "updated",
+  "deleted",
+  "skipped",
+  "sent",
+  "failed",
+  "recordCount",
+  "rowCount",
+] as const;
+
+function summarizeJobReturnValue(job: Job): Record<string, unknown> {
+  const durationMs =
+    typeof job.finishedOn === "number" && typeof job.processedOn === "number"
+      ? job.finishedOn - job.processedOn
+      : undefined;
+  const raw = job.returnvalue as unknown;
+  const summary: Record<string, unknown> = { durationMs };
+
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const obj = raw as Record<string, unknown>;
+    summary.success = typeof obj.success === "boolean" ? obj.success : true;
+    for (const key of JOB_RESULT_COUNT_KEYS) {
+      if (typeof obj[key] === "number") summary[key] = obj[key];
+    }
+  } else {
+    // Retorno ausente (`undefined`, processor sem `return`) ou de tipo primitivo
+    // (ex.: `return true`) — job BullMQ só chega no evento `completed` quando o
+    // processor resolveu sem lançar, então conta como sucesso por definição.
+    summary.success = true;
+  }
+  return summary;
 }
 
 async function persistNotificationDeliveryOutcome(
@@ -248,6 +298,12 @@ async function main() {
   // DataImportJob/TenantDataExportJob/ReportExportJob travados em status
   // intermediário, mesmo princípio de `reconcileStuckFiscalDocumentsWorker` acima.
   const reconcileStuckProcessingJobsWorker = startReconcileStuckProcessingJobsWorker();
+  // fa-w6-bl-no-trial-expiry-enforcement — varredura diária de expiração do trial
+  // SaaS. fa-w6-bl-no-offboarding-retention — varredura diária de expurgo/
+  // anonimização de offboarding de tenants SUSPENDED.
+  const trialExpiryEnforcementWorker = startTrialExpiryEnforcementWorker();
+  const tenantOffboardingPurgeWorker = startTenantOffboardingPurgeWorker();
+  const dunningMilestoneDispatchWorker = startDunningMilestoneDispatchWorker();
 
   // Fase de registro de schedulers: protegida por lock distribuído no Redis
   // (fa-w5-boot-replica-race-schedulers) e por retry com backoff exponencial
@@ -293,6 +349,9 @@ async function main() {
     dataDeletionProcessingWorker,
     dataRetentionPurgeWorker,
     reconcileStuckProcessingJobsWorker,
+    trialExpiryEnforcementWorker,
+    tenantOffboardingPurgeWorker,
+    dunningMilestoneDispatchWorker,
   ];
 
   for (const worker of allWorkers) {
@@ -302,7 +361,16 @@ async function main() {
       // respectivos produtores), este log fica correlacionável com o log da
       // requisição HTTP original que o enfileirou.
       const requestId = (job.data as { requestId?: string } | undefined)?.requestId;
-      log.info({ queue: job.queueName, jobId: job.id, requestId, result: job.returnvalue }, "job concluído");
+      // fa-w6-obs-job-returnvalue-logged-raw: `job.returnvalue` é o retorno LIVRE de
+      // qualquer `processor` de qualquer fila (ver `workers/*.worker.ts`) — pode
+      // conter o payload inteiro processado (ex.: dados de cliente/fatura) sem
+      // nenhuma garantia de que algum path dele bate com o redact (path-based, não
+      // recursivo) de `lib/logger.ts`. Loga só um resumo seguro (sucesso + contagens
+      // numéricas conhecidas + duração), nunca o objeto bruto.
+      log.info(
+        { queue: job.queueName, jobId: job.id, requestId, result: summarizeJobReturnValue(job) },
+        "job concluído",
+      );
 
       // fa-w5-notif-delivery-failure-silent-to-users — sucesso do envio externo
       // (WhatsApp/SMS) atualiza de volta a Notification in-app de origem, para o

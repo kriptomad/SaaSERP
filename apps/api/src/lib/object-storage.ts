@@ -16,6 +16,7 @@ import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   HeadBucketCommand,
   CreateMultipartUploadCommand,
   UploadPartCommand,
@@ -26,6 +27,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
+import { prisma } from "@filitech/db";
 import { getPlatformSecret } from "./platform-secrets";
 import { isTenantStorageKey } from "./storage-key";
 import { createModuleLogger } from "./logger";
@@ -47,9 +49,16 @@ const PRESIGNED_DOWNLOAD_EXPIRES_SECONDS = 15 * 60; // 15 min — tempo de visua
 // visitantes diferentes (cada presign gera uma assinatura única), já que a allowlist
 // de mimetype/extensão + o isolamento por tenant continuam sendo a defesa primária;
 // a "renovação" citada na auditoria é automática — a cada nova chamada a
-// `presignObjectDownload` (cada carregamento de página) gera-se uma nova URL válida
-// por mais 7 dias, nunca reaproveitando uma já emitida.
-const PRESIGNED_PUBLIC_ASSET_EXPIRES_SECONDS = 7 * 24 * 60 * 60;
+// `presignObjectDownload` (cada carregamento de página) gera-se uma nova URL válida.
+//
+// fa-w6-up-long-lived-avatar-urls — GAP DE AUDITORIA FECHADO: a expiração escolhida
+// acima (7 dias) era desproporcional ao resto do sistema (15 min para qualquer outra
+// categoria) só para evitar presign a cada carregamento de página — mas uma URL
+// vazada (log, cache de proxy, extensão de navegador) ficava válida por até uma
+// semana. Reduzido para 30 min: ainda é muito maior que o custo de gerar a URL (o
+// chamador real nunca cacheia a URL em banco, já é refeita a cada carregamento), e
+// qualquer vazamento tem uma janela de exposição comparável à das demais categorias.
+const PRESIGNED_PUBLIC_ASSET_EXPIRES_SECONDS = 30 * 60;
 
 /** Categorias de objeto permitidas (Capítulo 3) — grava a allowlist de extensão/mimetype por categoria para nunca aceitar upload arbitrário.
  * `publicReadable` controla se `presignObjectDownload` pode servir esta categoria via
@@ -103,8 +112,10 @@ export type StorageCategory = keyof typeof STORAGE_CATEGORIES;
 
 /** Extrai a categoria do padrão `tenants/<tenantId>/<categoria>/<arquivo>` — nunca
  * confia em nada enviado pelo chamador, sempre reconstrói a partir da própria chave
- * persistida, que é a fonte de verdade de qual categoria aquele objeto pertence. */
-function categoryOfStorageKey(storageKey: string): StorageCategory | null {
+ * persistida, que é a fonte de verdade de qual categoria aquele objeto pertence.
+ * Exportada para `storage.routes.ts` poder rejeitar (400) uma chave cuja categoria
+ * não seja reconhecida ANTES de qualquer tentativa de presign (fa-w6-up-category-null-still-signs). */
+export function categoryOfStorageKey(storageKey: string): StorageCategory | null {
   const parts = storageKey.split("/");
   const candidate = parts[2];
   return candidate && candidate in STORAGE_CATEGORIES ? (candidate as StorageCategory) : null;
@@ -205,8 +216,71 @@ function assertExtensionMatchesMimeType(fileName: string, mimeType: string): voi
   }
 }
 
+// fa-w6-up-no-magic-byte-validation — GAP DE AUDITORIA FECHADO: até esta rodada o
+// único controle de "o que é esse arquivo" era o MIME type DECLARADO pelo cliente
+// (mais a extensão do nome, checada acima) — nenhum dos dois é confiável contra um
+// upload malicioso que forja ambos (`Content-Type: image/jpeg`, nome `foto.jpg`)
+// enquanto o CONTEÚDO real do arquivo é outra coisa (script, executável, SVG com
+// `<script>`, etc.). `readMagicBytesValidator` confere os primeiros bytes do objeto
+// JÁ GRAVADO no R2 (chamado em `finalizeObjectUpload`, nunca no presign — o
+// conteúdo só existe depois do PUT do navegador) contra uma assinatura binária
+// conhecida para o mimetype declarado. Cobre todos os mimetypes hoje presentes em
+// `STORAGE_CATEGORIES`; novas categorias que adicionem um mimetype fora deste mapa
+// devem adicionar seu validador aqui (fail-closed: mimetype sem validador mapeado
+// é tratado como reprovado, nunca aceito por omissão).
+function startsWithBytes(buf: Buffer, bytes: number[]): boolean {
+  if (buf.length < bytes.length) return false;
+  return bytes.every((b, i) => buf[i] === b);
+}
+
+function isTextLikeContent(buf: Buffer): boolean {
+  if (buf.length === 0) return true;
+  if (startsWithBytes(buf, [0x4d, 0x5a])) return false; // "MZ" — executável Windows (PE/EXE/DLL)
+  if (startsWithBytes(buf, [0x7f, 0x45, 0x4c, 0x46])) return false; // ELF — executável Linux
+  if (buf[0] === 0x23 && buf[1] === 0x21) return false; // "#!" — shebang de script
+  // Heurística simples de "é texto": nenhum byte NUL nos primeiros bytes lidos
+  // (conteúdo binário arbitrário tende a conter NUL cedo; texto plano/XML/CSV não).
+  return !buf.subarray(0, Math.min(buf.length, 512)).includes(0x00);
+}
+
+function isXmlLikeContent(buf: Buffer): boolean {
+  if (!isTextLikeContent(buf)) return false;
+  let offset = 0;
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) offset = 3; // BOM UTF-8
+  const text = buf.subarray(offset, Math.min(buf.length, 256)).toString("utf8").trimStart();
+  return text.startsWith("<");
+}
+
+const MAGIC_BYTE_VALIDATORS: Record<string, (buf: Buffer) => boolean> = {
+  "image/jpeg": (buf) => startsWithBytes(buf, [0xff, 0xd8, 0xff]),
+  "image/png": (buf) => startsWithBytes(buf, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  "image/webp": (buf) => startsWithBytes(buf, [0x52, 0x49, 0x46, 0x46]) && buf.length >= 12 && buf.subarray(8, 12).toString("ascii") === "WEBP",
+  "application/pdf": (buf) => startsWithBytes(buf, [0x25, 0x50, 0x44, 0x46]), // "%PDF"
+  "application/zip": (buf) => startsWithBytes(buf, [0x50, 0x4b, 0x03, 0x04]) || startsWithBytes(buf, [0x50, 0x4b, 0x05, 0x06]),
+  // .xlsx é um ZIP por baixo — mesma assinatura "PK\x03\x04".
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": (buf) => startsWithBytes(buf, [0x50, 0x4b, 0x03, 0x04]),
+  // .xls legado (OLE2/Compound File Binary Format).
+  "application/vnd.ms-excel": (buf) => startsWithBytes(buf, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+  "text/xml": isXmlLikeContent,
+  "application/xml": isXmlLikeContent,
+  "text/csv": isTextLikeContent,
+  "text/plain": isTextLikeContent,
+  // Dump de banco já cifrado em AES-256-GCM (Capítulo 10.3) — ciphertext é
+  // indistinguível de bytes aleatórios, não existe assinatura binária possível de
+  // validar; a confiança aqui vem de ser `putPlatformObjectDirect`/`Stream`
+  // (upload feito pelo próprio backend, nunca por um navegador de tenant).
+  "application/octet-stream": () => true,
+};
+
+function validateMagicBytes(mimeType: string, buf: Buffer): boolean {
+  const validator = MAGIC_BYTE_VALIDATORS[mimeType];
+  // Fail-closed: mimetype sem validador mapeado nunca passa por omissão.
+  return typeof validator === "function" && validator(buf);
+}
+
 export interface PresignUploadInput {
   tenantId: string;
+  userId: string;
   category: StorageCategory;
   fileName: string;
   mimeType: string;
@@ -249,7 +323,139 @@ export async function presignObjectUpload(input: PresignUploadInput): Promise<Pr
   });
   const uploadUrl = await getSignedUrl(client, command, { expiresIn: PRESIGNED_UPLOAD_EXPIRES_SECONDS });
 
+  // fa-w6-up-no-magic-byte-validation / fa-w6-up-presigned-size-not-reconciled /
+  // fa-w6-up-missing-object-existence-check — grava o rastreio PENDING agora, no
+  // momento do presign: é a única oportunidade em que já sabemos com certeza o
+  // mimetype/tamanho DECLARADOS para depois reconciliar contra a realidade do
+  // objeto em `finalizeObjectUpload`. Até a finalização, nenhuma rota de domínio
+  // deve aceitar este `storageKey` como ponteiro válido (ver `requireCleanStorageObject`).
+  await prisma.storageObject.create({
+    data: {
+      tenantId: input.tenantId,
+      storageKey,
+      category: input.category,
+      mimeType: input.mimeType,
+      declaredSizeBytes: input.fileSizeBytes,
+      createdById: input.userId,
+    },
+  });
+
   return { uploadUrl, storageKey, expiresInSeconds: PRESIGNED_UPLOAD_EXPIRES_SECONDS };
+}
+
+export class StorageFinalizationError extends Error {}
+
+/**
+ * fa-w6-up-no-magic-byte-validation / fa-w6-up-presigned-size-not-reconciled /
+ * fa-w6-up-missing-object-existence-check / fa-w6-up-no-malware-scanning —
+ * finaliza um upload feito via `presignObjectUpload`: confirma via `HeadObject`
+ * que o objeto REALMENTE existe no R2 e que seu tamanho real bate com o
+ * declarado, depois lê os primeiros bytes reais do objeto e valida a assinatura
+ * binária contra o mimetype declarado. Só depois disso o registro vira `CLEAN` —
+ * rotas de domínio (ex.: `POST /work-orders/:id/photos`) devem exigir esse estado
+ * antes de persistir o `storageKey` num registro próprio. Em qualquer divergência
+ * o objeto é APAGADO do bucket e o registro vira `REJECTED` (nunca fica um arquivo
+ * suspeito acessível no bucket apenas porque a finalização falhou).
+ */
+export async function finalizeObjectUpload(tenantId: string, storageKey: string): Promise<{ storageKey: string; scanStatus: "CLEAN"; actualSizeBytes: number }> {
+  if (!isTenantStorageKey(storageKey, tenantId)) {
+    throw new StorageFinalizationError("A chave de armazenamento não pertence ao tenant autenticado.");
+  }
+  const category = categoryOfStorageKey(storageKey);
+  if (!category) {
+    throw new StorageFinalizationError("Categoria de armazenamento não reconhecida para esta chave.");
+  }
+  const categoryDef = STORAGE_CATEGORIES[category];
+
+  const record = await prisma.storageObject.findUnique({ where: { storageKey } });
+  if (!record || record.tenantId !== tenantId) {
+    throw new StorageFinalizationError("Nenhum upload pendente encontrado para esta chave — solicite um novo presign.");
+  }
+  if (record.scanStatus === "CLEAN") {
+    // Idempotente: uma finalização repetida sobre uma chave já validada não repete
+    // o trabalho nem falha — simplesmente confirma o estado já alcançado.
+    return { storageKey, scanStatus: "CLEAN", actualSizeBytes: record.actualSizeBytes ?? record.declaredSizeBytes };
+  }
+  if (record.scanStatus === "REJECTED") {
+    throw new StorageFinalizationError("Este upload já foi rejeitado anteriormente (arquivo incompatível com o tipo declarado).");
+  }
+
+  const { client, config } = await getR2Client();
+
+  let actualSizeBytes: number;
+  try {
+    const head = await client.send(new HeadObjectCommand({ Bucket: config.bucket, Key: storageKey }));
+    actualSizeBytes = head.ContentLength ?? -1;
+  } catch {
+    // Objeto ainda não existe no bucket (upload não concluído/abortado) — mantém o
+    // registro PENDING para permitir uma nova tentativa de finalize depois do PUT.
+    throw new StorageFinalizationError("Objeto ainda não encontrado no armazenamento — confirme se o upload (PUT) foi concluído com sucesso.");
+  }
+
+  const rejectAndDelete = async (reason: string): Promise<never> => {
+    await client.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: storageKey })).catch((err) => {
+      log.error({ storageKey, err }, "falha ao apagar objeto rejeitado na finalização — pode deixar arquivo suspeito no bucket");
+    });
+    await prisma.storageObject.update({ where: { storageKey }, data: { scanStatus: "REJECTED", actualSizeBytes: actualSizeBytes >= 0 ? actualSizeBytes : null, finalizedAt: new Date() } });
+    throw new StorageFinalizationError(reason);
+  };
+
+  if (actualSizeBytes < 0) {
+    return rejectAndDelete("Não foi possível determinar o tamanho real do objeto no armazenamento.");
+  }
+  if (actualSizeBytes !== record.declaredSizeBytes) {
+    return rejectAndDelete(`Tamanho real do objeto (${actualSizeBytes} bytes) não bate com o tamanho declarado no presign (${record.declaredSizeBytes} bytes).`);
+  }
+  if (actualSizeBytes > categoryDef.maxBytes) {
+    return rejectAndDelete(`Tamanho do objeto (${actualSizeBytes} bytes) excede o máximo permitido para "${category}" (${categoryDef.maxBytes} bytes).`);
+  }
+
+  // Lê só os primeiros bytes (range request) — nunca baixa o objeto inteiro para
+  // validar a assinatura binária, mesmo para categorias que permitem arquivos grandes.
+  const MAGIC_BYTES_READ_LENGTH = 4096;
+  let headerBytes: Buffer;
+  try {
+    const rangeResult = await client.send(
+      new GetObjectCommand({ Bucket: config.bucket, Key: storageKey, Range: `bytes=0-${MAGIC_BYTES_READ_LENGTH - 1}` }),
+    );
+    const body = rangeResult.Body;
+    if (!body) {
+      return rejectAndDelete("Objeto no armazenamento não retornou corpo de resposta para validação de assinatura.");
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of body as AsyncIterable<Buffer | Uint8Array>) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    headerBytes = Buffer.concat(chunks);
+  } catch {
+    return rejectAndDelete("Falha ao ler os bytes iniciais do objeto para validação de assinatura.");
+  }
+
+  if (!validateMagicBytes(record.mimeType, headerBytes)) {
+    return rejectAndDelete(`Assinatura binária do arquivo não corresponde ao tipo declarado "${record.mimeType}".`);
+  }
+
+  await prisma.storageObject.update({
+    where: { storageKey },
+    data: { scanStatus: "CLEAN", actualSizeBytes, finalizedAt: new Date() },
+  });
+
+  return { storageKey, scanStatus: "CLEAN", actualSizeBytes };
+}
+
+/**
+ * fa-w6-up-missing-object-existence-check — checagem usada por rotas de domínio
+ * (ex.: `POST /work-orders/:id/photos`) antes de persistir um `storageKey` recebido
+ * do cliente num registro próprio: exige que exista um `StorageObject` `CLEAN` (ou
+ * seja, já finalizado com sucesso via `finalizeObjectUpload`) para aquela chave.
+ */
+export async function requireCleanStorageObject(tenantId: string, storageKey: string): Promise<void> {
+  const record = await prisma.storageObject.findUnique({ where: { storageKey } });
+  if (!record || record.tenantId !== tenantId || record.scanStatus !== "CLEAN") {
+    throw new StorageFinalizationError(
+      "Este arquivo ainda não foi finalizado/validado — chame POST /storage/uploads/finalize após o upload antes de associá-lo a um registro.",
+    );
+  }
 }
 
 /**
@@ -262,26 +468,64 @@ export async function presignObjectDownload(tenantId: string, storageKey: string
   if (!isTenantStorageKey(storageKey, tenantId)) {
     throw new Error("A chave de armazenamento não pertence ao tenant autenticado.");
   }
-  const { client, config } = await getR2Client();
 
+  // fa-w6-up-category-null-still-signs — GAP DE AUDITORIA FECHADO: antes, se
+  // `categoryOfStorageKey` devolvesse `null` (chave com o prefixo de tenant certo
+  // mas um segmento de categoria desconhecido/corrompido), o código seguia em
+  // frente e assinava a URL de leitura mesmo assim — a checagem de
+  // `publicReadable` só era aplicada quando a categoria ERA reconhecida, nunca
+  // bloqueando quando não era. Agora uma categoria não reconhecida é SEMPRE
+  // rejeitada (fail-closed) antes de qualquer tentativa de presign.
   const category = categoryOfStorageKey(storageKey);
-  if (category && STORAGE_CATEGORIES[category].publicReadable) {
+  if (!category) {
+    throw new Error("Categoria de armazenamento não reconhecida para esta chave.");
+  }
+
+  // fa-w6-up-missing-object-existence-check / fa-w6-up-no-malware-scanning —
+  // uploads feitos via `presignObjectUpload` (direto do navegador) têm um
+  // `StorageObject` de rastreio; se existir um registro para esta chave mas ele
+  // ainda não tiver sido finalizado (`PENDING`) ou tiver sido rejeitado
+  // (`REJECTED` — assinatura binária/tamanho incompatível), a leitura é bloqueada
+  // mesmo que o objeto já exista fisicamente no bucket. Chaves sem registro
+  // (uploads feitos diretamente pelo backend via `putObjectDirect`/`putObjectStream`,
+  // nunca por um navegador de tenant) não passam por este rastreio — conteúdo
+  // gerado pelo próprio servidor é implicitamente confiável.
+  const trackedUpload = await prisma.storageObject.findUnique({ where: { storageKey } });
+  if (trackedUpload && trackedUpload.scanStatus !== "CLEAN") {
+    throw new Error("Este arquivo ainda não foi finalizado/validado ou foi rejeitado — não pode ser lido.");
+  }
+
+  const { client, config } = await getR2Client();
+  // fa-w6-up-no-malware-scanning — força `Content-Disposition: attachment` em
+  // TODA URL de leitura emitida (incluindo avatares): sem AV/sanitização completa
+  // disponível neste sandbox, impede que uma navegação direta à URL assinada
+  // renderize o conteúdo inline no navegador (mitigação defesa-em-profundidade —
+  // a allowlist de mimetype/extensão + validação de assinatura binária em
+  // `finalizeObjectUpload` já impede que `text/html`/`image/svg+xml` cheguem a ser
+  // aceitos em primeiro lugar, mas o header reforça mesmo contra um objeto
+  // antigo/gerado por outra via). `<img>` tags ignoram este header e continuam
+  // renderizando normalmente — não quebra a exibição de avatares/fotos no painel.
+  const fileSegment = storageKey.split("/").pop() ?? "arquivo";
+  const responseContentDisposition = `attachment; filename="${fileSegment.replace(/"/g, "")}"`;
+
+  if (STORAGE_CATEGORIES[category].publicReadable) {
     // Ver nota em `PRESIGNED_PUBLIC_ASSET_EXPIRES_SECONDS` acima — substituída a URL
     // pública eterna/sem assinatura do Custom Domain (`R2_PUBLIC_BASE_URL`) por uma
-    // URL assinada de leitura com expiração de 7 dias, renovada automaticamente a
-    // cada nova chamada desta função (ex.: cada carregamento da página da vitrine
+    // URL assinada de leitura de curta duração, renovada automaticamente a cada
+    // nova chamada desta função (ex.: cada carregamento da página da vitrine
     // virtual gera uma URL nova). `R2_PUBLIC_BASE_URL` deixa de ser usado para
     // construir a URL de avatar — mantido na config só para eventual uso futuro de
     // outras finalidades de CDN, nunca mais para servir leitura sem assinatura.
-    const command = new GetObjectCommand({ Bucket: config.bucket, Key: storageKey });
+    const command = new GetObjectCommand({ Bucket: config.bucket, Key: storageKey, ResponseContentDisposition: responseContentDisposition });
     const downloadUrl = await getSignedUrl(client, command, { expiresIn: PRESIGNED_PUBLIC_ASSET_EXPIRES_SECONDS });
     return { downloadUrl, expiresInSeconds: PRESIGNED_PUBLIC_ASSET_EXPIRES_SECONDS };
   }
 
-  const command = new GetObjectCommand({ Bucket: config.bucket, Key: storageKey });
+  const command = new GetObjectCommand({ Bucket: config.bucket, Key: storageKey, ResponseContentDisposition: responseContentDisposition });
   const downloadUrl = await getSignedUrl(client, command, { expiresIn: PRESIGNED_DOWNLOAD_EXPIRES_SECONDS });
   return { downloadUrl, expiresInSeconds: PRESIGNED_DOWNLOAD_EXPIRES_SECONDS };
 }
+
 
 export interface PutObjectDirectInput {
   tenantId: string;

@@ -11,6 +11,7 @@ import { Worker, Job } from "bullmq";
 import { prismaUnscoped } from "@filitech/db";
 import { queueRedisConnection, QUEUE_NAMES, suspendOverdueTenantsQueue, DEFAULT_RECURRING_JOB_OPTS } from "../lib/queue";
 import { notifyTenant } from "../modules/notifications/notify.service";
+import { computeTenantPurgeAt } from "../lib/tenant-purge";
 
 const REPEATABLE_JOB_NAME = "daily-sweep";
 const DAILY_CRON_3AM = "0 3 * * *";
@@ -25,8 +26,12 @@ export async function suspendOverdueTenantsProcessor(_job: Job): Promise<{ suspe
 
   let suspended = 0;
   for (const tenant of overdueTenants) {
+    const suspendedAt = new Date();
     await prismaUnscoped.$transaction([
-      prismaUnscoped.tenant.update({ where: { id: tenant.id }, data: { status: "SUSPENDED" } }),
+      prismaUnscoped.tenant.update({
+        where: { id: tenant.id },
+        data: { status: "SUSPENDED", suspensionReason: "BILLING_OVERDUE", suspendedAt, purgeAt: computeTenantPurgeAt(suspendedAt) },
+      }),
       prismaUnscoped.subscription.updateMany({
         where: { tenantId: tenant.id, status: { not: "SUSPENDED" } },
         data: { status: "SUSPENDED" },

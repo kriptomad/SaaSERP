@@ -1,10 +1,33 @@
 // apps/api/src/modules/billing/dunning.service.ts
 // Fonte: BIBLE_ENGINEERING_V2.md, Capítulo 2.7.4 — Régua de Dunning unificada Stripe/Asaas.
 import { prismaUnscoped, Prisma } from "@filitech/db";
-import { notifyTenantPaymentFailed, notifyTenant } from "../notifications/notify.service";
+import { dunningMilestoneDispatchQueue } from "../../lib/queue";
+import { computeTenantPurgeAt } from "../../lib/tenant-purge";
 import { createModuleLogger } from "../../lib/logger";
 
 const log = createModuleLogger("dunning-service");
+
+// fa-w6-bl-dunning-not-durable — ver nota de design completa em schema.prisma,
+// model `DunningMilestone`: enfileira o DISPATCH do milestone já persistido
+// (status=PENDING) dentro da MESMA transação que mudou o estado financeiro.
+// Chamado sempre DEPOIS do commit (nunca de dentro do `$transaction`, mesmo
+// motivo de `notifyTenantPaymentFailed` antes: I/O externo — mesmo que seja só
+// enfileirar no Redis — nunca deve prolongar o lock de linha aberto pelos
+// updates financeiros). Se o PRÓPRIO enfileiramento falhar aqui (Redis
+// momentaneamente fora do ar), o milestone continua PENDING no Postgres e é
+// reenfileirado pela reconciliação periódica do worker — nunca perdido, ao
+// contrário do antigo `try { await notifyTenant(...) } catch { log.error() }`.
+async function enqueueDunningMilestoneDispatch(milestoneId: string): Promise<void> {
+  try {
+    await dunningMilestoneDispatchQueue.add(
+      "dispatch-milestone",
+      { milestoneId },
+      { attempts: 5, backoff: { type: "exponential", delay: 5_000 }, removeOnComplete: true },
+    );
+  } catch (error) {
+    log.error({ milestoneId, err: error }, "falha ao enfileirar dispatch do dunning milestone — permanece PENDING, será reenfileirado pela reconciliação periódica");
+  }
+}
 
 const RETRY_SCHEDULE_DAYS = [1, 3, 5, 7]; // mesma cadência do Stripe Smart Retries
 
@@ -94,24 +117,41 @@ export async function handlePaymentFailure(
     });
 
     if (attempt >= RETRY_SCHEDULE_DAYS.length) {
+      // fa-w6-bl-no-offboarding-retention: marca o instante da suspensão e calcula
+      // o prazo de expurgo/anonimização de offboarding (tenant-offboarding-purge.worker.ts).
+      const suspendedAt = new Date();
       await tx.subscription.update({ where: { id: subscriptionId }, data: { status: "SUSPENDED" } });
-      await tx.tenant.update({ where: { id: tenantId }, data: { status: "SUSPENDED" } });
+      await tx.tenant.update({
+        where: { id: tenantId },
+        data: { status: "SUSPENDED", suspensionReason: "BILLING_OVERDUE", suspendedAt, purgeAt: computeTenantPurgeAt(suspendedAt) },
+      });
     }
 
-    return { skipped: null as null, attempt, nextRetryAt };
+    // fa-w6-bl-dunning-not-durable: a DECISÃO de notificar é persistida AQUI,
+    // atomicamente com o resto do estado financeiro (mesma transação) — nunca
+    // mais dependente de uma chamada síncrona de notificação sobreviver sozinha
+    // depois do commit.
+    const milestone = await tx.dunningMilestone.create({
+      data: {
+        tenantId,
+        subscriptionId,
+        type: "PAYMENT_FAILED",
+        payload: { attempt, nextRetryAt: nextRetryAt.toISOString() },
+        requestId: requestId ?? null,
+      },
+    });
+
+    return { skipped: null as null, attempt, nextRetryAt, milestoneId: milestone.id };
   });
 
   if (result.skipped) {
     return result;
   }
 
-  // Entrega da notificação FORA da transação já commitada — nunca bloqueia nem
-  // reverte o estado financeiro já persistido acima.
-  try {
-    await notifyTenantPaymentFailed(tenantId, { attempt: result.attempt!, nextRetryAt: result.nextRetryAt! }, requestId);
-  } catch (err) {
-    log.error({ tenantId, subscriptionId, err }, "falha ao entregar notificação de falha de pagamento (estado financeiro já commitado)");
-  }
+  // Enfileira o DISPATCH fora da transação já commitada — nunca bloqueia nem
+  // reverte o estado financeiro já persistido acima; uma falha no enfileiramento
+  // em si deixa o milestone PENDING, reenfileirado pela reconciliação periódica.
+  await enqueueDunningMilestoneDispatch(result.milestoneId!);
 
   return result;
 }
@@ -128,22 +168,27 @@ export async function handlePaymentFailure(
 export async function handleSubscriptionCanceled(tenantId: string, subscriptionId: string, eventAt: Date = new Date()) {
   const applied = await prismaUnscoped.$transaction(async (tx) => {
     const ordered = await claimEventOrdering(tx, subscriptionId, eventAt);
-    if (!ordered) return false;
+    if (!ordered) return null;
+    const suspendedAt = new Date();
     await tx.subscription.update({ where: { id: subscriptionId }, data: { status: "SUSPENDED" } });
-    await tx.tenant.update({ where: { id: tenantId }, data: { status: "SUSPENDED", gracePeriodEndsAt: null } });
-    return true;
+    await tx.tenant.update({
+      where: { id: tenantId },
+      data: {
+        status: "SUSPENDED",
+        gracePeriodEndsAt: null,
+        suspensionReason: "SUBSCRIPTION_CANCELED",
+        suspendedAt,
+        purgeAt: computeTenantPurgeAt(suspendedAt),
+      },
+    });
+    // fa-w6-bl-dunning-not-durable: milestone persistido atomicamente — ver nota em handlePaymentFailure.
+    const milestone = await tx.dunningMilestone.create({
+      data: { tenantId, subscriptionId, type: "SUBSCRIPTION_CANCELED", payload: {} },
+    });
+    return milestone.id;
   });
   if (!applied) return;
-  await notifyTenant({
-    tenantId,
-    category: "BILLING_DUNNING",
-    severity: "CRITICAL",
-    title: "Assinatura cancelada",
-    body: "Sua assinatura foi cancelada junto ao provedor de pagamento e o acesso ao sistema foi suspenso. Reative o plano para continuar usando o Filitech ERP.",
-    linkRoute: "/configuracoes/cobranca",
-    sourceType: "SUBSCRIPTION",
-    sourceId: tenantId,
-  });
+  await enqueueDunningMilestoneDispatch(applied);
 }
 
 // CORREÇÃO DE AUDITORIA (fa-billing-stripe-pastdue-unhandled): `customer.subscription.updated`
@@ -209,23 +254,25 @@ export async function handlePaymentReversed(
     // mais novo que `lastFinancialEventAt`).
     await tx.subscription.update({ where: { id: subscriptionId }, data: { lastFinancialEventAt: eventAt } });
     await tx.subscription.update({ where: { id: subscriptionId }, data: { status: "SUSPENDED" } });
-    await tx.tenant.update({ where: { id: tenantId }, data: { status: "SUSPENDED", gracePeriodEndsAt: null } });
-    return true;
+    const suspendedAt = new Date();
+    await tx.tenant.update({
+      where: { id: tenantId },
+      data: {
+        status: "SUSPENDED",
+        gracePeriodEndsAt: null,
+        suspensionReason: reason === "CHARGEBACK" ? "CHARGEBACK" : "PAYMENT_REFUNDED",
+        suspendedAt,
+        purgeAt: computeTenantPurgeAt(suspendedAt),
+      },
+    });
+    // fa-w6-bl-dunning-not-durable: milestone persistido atomicamente — ver nota em handlePaymentFailure.
+    const milestone = await tx.dunningMilestone.create({
+      data: { tenantId, subscriptionId, type: "PAYMENT_REVERSED", payload: { reason } },
+    });
+    return milestone.id;
   });
   if (!applied) return;
-  await notifyTenant({
-    tenantId,
-    category: "BILLING_DUNNING",
-    severity: "CRITICAL",
-    title: reason === "CHARGEBACK" ? "Cobrança contestada (chargeback)" : "Pagamento estornado",
-    body:
-      reason === "CHARGEBACK"
-        ? "O pagamento da sua assinatura foi contestado junto à operadora do cartão e o acesso ao sistema foi suspenso. Entre em contato com o suporte para regularizar."
-        : "O pagamento da sua assinatura foi estornado e o acesso ao sistema foi suspenso. Realize um novo pagamento para reativar.",
-    linkRoute: "/configuracoes/cobranca",
-    sourceType: "SUBSCRIPTION",
-    sourceId: tenantId,
-  });
+  await enqueueDunningMilestoneDispatch(applied);
 }
 
 // CORREÇÃO DE AUDITORIA (fa-billing-outoforder-active-reactivation): reativar o
@@ -265,7 +312,19 @@ export async function handlePaymentRecovered(tenantId: string, subscriptionId: s
         firstChargedAt: current?.firstChargedAt ?? new Date(),
       },
     });
-    await tx.tenant.update({ where: { id: tenantId }, data: { status: "ACTIVE", gracePeriodEndsAt: null } });
+    await tx.tenant.update({
+      where: { id: tenantId },
+      data: {
+        status: "ACTIVE",
+        gracePeriodEndsAt: null,
+        // Reativação cancela qualquer expurgo de offboarding ainda pendente — nunca
+        // limpa `deletionRequestedAt` (histórico imutável de que a anonimização já
+        // foi executada, caso tenha chegado a acontecer antes desta recuperação).
+        suspendedAt: null,
+        purgeAt: null,
+        suspensionReason: null,
+      },
+    });
     return true;
   });
   return applied;

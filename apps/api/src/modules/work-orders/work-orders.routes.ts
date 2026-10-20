@@ -17,6 +17,7 @@ import { Prisma, prisma, prismaUnscoped } from "@filitech/db";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { requireModule } from "../../middlewares/gatekeeper.middleware";
 import { isTenantStorageKey } from "../../lib/storage-key";
+import { requireCleanStorageObject } from "../../lib/object-storage";
 import {
   approveBudget,
   BudgetAlreadyProcessedError,
@@ -342,9 +343,27 @@ workOrdersRouter.delete("/work-orders/:id/items/:itemId", requireAuth, requireMo
     return res.status(403).json({ success: false, data: null, error: { code: "FORBIDDEN", message: "Seu nível de acesso não permite remover itens da O.S." } });
   }
 
+  // fa-w6-di-hard-deletes-critical-entities — faltava aqui a MESMA checagem de
+  // estado já aplicada em `POST /work-orders/:id/items` (lançar item): sem ela, era
+  // possível remover um item de uma O.S. já DELIVERED/CANCELLED, alterando
+  // silenciosamente o que ficou faturado/registrado depois do fechamento.
+  const workOrder = await prisma.workOrder.findFirst({ where: { id: req.params.id, tenantId } });
+  if (!workOrder) {
+    return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Ordem de serviço não encontrada." } });
+  }
+  if (workOrder.status === "DELIVERED" || workOrder.status === "CANCELLED") {
+    return res.status(409).json({ success: false, data: null, error: { code: "WORK_ORDER_CLOSED", message: "Não é possível remover itens de uma O.S. finalizada ou cancelada." } });
+  }
+
   const item = await prisma.workOrderItem.findFirst({ where: { id: req.params.itemId, tenantId, workOrderId: req.params.id } });
   if (!item) {
     return res.status(404).json({ success: false, data: null, error: { code: "NOT_FOUND", message: "Item não encontrado nesta ordem de serviço." } });
+  }
+  // Item já vinculado a uma venda real (faturado) — remover apagaria uma linha de
+  // uma `Sale` já emitida/fiscal sem deixar rastro, mesmo princípio de "nunca apagar
+  // histórico financeiro" já aplicado em `accounting-office.routes.ts` (CompanyPartner).
+  if (item.saleItemId) {
+    return res.status(409).json({ success: false, data: null, error: { code: "ITEM_ALREADY_BILLED", message: "Este item já está vinculado a uma venda faturada e não pode ser removido." } });
   }
 
   await prisma.workOrderItem.delete({ where: { id: item.id } });
@@ -543,6 +562,20 @@ workOrdersRouter.post("/work-orders/:id/photos", requireAuth, requireModule("WOR
   // outro tenant e, ao gerar uma URL assinada de leitura futura, acessar a foto alheia.
   if (!isTenantStorageKey(input.storageKey, tenantId)) {
     return res.status(400).json({ success: false, data: null, error: { code: "INVALID_STORAGE_KEY", message: "A chave de armazenamento deve pertencer ao tenant autenticado (tenants/<tenantId>/...)." } });
+  }
+
+  // fa-w6-up-presigned-size-not-reconciled / fa-w6-up-missing-object-existence-check —
+  // GAP DE AUDITORIA FECHADO: esta rota persistia o `storageKey` recebido do
+  // cliente imediatamente após só validar o PREFIXO da chave — nunca confirmava
+  // que o upload de fato ocorreu (o objeto podia nem existir no R2), que o
+  // tamanho real batia com o declarado no presign, ou que o conteúdo real do
+  // arquivo correspondia ao mimetype declarado (magic bytes). Agora exige que
+  // `POST /storage/uploads/finalize` já tenha rodado com sucesso para esta chave
+  // (`StorageObject.scanStatus = CLEAN`) antes de aceitar o ponteiro.
+  try {
+    await requireCleanStorageObject(tenantId, input.storageKey);
+  } catch (error) {
+    return res.status(422).json({ success: false, data: null, error: { code: "STORAGE_OBJECT_NOT_FINALIZED", message: (error as Error).message } });
   }
 
   const photo = await prisma.osPhoto.create({

@@ -155,6 +155,21 @@ enum TaxRegime {
   LUCRO_REAL
 }
 
+// fa-w6-di-fiscal-cascade-delete — DECISÃO DE DESIGN DELIBERADA: a exclusão física
+// (hard-delete) de um `Tenant` é INTENCIONALMENTE NÃO SUPORTADA pela aplicação,
+// mesmo o schema abaixo mantendo `onDelete: Cascade` em dezenas de relações (ver
+// `0_init/migration.sql`). O cascade existe para permitir rollback de um tenant de
+// TESTE/onboarding abandonado em ambiente de desenvolvimento, nunca para apagar um
+// tenant de produção com histórico real: um `FiscalDocument` (NFe/NFC-e) emitido
+// precisa ser retido por obrigação legal (Art. 16, II da LGPD remete à guarda fiscal
+// obrigatória; legislação tributária brasileira exige tipicamente 5+ anos), e um
+// `DELETE` físico em cascata destruiria essa guarda sem possibilidade de reversão.
+// Verificado nesta auditoria: NENHUMA rota/serviço do `apps/api` chama
+// `prisma.tenant.delete(...)` — o único caminho de "desativação" de um tenant
+// legítimo é `status: CANCELLED` (ver `TenantStatus` acima), que é reversível e não
+// apaga nenhum registro. Se um caminho de hard-delete de `Tenant` for adicionado no
+// futuro, ele DEVE bloquear (ou exigir uma confirmação explícita de "legal hold
+// liberado") sempre que `prisma.fiscalDocument.count({ where: { tenantId } }) > 0`.
 model Tenant {
   id                            String       @id @default(uuid())
   parentTenantId                String? // suporte a hierarquia multi-filial
@@ -172,6 +187,40 @@ model Tenant {
   tenantType                    TenantType   @default(BUSINESS)
   status                        TenantStatus @default(TRIAL)
   gracePeriodEndsAt             DateTime?
+  // fa-w6-bl-no-trial-expiry-enforcement — fim do trial SaaS gratuito (14 dias,
+  // mesma ordem de grandeza do trial de 15 dias já existente na Licença Mestra
+  // técnica, Capítulo 2.10/licensing.routes.ts, porém um conceito INDEPENDENTE:
+  // este campo governa o Tenant Lockout de COBRANÇA/acesso ao app, nunca o
+  // TenantLicense). Definido uma única vez no signup (auth.routes.ts) e consultado
+  // por `workers/trial-expiry-enforcement.worker.ts` (varredura diária) e por
+  // `isTenantLocked` (tenant-lockout.middleware.ts) como defesa em profundidade
+  // caso o worker ainda não tenha rodado. Nulo para tenants que nunca passaram
+  // pelo trial SaaS (ex.: criados diretamente via painel admin).
+  trialEndsAt                   DateTime?
+  // fa-w6-bl-no-offboarding-retention — timestamp exato em que o tenant entrou em
+  // SUSPENDED (por qualquer motivo: inadimplência definitiva ou trial expirado sem
+  // contratação), usado para calcular `purgeAt` abaixo. Limpo de volta a `null`
+  // sempre que o tenant é reativado (handlePaymentRecovered, dunning.service.ts) —
+  // uma reativação cancela qualquer expurgo de offboarding ainda pendente.
+  suspendedAt                   DateTime?
+  // Distingue POR QUE o tenant está SUSPENDED sem introduzir um novo valor em
+  // `TenantStatus` (que já é checado em dezenas de lugares — ver nota em
+  // `tenant-lockout.middleware.ts`): "BILLING_OVERDUE" | "SUBSCRIPTION_CANCELED" |
+  // "PAYMENT_REFUNDED" | "CHARGEBACK" | "TRIAL_EXPIRED". Apenas informativo (painel
+  // admin/auditoria) — nenhuma regra de bloqueio de acesso depende deste campo.
+  suspensionReason              String?
+  // Calculado no instante da suspensão (`suspendedAt` + TENANT_PURGE_GRACE_DAYS,
+  // padrão 90 dias — lib/tenant-purge.ts) — consultado por
+  // `workers/tenant-offboarding-purge.worker.ts` para decidir quando o tenant está
+  // elegível ao expurgo/anonimização de offboarding. Nunca recalculado
+  // retroativamente se a env var mudar depois da suspensão já ter ocorrido.
+  purgeAt                       DateTime?
+  // Gravado pelo PRÓPRIO `tenant-offboarding-purge.worker.ts` no instante em que o
+  // expurgo/anonimização de offboarding é efetivamente executado (nunca um "pedido"
+  // do titular — distinto de `DataDeletionRequest`, que é por `Client` individual
+  // e aprovado manualmente por um OWNER). Presença deste campo é o que marca o
+  // tenant como "já processado", impedindo reprocessamento na próxima varredura.
+  deletionRequestedAt           DateTime?
   // Perfil fiscal real (Capítulo 21) — determina o motor de cálculo usado em toda venda/NF.
   // Irrelevante para tenants PERSONAL (Capítulo 22), que nunca emitem documento fiscal.
   taxRegime                     TaxRegime    @default(SIMPLES_NACIONAL)
@@ -294,6 +343,7 @@ model Tenant {
   // (in-app, e-mail, push, WhatsApp/SMS) gerada por qualquer módulo do SaaS passa por
   // aqui, nunca por um canal paralelo direto.
   notifications                Notification[]
+  dunningMilestones             DunningMilestone[]
   notificationPreferences      NotificationPreference[]
   pushDeviceTokens             PushDeviceToken[]
   // Consentimento de Termos de Uso e Política de Privacidade (Capítulo 1.2.2/LGPD
@@ -331,6 +381,10 @@ model Tenant {
 
   @@index([status])
   @@index([parentTenantId])
+  // fa-w6-bl-no-offboarding-retention / fa-w6-bl-no-trial-expiry-enforcement —
+  // varreduras diárias filtram por status + um desses dois campos de data.
+  @@index([status, purgeAt])
+  @@index([status, trialEndsAt])
   @@map("tenants")
 }
 
@@ -1598,6 +1652,53 @@ model OsPhoto {
   @@map("os_photos")
 }
 
+// fa-w6-up-no-magic-byte-validation / fa-w6-up-presigned-size-not-reconciled /
+// fa-w6-up-missing-object-existence-check / fa-w6-up-no-malware-scanning —
+// antes, `presignObjectUpload` devolvia uma URL assinada de PUT e NUNCA MAIS o
+// backend conferia o que de fato chegou ao R2: nenhuma verificação de que o
+// objeto existe, de que o tamanho real bate com o declarado, nem de que os
+// primeiros bytes do arquivo (assinatura/"magic bytes") condizem com o
+// mimetype declarado pelo cliente — uma rota de domínio (ex.:
+// `POST /work-orders/:id/photos`) aceitava QUALQUER `storageKey` com o prefixo
+// certo, mesmo que o "upload" nunca tivesse ocorrido ou fosse um arquivo
+// malicioso disfarçado de imagem. `StorageObject` é o registro de rastreio:
+// criado em estado `PENDING` no momento do presign (`presignObjectUpload`),
+// só vira `CLEAN` depois que `POST /storage/uploads/finalize`
+// (`storage.routes.ts`) baixa os primeiros bytes reais do objeto no R2,
+// valida a assinatura binária contra o mimetype declarado e confirma via
+// `HeadObjectCommand` que o tamanho real bate com o declarado — do contrário
+// vira `REJECTED` e o objeto é apagado do bucket. Rotas de domínio que
+// persistem um `storageKey` recebido do cliente (ex.: `OsPhoto.storageKey`)
+// devem exigir `scanStatus = CLEAN` antes de aceitar o ponteiro — nunca
+// confiar num `storageKey` cujo registro não existe ou segue `PENDING`.
+// AV/antivírus completo (ex.: ClamAV) fica como follow-up documentado: exige
+// um serviço externo de scanning, fora do escopo deste sandbox sem
+// Docker/infra — a validação de assinatura binária + allowlist de
+// mimetype/extensão já fechada neste módulo é a mitigação primária contra
+// upload de executável/script disfarçado de mídia.
+enum StorageScanStatus {
+  PENDING // presign emitido, upload ainda não finalizado/validado
+  CLEAN // finalize confirmou existência + tamanho + assinatura binária compatíveis
+  REJECTED // finalize detectou incompatibilidade — objeto já apagado do bucket
+}
+
+model StorageObject {
+  id                String            @id @default(uuid())
+  tenantId          String
+  storageKey        String            @unique
+  category          String
+  mimeType          String
+  declaredSizeBytes Int
+  actualSizeBytes   Int?
+  scanStatus        StorageScanStatus @default(PENDING)
+  createdById       String?
+  createdAt         DateTime          @default(now())
+  finalizedAt       DateTime?
+
+  @@index([tenantId, scanStatus])
+  @@map("storage_objects")
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // VENDAS, CAIXA E ESTOQUE
 // ─────────────────────────────────────────────────────────────────────────
@@ -2261,6 +2362,13 @@ model PersonalTransaction {
   openFinanceExternalId String? // idempotência: evita duplicar a mesma transação em cada sincronização do Open Finance (Capítulo 22.5)
   createdAt             DateTime                @default(now())
   updatedAt             DateTime                @updatedAt
+  // fa-w6-di-hard-deletes-critical-entities — lançamento financeiro real (entra no
+  // cálculo de orçamento/fatura de cartão/Carnê-Leão em personal-tax-tools.routes.ts
+  // e personal-planning.routes.ts); um hard-delete apagaria o histórico usado por
+  // esses relatórios sem deixar rastro. `DELETE /personal/transactions/:id` agora só
+  // marca `deletedAt` (mesmo princípio de soft-delete de `Product.active`); toda
+  // leitura (`findMany`/`aggregate`/`groupBy`) deste modelo filtra `deletedAt: null`.
+  deletedAt              DateTime?
 
   tenant         Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   account        PersonalAccount            @relation(fields: [accountId], references: [id], onDelete: Cascade)
@@ -2637,6 +2745,61 @@ enum NotificationCategory {
   // cliente sem que o ERP tenha conseguido confirmar a transação após múltiplas
   // tentativas; alerta crítico para o lojista reconciliar manualmente.
   TEF_CONFIRMATION_FAILED
+}
+
+// fa-w6-bl-dunning-not-durable — antes, cada milestone da régua de dunning
+// (Capítulo 2.7.4) disparava a notificação de forma SÍNCRONA/inline
+// (`notifyTenantPaymentFailed`/`notifyTenant`, chamadas direto de
+// `dunning.service.ts`), com falha tratada só por `log.error` — se a chamada
+// falhasse (processo reiniciado entre o commit da transação financeira e a
+// chamada de notificação, exceção síncrona antes do enfileiramento do fan-out
+// externo, etc.), a notificação se perdia para sempre, sem nenhum retry.
+//
+// Este model é a "decisão de notificar" persistida de forma DURÁVEL — gravado
+// na MESMA transação Prisma que já muda o estado financeiro do tenant/assinatura
+// (dunning.service.ts), nunca depois/fora dela. O ENVIO de fato é feito por
+// `workers/dunning-milestone-dispatch.worker.ts`, consumindo
+// `QUEUE_NAMES.DUNNING_MILESTONE_DISPATCH` (lib/queue.ts) com o retry/backoff
+// automático já padrão do BullMQ neste repositório — nunca mais um único
+// try/catch que só loga. Se o próprio enfileiramento do job falhar (ex.: Redis
+// momentaneamente fora do ar logo após o commit), o milestone permanece
+// PENDING no banco e é reenfileirado pela varredura de reconciliação do mesmo
+// worker, nunca perdido silenciosamente.
+model DunningMilestone {
+  id             String                 @id @default(uuid())
+  tenantId       String
+  subscriptionId String
+  type           DunningMilestoneType
+  // Dados específicos do milestone necessários para montar o texto da notificação
+  // (ex.: { attempt, nextRetryAt } para PAYMENT_FAILED; { reason } para
+  // PAYMENT_REVERSED) — formato livre por `type`, nunca uma fonte de verdade
+  // paralela ao estado financeiro real em Subscription/Tenant.
+  payload        Json
+  status         DunningMilestoneStatus @default(PENDING)
+  // Propagado só para correlação de log no worker (mesmo padrão de requestId em
+  // Notification/NotifyTenantInput) — nunca usado em lógica de negócio.
+  requestId      String?
+  createdAt      DateTime               @default(now())
+  processedAt    DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Consultado pela varredura de reconciliação (milestones PENDING antigos o
+  // bastante para sugerir que o enfileiramento original falhou).
+  @@index([status, createdAt])
+  @@map("dunning_milestones")
+}
+
+enum DunningMilestoneType {
+  PAYMENT_FAILED
+  SUBSCRIPTION_CANCELED
+  PAYMENT_REVERSED
+}
+
+enum DunningMilestoneStatus {
+  PENDING
+  SENT
+  FAILED
 }
 
 model NotificationPreference {
@@ -3332,6 +3495,18 @@ model DatabaseBackupLog {
   errorMessage    String?
   triggeredBy     String // "cron" | platformAdminUserId (disparo manual)
   encryptionKeyId String? // identifica qual BACKUP_ENCRYPTION_KEY cifrou o arquivo (rotação futura)
+  // fa-w6-di-backup-not-pit-consistent — manifesto de contagem de linhas por
+  // modelo (`{ "Tenant": 42, "Sale": 10931, ... }`), preenchido ao final da leitura
+  // feita dentro da transação `REPEATABLE READ` do dump. Permite auditar, a
+  // qualquer momento no futuro, se um backup específico capturou o volume de dados
+  // esperado (ex.: comparar com o backup do dia anterior) sem precisar restaurá-lo.
+  modelRowCounts  Json?
+  // fa-w6-di-backup-no-restore-verification — preenchido só depois que o worker
+  // rebaixou o arquivo recém-enviado do R2, decifrou e conferiu que a contagem de
+  // linhas decodificada bate com `modelRowCounts`/`totalRows` lidos do banco. Um
+  // backup cujo arquivo final não pôde ser verificado NUNCA é marcado SUCCESS (ver
+  // `encrypted-database-backup.worker.ts`).
+  verifiedAt      DateTime?
 
   @@index([status, startedAt])
   @@map("database_backup_logs")
@@ -3971,6 +4146,12 @@ model TenantDataExportJob {
   // que `GET /data-export/:id/download` nunca tente presignar uma chave que já foi
   // removida do bucket.
   purgedAt            DateTime?
+  // fa-w6-di-export-purge-no-legal-hold — quando `true`, `data-retention-purge.worker.ts`
+  // NUNCA expurga o artefato ZIP deste job, mesmo depois do prazo de 30 dias (ex.:
+  // export preservado por ordem judicial/investigação de incidente/pedido do titular
+  // em disputa). Marcado manualmente por um OWNER/SUPER_ADMIN através de rota
+  // administrativa dedicada — nunca setado automaticamente pelo fluxo de exportação.
+  legalHold           Boolean          @default(false)
 
   tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   requestedBy User   @relation(fields: [requestedByUserId], references: [id])
@@ -4047,6 +4228,18 @@ model DataDeletionRequest {
   approvedByUserId  String?
   requestedAt       DateTime                  @default(now())
   processedAt       DateTime?
+  // fa-w6-di-lgpd-deletion-non-atomic — cursor de progresso (último `Client.id`
+  // já anonimizado, em ordem de `orderBy: { id: "asc" }`) persistido pelo worker a
+  // cada cliente processado. Permite que uma queda do processo (restart de
+  // deploy/OOM/crash) no meio de um tenant com milhares de clientes RETOME exatamente
+  // de onde parou (continua em `id > lastProcessedClientId`) em vez de reiniciar do
+  // zero (o que já seria seguro, pois `anonymizedClientPlaceholder` é idempotente,
+  // mas desperdiçaria trabalho) ou, pior, silenciosamente parar sem terminar.
+  lastProcessedClientId String?
+  // Quantos clientes já foram efetivamente anonimizados nesta execução — espelha
+  // `lastProcessedClientId` para fins de auditoria/painel (não é usado para decidir
+  // retomada, só para exibição).
+  anonymizedClientCount Int                     @default(0)
 
   tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   requestedBy User   @relation("DataDeletionRequestedBy", fields: [requestedByUserId], references: [id])

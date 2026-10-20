@@ -50,7 +50,7 @@ export async function chargeModuleActivation(tenantId: string, moduleCode: strin
     if (!module) return;
 
     if (subscription.provider === "stripe") {
-      const itemId = await addModuleToStripeSubscription(subscription.externalSubscriptionId, moduleCode, module.label, Number(module.monthlyPrice));
+      const itemId = await addModuleToStripeSubscription(tenantId, subscription.externalSubscriptionId, moduleCode, module.label, Number(module.monthlyPrice));
       await unscopedPrisma.tenantModule.update({
         where: { tenantId_moduleCode: { tenantId, moduleCode } },
         data: { stripeSubscriptionItemId: itemId },

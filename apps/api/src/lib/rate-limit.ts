@@ -37,3 +37,26 @@ export async function enforceRateLimit(key: string, maxAttempts: number, windowS
 export async function resetRateLimit(key: string): Promise<void> {
   await redis.del(key);
 }
+
+// fa-w6-up-no-upload-rate-limit — mesmo padrão atômico de `INCR_WITH_TTL_SCRIPT`,
+// porém somando `bytes` em vez de incrementar de 1 em 1 — usado para impor uma cota
+// de bytes/dia por tenant nos uploads de objeto (`storage.routes.ts`). O `EXPIRE`
+// só é reaplicado quando o total após o incremento é igual ao próprio incremento
+// (ou seja, a chave acabou de ser criada nesta chamada — primeira ocorrência dentro
+// da janela), mesmo critério de `INCR_WITH_TTL_SCRIPT` adaptado para `INCRBY`.
+const INCRBY_WITH_TTL_SCRIPT = `
+local total = redis.call("INCRBY", KEYS[1], ARGV[2])
+if total == tonumber(ARGV[2]) then
+  redis.call("EXPIRE", KEYS[1], ARGV[1])
+end
+return total
+`;
+
+export async function enforceByteQuota(key: string, bytes: number, maxBytes: number, windowSeconds: number): Promise<void> {
+  const total = Number(await redis.eval(INCRBY_WITH_TTL_SCRIPT, 1, key, windowSeconds, bytes));
+  if (total > maxBytes) {
+    throw new RateLimitExceededError(
+      `Cota de armazenamento excedida: limite de ${maxBytes} bytes a cada ${windowSeconds}s para esta chave.`,
+    );
+  }
+}

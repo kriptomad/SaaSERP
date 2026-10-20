@@ -105,6 +105,15 @@ const SENSITIVE_PATHS = [
   "*.iban",
   "bankAccount",
   "*.bankAccount",
+  // fa-w6-obs-asaas-error-body-leak — `AsaasApiError.responseBody` (apps/api/src/
+  // modules/billing/asaas.client.ts) carrega o corpo bruto da resposta de erro da
+  // Asaas, que pode ecoar CPF/CNPJ/dados de cartão enviados — nunca aparece na
+  // `message` do erro (ver `asaasRequest`), mas fica anexado como propriedade
+  // estruturada só para debug; redact cobre tanto `err.responseBody` (erro logado
+  // como `{ err }`, o padrão deste código) quanto `*.responseBody` (um nível
+  // aninhado, ex.: `{ error: { responseBody } }`).
+  "err.responseBody",
+  "*.responseBody",
 ];
 
 export const logger = pino({

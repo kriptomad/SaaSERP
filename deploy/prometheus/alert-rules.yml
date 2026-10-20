@@ -1,0 +1,155 @@
+# deploy/prometheus/alert-rules.yml
+# Fonte: fa-w6-obs-no-real-alerting — regras de alerta Prometheus para o
+# Filitech ERP (apps/api, HTTP + worker BullMQ). Nenhum Prometheus/Alertmanager
+# vive neste sandbox; este arquivo é o DELIVERABLE de configuração para ser
+# carregado por um Prometheus real em produção (ver `deploy/README.md`,
+# seção "Alerting" para o passo a passo de como ligar isto a um Alertmanager/
+# Grafana de verdade). As expressões assumem:
+#   - um job Prometheus chamado `filitech-api` fazendo scrape de `GET /metrics`
+#     (ver `apps/api/src/lib/metrics.ts`) em cada réplica da API;
+#   - as métricas customizadas expostas lá: `filitech_api_http_requests_total`
+#     (labels: method, route, status), `filitech_api_http_request_duration_seconds`
+#     (histograma, mesmas labels) e `filitech_api_bullmq_queue_jobs` (labels:
+#     queue, state — waiting/active/delayed/failed/paused);
+#   - opcionalmente, um `blackbox_exporter` (ou probe HTTP equivalente do
+#     provedor de monitoramento) fazendo probe de `GET /health` para o alerta
+#     "health endpoint 503" funcionar fim-a-fim mesmo quando o scrape direto de
+#     `/metrics` ainda responde (ex.: Postgres/Redis fora do ar, mas o processo
+#     Node em si está de pé) — ver nota de cada alerta abaixo.
+groups:
+  - name: filitech-api-availability
+    rules:
+      # "API down" — nenhum target do job `filitech-api` respondeu ao scrape por
+      # 2 minutos seguidos (`up` é a métrica sintética que todo Prometheus gera
+      # por target, não precisa ser exposta pela aplicação).
+      - alert: FilitechApiDown
+        expr: up{job="filitech-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instância da API Filitech fora do ar ({{ $labels.instance }})"
+          description: >-
+            O Prometheus não conseguiu fazer scrape de `/metrics` na instância
+            {{ $labels.instance }} do job filitech-api nos últimos 2 minutos.
+            Verificar processo (restartPolicy do railway.toml deveria já ter
+            reiniciado sozinho) e logs do orquestrador.
+
+      # "Health endpoint 503" — requer o probe via blackbox_exporter citado no
+      # cabeçalho (`probe_http_status_code`), já que um 503 de `/health` (ver
+      # server.ts: Postgres ou Redis "down") não impede o processo de responder
+      # ao scrape normal de `/metrics` — são dois sinais de saúde DIFERENTES
+      # (processo de pé vs. processo de pé mas incapaz de servir tráfego real).
+      - alert: FilitechApiHealthEndpointUnhealthy
+        expr: probe_http_status_code{job="filitech-api-health", instance=~".*"} == 503
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "/health retornando 503 ({{ $labels.instance }})"
+          description: >-
+            `/health` está respondendo 503 há 2+ minutos — Postgres e/ou Redis
+            indisponíveis para a API (ver payload de `buildHealthResult()` em
+            server.ts para qual dependência especificamente). Tráfego pode estar
+            sendo servido com erro para usuários reais.
+
+  - name: filitech-api-http-errors-latency
+    rules:
+      # Taxa elevada de 5xx — proporção de respostas 5xx sobre o total de
+      # requisições HTTP concluídas, por instância, numa janela de 5 minutos.
+      - alert: FilitechApiHighErrorRate
+        expr: >-
+          (
+            sum(rate(filitech_api_http_requests_total{status=~"5.."}[5m])) by (instance)
+            /
+            sum(rate(filitech_api_http_requests_total[5m])) by (instance)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Taxa de erro HTTP 5xx acima de 5% ({{ $labels.instance }})"
+          description: >-
+            Mais de 5% das respostas HTTP dos últimos 5 minutos foram 5xx na
+            instância {{ $labels.instance }}. Investigar logs estruturados
+            (pino, `level: "error"`/`"fatal"`) e Sentry para a causa raiz.
+
+      # Latência p95 elevada — histogram_quantile sobre o histograma de duração
+      # de requisição já exposto pela aplicação.
+      - alert: FilitechApiHighLatencyP95
+        expr: >-
+          histogram_quantile(
+            0.95,
+            sum(rate(filitech_api_http_request_duration_seconds_bucket[5m])) by (le, instance)
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Latência p95 acima de 2s ({{ $labels.instance }})"
+          description: >-
+            O p95 de duração das requisições HTTP dos últimos 5 minutos passou
+            de 2 segundos na instância {{ $labels.instance }}. Pode indicar
+            Postgres/Redis lento, N+1 de query ou saturação de CPU/event loop.
+
+  - name: filitech-queue-and-worker-health
+    rules:
+      # Profundidade de fila acima do limite — soma de jobs em espera/atrasados
+      # por fila; limite (200) é um ponto de partida conservador, ajustar por
+      # fila conforme volume real observado em produção (ex.: filas de
+      # notificação toleram menos atraso que filas de relatório agendado).
+      - alert: FilitechBullmqQueueBacklogHigh
+        expr: >-
+          sum(filitech_api_bullmq_queue_jobs{state=~"waiting|delayed"}) by (queue) > 200
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fila {{ $labels.queue }} com mais de 200 jobs pendentes"
+          description: >-
+            A fila BullMQ {{ $labels.queue }} está com `waiting + delayed` acima
+            de 200 jobs por 10+ minutos — sinal de produtor rápido demais para o
+            consumidor, ou (ver alerta `FilitechWorkerLikelyDown` abaixo) do
+            worker inteiro estar fora do ar.
+
+      # Jobs falhados acumulando sem serem reprocessados/limpos — falhas
+      # terminais (ver worker.ts, `isTerminalFailure`) persistem no Redis até
+      # `removeOnFail` podar; um crescimento sustentado indica uma falha
+      # sistemática (ex.: integração externa fora do ar) e não casos isolados.
+      - alert: FilitechBullmqFailedJobsGrowing
+        expr: >-
+          sum(filitech_api_bullmq_queue_jobs{state="failed"}) by (queue) > 20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fila {{ $labels.queue }} com mais de 20 jobs falhados acumulados"
+          description: >-
+            A fila {{ $labels.queue }} acumulou mais de 20 jobs em estado
+            `failed` por 15+ minutos. Ver log `fatal`/`alert: true` emitido pelo
+            worker (worker.ts, listener `failed`) e Sentry para a causa raiz.
+
+      # "Worker process down" — o worker BullMQ (apps/api/src/worker.ts) NÃO
+      # expõe um endpoint HTTP/`/metrics` próprio (processo puramente
+      # consumidor de fila, sem servidor HTTP) e portanto não tem um alvo
+      # Prometheus dedicado para gerar um `up{job="filitech-worker"}` direto.
+      # Proxy adotado: jobs em `active` cai para zero enquanto `waiting` segue
+      # crescendo é o sinal observável de "ninguém está consumindo a fila" —
+      # equivalente funcional a "worker down" sem exigir expor um endpoint HTTP
+      # novo num processo que hoje é deliberadamente só-fila (ver recomendação
+      # de melhoria futura em deploy/README.md, seção Alerting).
+      - alert: FilitechWorkerLikelyDown
+        expr: >-
+          sum(filitech_api_bullmq_queue_jobs{state="active"}) == 0
+          and
+          sum(filitech_api_bullmq_queue_jobs{state="waiting"}) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Nenhum job BullMQ sendo processado com fila(s) acumulando"
+          description: >-
+            Há 10+ minutos nenhuma fila tem jobs em `active` enquanto existem
+            jobs em `waiting` — indício forte de que o processo worker
+            (`npm run worker` / `APP_ROLE=worker`) está fora do ar ou travado.
+            Verificar processo/réplica do worker no orquestrador.

@@ -22,14 +22,14 @@ const presignUploadSchema = z.object({
 });
 
 dataImportRouter.post("/data-import/presign-upload", requireAuth, async (req: Request, res: Response) => {
-  const { tenantId } = req.session!;
+  const { tenantId, userId } = req.session!;
   const parsed = presignUploadSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, data: null, error: { code: "VALIDATION_ERROR", message: "Dados inválidos.", details: parsed.error.flatten() } });
   }
 
   try {
-    const result = await presignObjectUpload({ tenantId, category: "data-import-source", ...parsed.data });
+    const result = await presignObjectUpload({ tenantId, userId, category: "data-import-source", ...parsed.data });
     return res.status(201).json({ success: true, data: result, error: null });
   } catch (error) {
     return res.status(422).json({ success: false, data: null, error: { code: "PRESIGN_FAILED", message: (error as Error).message } });

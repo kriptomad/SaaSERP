@@ -5,6 +5,13 @@
 // o mesmo critério usado pelo medidor de força visual no frontend
 // (apps/web/src/shared/validation/password-strength.ts), para nunca divergir em
 // dois lugares o que conta como "forte o suficiente para ser aceita".
+//
+// CORREÇÃO DE AUDITORIA (fa-w6-sess-password-policy-no-breach-check): comprimento
+// + caractere especial sozinhos ainda aceitavam senhas triviais/vazadas conhecidas
+// (ex.: "Password1!"). Ver common-passwords.ts para a justificativa de usar uma
+// lista local em vez de uma checagem via API externa (HIBP) no hot-path de auth.
+import { isCommonPassword } from "./common-passwords";
+
 const SPECIAL_CHAR_REGEX = /[!@#$%^&*(),.?":{}|<>_\-+=~`[\]\\/;']/;
 
 export interface PasswordPolicyResult {
@@ -20,6 +27,9 @@ export function validatePasswordPolicy(password: string): PasswordPolicyResult {
   }
   if (!SPECIAL_CHAR_REGEX.test(password)) {
     errors.push("A senha deve conter pelo menos 1 caractere especial (ex.: ! @ # $ % & *).");
+  }
+  if (isCommonPassword(password)) {
+    errors.push("Esta senha é muito comum/fácil de adivinhar. Escolha uma senha mais exclusiva.");
   }
   return { valid: errors.length === 0, errors };
 }

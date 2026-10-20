@@ -41,8 +41,16 @@ dataExportRouter.post("/data-export", requireAuth, async (req: Request, res: Res
 
 dataExportRouter.get("/data-export", requireAuth, async (req: Request, res: Response) => {
   const { tenantId } = req.session!;
-  const jobs = await prisma.tenantDataExportJob.findMany({ where: { tenantId }, orderBy: { createdAt: "desc" } });
-  return res.json({ success: true, data: jobs, error: null });
+  // CORREÇÃO DE AUDITORIA (fa-w6-api-unbounded-lists-batch): `findMany` sem
+  // skip/take/count devolvia TODOS os jobs de exportação do tenant de uma vez.
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? "50"), 10) || 50));
+  const where = { tenantId };
+  const [jobs, total] = await Promise.all([
+    prisma.tenantDataExportJob.findMany({ where, orderBy: { createdAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
+    prisma.tenantDataExportJob.count({ where }),
+  ]);
+  return res.json({ success: true, data: jobs, error: null, meta: { page, pageSize, total } });
 });
 
 dataExportRouter.get("/data-export/:id/download", requireAuth, async (req: Request, res: Response) => {
