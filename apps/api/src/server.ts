@@ -10,6 +10,7 @@ import { logger } from "./lib/logger";
 import { initSentry, Sentry } from "./lib/sentry";
 import { installProcessCrashGuards } from "./lib/process-guards";
 import { requestIdMiddleware } from "./middlewares/request-id.middleware";
+import { metricsMiddleware, metricsRouter } from "./lib/metrics";
 import { authMiddleware, requireAuth, impersonationAuditMiddleware } from "./middlewares/auth.middleware";
 import { tenantContextMiddleware } from "./middlewares/tenant-context.middleware";
 import { tenantLockoutMiddleware } from "./middlewares/tenant-lockout.middleware";
@@ -112,6 +113,16 @@ const app = express();
 // requisição (inclusive os webhooks montados antes do express.json() abaixo)
 // precisa ter `req.requestId`/`req.log` disponíveis desde a primeira linha de log.
 app.use(requestIdMiddleware);
+
+// fa-w4-obs-no-metrics-endpoint: instrumenta TODA requisição (inclusive webhooks e
+// rotas públicas) antes de qualquer outro middleware de negócio — precisa capturar
+// a duração real ponta a ponta, incluindo helmet/cors/body-parsing abaixo.
+app.use(metricsMiddleware);
+// Montado cedo e fora de qualquer auth de tenant/usuário de propósito: é consumido
+// por um scraper Prometheus (sidecar/agente externo), não por um usuário logado do
+// Filitech ERP — a própria rota já exige `METRICS_TOKEN` em produção (ver
+// lib/metrics.ts) em vez do JWT de sessão.
+app.use(metricsRouter);
 
 // Railway e Vercel terminam TLS/proxy antes da aplicação — sem isso, `req.ip`
 // retornaria o IP interno do proxy reverso, nunca o IP real do cliente, quebrando
